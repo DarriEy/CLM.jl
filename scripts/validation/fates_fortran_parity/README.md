@@ -818,38 +818,106 @@ of *why* it is unresolved rather than unexamined.
 
 ## 3. #227 — this one IS compensating for something already fixed
 
-Unlike #197, #227's premise can be tested directly, because "prescription OFF" is
-already a configured site (`krycklan_baseline`, `soil_h2o = nothing`).
+**RETIRED (#278, 2026-07-20).** D4's recommendation was carried out, but only after
+re-measuring it on a **controlled A/B** that D4 did not run — and that A/B both
+strengthens the verdict and **corrects one of D4's two arguments for it.**
 
-| run | #227's report (then) | current `main` (now) |
-|---|---|---|
-| `krycklan_baseline` (prescription **OFF**) | cold `749.6` → **`0`**, monotone collapse; `btran = 0` every growing-season day | cold **`2549`** → `4040`; min `2008`; **no collapse, no boom-bust** (both checks PASS at day 235) |
-| `krycklan_screened` (prescription **ON**) | carbon `749.6` → `1990`, 10/10 pass | 10/10 pass over the full 365 days |
+### 3a. D4's comparison was confounded; the clean A/B is same-site ± prime
 
-Two things changed, and both matter:
+D4 compared `krycklan_baseline` (prime OFF) against `krycklan_screened` (prime ON).
+Those two sites **differ in the PFT set as well as the prime** — baseline is all-14-PFT,
+screened is the boreal set `{2,3,6}` — so the comparison cannot isolate the prescription.
+`FATES_SOIL_H2O=off` was added to disable the prime on a site that carries one, giving a
+true one-variable A/B. All rows below are **the same commit, the same site, the same PFT
+set, 365 days**, differing only in the prime:
 
-1. **The collapse is gone without the prescription.** Carbon *rises* 2549 → 4040 and is
-   still rising when the run stops. #227's entire justification was a monotone decline
-   to zero. It does not happen any more.
-2. **The cold start itself is different** — `749.6` then vs `2549` now. #227 was
-   measured on a materially different configuration. That is consistent with the driver
-   defaults that moved since (`use_bedrock` #251/#252 above all, plus #259, #225, #265,
-   #267-#269, #273): #227's root cause was a bone-dry root zone, and `use_bedrock`
-   truncates the soil column, which is exactly the mechanism #251/#252 corrected for the
-   Bow window. `fates_multisite_validation.jl` **inherits** those defaults rather than
-   setting them, so it was silently re-specified by each of those merges.
+| `krycklan_screened` | cold | final | min | peak | 2nd-half band | maxdbh | births/deaths | checks |
+|---|---|---|---|---|---|---|---|---|
+| prime **ON** (#227 default) | `749.6` | `1986` | `511.4` | `2569` | `[1194, 2569]` | `2.225 cm` | 44 / 13 | **10/10 PASS** |
+| prime **OFF** (`FATES_SOIL_H2O=off`) | `749.6` | `1737` | `512.6` | `2341` | `[1169, 2341]` | `2.135 cm` | 40 / 11 | **10/10 PASS** |
 
-**Verdict on #227: it is a compensating workaround for a defect that has since been
-fixed elsewhere.** It is harness-only (no `src/` change) and gated on `SiteCfg.soil_h2o`,
-so it distorts nothing by sitting there — but it should be **retired, or demoted to an
-explicitly-labelled diagnostic**, and the boreal band re-baselined from the unprimed run.
-The Fortran oracle D3 asked for (a boreal single-point reference cold-started identically
-with the prescription off) is no longer the first thing needed: the artifact it was meant
-to measure has already stopped reproducing.
+Both arms ran **364/365 days**, carbon conserved 364/364.
 
-Caveat: the baseline run stopped at day 235 of 365 on the same fatal `errlon` (§4), so
-this is 235 days of evidence, not a full year. It is nonetheless decisive against a
-*monotone collapse from day 1*, which is what #227 described.
+### 3b. The collapse is gone — confirmed independently, and on a *completing* run
+
+**#227's premise no longer reproduces.** Its stated justification was a monotone
+`749.6 → 0` with `btran = 0` every growing-season day, on exactly this configuration.
+With the prime off, that configuration now runs a full year and passes every check,
+carbon `749.6 → 1737`. This is stronger evidence than D4 had: D4's OFF arm died at day
+235 on the §4 `errlon`, so it could only argue "not a monotone collapse from day 1",
+whereas the screened OFF arm **completes the year**.
+
+D4's `krycklan_baseline` measurement also reproduces exactly — cold `2549` → `4040`,
+min `2008`, no-collapse and no-boom-bust both PASS, dying at **day 235** on the same
+fatal `errlon = -351 W/m2` at `p=7` (§4).
+
+### 3c. Correction to D4: the cold start did NOT move
+
+D4's second argument was that "the cold start itself is different — `749.6` then vs
+`2549` now", inferring #227 had been measured on a materially different configuration.
+**That inference is wrong, and it is an artifact of the confound in 3a.**
+`krycklan_screened` still cold-starts at **exactly `749.6`**, identical to #227's report;
+the `2549` is simply the all-14-PFT `krycklan_baseline` cold start. The two numbers are
+two different PFT sets, not two different eras. There is no evidence here of cold-start
+drift, and the `use_bedrock` (#251/#252) attribution built on it is **unsupported** —
+it may still be the true cause of the collapse's disappearance, but this measurement
+does not show it.
+
+### 3d. It was NOT inert — it was actively distorting a now-correct model
+
+The question that decides *retire* vs *leave it*: with the underlying defect fixed, does
+enabling the prescription still change anything? **Yes.** Same site, same PFT set:
+
+| quantity | prime ON | prime OFF | effect of the prime |
+|---|---|---|---|
+| final carbon | `1986` | `1737` | **+14.3 %** |
+| peak carbon | `2569` | `2341` | +9.7 % |
+| final maxdbh | `2.225 cm` | `2.135 cm` | +4.2 % |
+| elai max | `1.102` | `1.084` | +1.7 % |
+| births / deaths | 44 / 13 | 40 / 11 | +10 % / +18 % |
+
+So it is **dead weight in the worst way**: not harmless dead code, but a live water
+injection inflating boreal carbon by ~14 % on a model that no longer needs correcting.
+Note that **carbon conservation held 364/364 in both arms** — the balance check is
+completely blind to this, exactly the `conservation-is-not-accuracy` class. A green
+balance was never evidence for #227 and is not evidence against it.
+
+### 3e. What was done
+
+- `SiteCfg.soil_h2o` is now `nothing` for **every** site — `krycklan_screened`'s `0.75`
+  removed. No site is primed by default.
+- `prime_fates_soil_moisture!` is **demoted, not deleted** (docs still reference it, and
+  it has a legitimate diagnostic use: prime the soil, and if a symptom survives, water is
+  not the lever). It is opt-in via `FATES_SOIL_H2O=<frac>` — `0.75` restores #227's
+  setting — and prints a multi-line `!! DIAGNOSTIC ... NOT a validated config` banner
+  whenever it activates, quoting the +14 % distortion.
+- **Default path confirmed unaffected**: re-running `krycklan_screened` post-retirement
+  with no env override reproduces the explicit-`off` arm on every reported statistic
+  (`749.6 → 1737`, band `[1169, 2341]`, maxdbh `2.135`, 40/11, 10/10 PASS).
+- **No regression on unprimed sites**: `hubbardbrook_screened` `1784 → 2895`, band
+  `[2049, 3159]`, 364/364 balance, 10/10 PASS.
+- No test fixtures encoded the boreal numbers (`grep` over `test/` finds no Krycklan
+  FATES expectation), so re-baselining is harness + docs only.
+
+### 3f. Re-baselined boreal band
+
+The boreal reference for `krycklan_screened` (365 d, un-primed) is now:
+
+```
+cold 749.6 → final 1737   min 512.6   peak 2341   2nd-half band [1169, 2341] (hi/lo 2.00)
+ncoh [3, 33]   npatch max 2   births 40 / deaths 11   elai [0.100, 1.084]   maxdbh 2.135 cm
+364/365 days, carbon conserved 364/364, 10/10 checks PASS
+```
+
+The configured `[200, 6000]` biome band still holds and is left unchanged. The Fortran
+oracle D3 asked for is still not the first need — the artifact it was meant to measure
+has stopped reproducing.
+
+**Scope limit:** this is a 365-day result. Multi-year FATES remains broken on `main`
+(§4; root-caused in PR #280 — filter masks built once from surfdata and never rebuilt
+after FATES daily dynamics), so #227's 1460-day claims are not re-measurable and are not
+re-measured here. Pre-fix multi-year boreal numbers are additionally suspect because
+`fates_longhorizon.jl` used to freeze on stale Dec-31 forcing after year one.
 
 ## 4. The actual blocker: a fatal longwave balance error kills EVERY multi-year FATES run
 
@@ -940,9 +1008,16 @@ SYMFLUENCE_DATA=$SD FATES_NDAYS=1460 FATES_BIOGEOG=1  julia +1.12 --project=. sc
 # add FATES_SOFT_BALANCE=1 to run past the fatal errlon (diagnostic only —
 # absolute carbon is NOT trustworthy with a known-open energy balance)
 
-# #227 both arms (Krycklan)
+# #227 — the CONTROLLED A/B (#278): same site, same PFT set, prime the only variable.
+# (The krycklan_baseline-vs-krycklan_screened pair D4 used is confounded — it also
+#  changes the PFT set. See §3a.)
+SYMFLUENCE_DATA=$SD SITE=krycklan_screened FATES_NDAYS=365 \
+    FATES_SOIL_H2O=0.75 julia +1.12 --project=. scripts/fates_multisite_validation.jl  # prime ON (#227)
+SYMFLUENCE_DATA=$SD SITE=krycklan_screened FATES_NDAYS=365 \
+    julia +1.12 --project=. scripts/fates_multisite_validation.jl                      # prime OFF (default now)
+
+# D4's original (confounded) pair, kept because §3b/§4 quote its numbers
 SYMFLUENCE_DATA=$SD SITE=krycklan_baseline FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_multisite_validation.jl
-SYMFLUENCE_DATA=$SD SITE=krycklan_screened FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_multisite_validation.jl
 ```
 
 **Harness trap found while doing this:** `fates_multisite_validation.jl` **hardcoded**
