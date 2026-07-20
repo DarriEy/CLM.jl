@@ -267,4 +267,67 @@ using CLM
         @test CLM.ReceiveParams!(sp, fp) === nothing
         @test isa(CLM.FatesSynchronizedParamsInst, CLM.FatesSynchronizedParamsType)
     end
+
+    # ---------------------------------------------------------------------
+    # The running-mean DEFINITION globals must be built from the HOST TIMESTEP.
+    #
+    # Fortran FatesInterfaceMod.F90:1041-1047 defines every rmean_def with
+    # `up_period = hlm_stepsize` and derives `n_mem = nint(mem_period/up_period)`.
+    # `InitTimeAveragingGlobals()` was ported and then never called, so patches fell
+    # back to hardcoded 1800 s definitions: under a dtime=3600 host the "24-hour"
+    # fixed window spanned 48 HOURS, `tveg24` advanced only every second day, and
+    # `vegtemp_memory`'s unfilled 0.0 slots counted as cold days -- firing a spurious
+    # cold leaf-off on every cold-deciduous PFT in mid-July (D3).
+    #
+    # These assert the WIRING *and* a non-no-op body: that the window LENGTH IN TIME
+    # is one day at whatever dtime the host runs, which is the property that broke.
+    # ---------------------------------------------------------------------
+    @testset "InitTimeAveragingGlobals is wired to the host timestep" begin
+        # InitTimeAveragingGlobals reads the parameter-file timescales for the EMA
+        # definitions, so give them finite values (this standalone unit-test file
+        # never loads a FATES parameter file -- ed_params() returns fates_unset_r8).
+        # The `fixed_24hr`/`ema_24hr` windows below depend only on sec_per_day + dt.
+        let ep = CLM.ed_params()
+            ep.photo_temp_acclim_timescale  = 30.0    # days
+            ep.photo_temp_acclim_thome_time = 1.0     # years
+            ep.sdlng_emerg_h2o_timescale    = 15.0    # days
+            ep.sdlng_mort_par_timescale     = 15.0    # days
+            ep.sdlng2sap_par_timescale      = 73.0    # days
+            ep.sdlng_mdd_timescale          = 15.0    # days
+        end
+
+        for dt in (1800.0, 3600.0, 900.0)
+            CLM.hlm_stepsize[] = dt
+            CLM.InitTimeAveragingGlobals()
+
+            # The window must span exactly ONE DAY of model time, not a fixed
+            # number of samples. This is the assertion that fails on the bug.
+            @test CLM.fixed_24hr.up_period == dt
+            @test CLM.fixed_24hr.n_mem * CLM.fixed_24hr.up_period == CLM.sec_per_day
+            @test CLM.fixed_24hr.n_mem == round(Int, CLM.sec_per_day / dt)
+            @test CLM.fixed_24hr.method == CLM.fixed_window
+
+            @test CLM.ema_24hr.up_period == dt
+            @test CLM.ema_24hr.n_mem * CLM.ema_24hr.up_period == CLM.sec_per_day
+
+            # The parameter-timescale means are also stepped at dtime, not daily.
+            for d in (CLM.ema_lpa, CLM.ema_longterm, CLM.ema_sdlng_emerg_h2o,
+                      CLM.ema_sdlng_mort_par, CLM.ema_sdlng2sap_par, CLM.ema_sdlng_mdd)
+                @test d.up_period == dt
+                @test d.n_mem > 0
+            end
+        end
+
+        # A patch initialized after FATES init must USE those globals -- not the
+        # module-local `_patch_*` fallbacks. (`_rmdef` selects on n_mem > 0.)
+        CLM.hlm_stepsize[] = 3600.0
+        CLM.InitTimeAveragingGlobals()
+        @test CLM._rmdef(CLM.fixed_24hr, CLM._patch_fixed_24hr) === CLM.fixed_24hr
+        @test CLM.fixed_24hr.n_mem == 24            # 24 x 3600 s = one day
+        @test CLM._patch_fixed_24hr.n_mem == 48     # the 1800 s fallback, unchanged
+
+        # ...and a caller that never ran FATES init still gets a usable definition.
+        undefined = CLM.rmean_def_type()
+        @test CLM._rmdef(undefined, CLM._patch_fixed_24hr) === CLM._patch_fixed_24hr
+    end
 end

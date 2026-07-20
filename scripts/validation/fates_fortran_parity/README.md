@@ -574,3 +574,167 @@ USE_BEDROCK=false julia +1.12 --project=. scripts/soil_budget_probe.jl 480
 #   bash scripts/validation/fates_fortran_parity/setup_case.sh   (SKIP_BUILD=1 to reuse)
 #   -> writes soil_budget_fortran.txt in the run dir
 ```
+
+---
+
+# D3 (2026-07-19): full flag audit — harness vs. reference `lnd_in`, flag by flag
+
+Several CLM driver defaults moved in the days after #247 was measured (#252
+`use_bedrock`, #259 `use_aquifer_layer`, #225 `h2osfcflag`, #265
+`create_crop_landunit`, #267–#269 `use_luna`, #273 `use_hydrstress`). Because
+`scripts/fates_fortran_parity.jl::build()` **inherits** most of them rather than
+setting them, every one of those moves silently re-specifies this harness. A
+namelist mismatch of exactly this kind has been the actual cause 8 times in this
+repo (#233, #240, #243, #248, #251/#252 …), so the audit is run **before** any
+number is trusted.
+
+Reference = `<run dir>/lnd_in` from the surviving `fates_parity_1pt` case
+(`I2000Clm50FatesRs`, CLM `build-namelist`). Julia = the flags actually resolved by
+`clm_initialize!(use_fates=true, use_bedrock=false)` as `build()` calls it, read back
+out of `varctl` / `SoilHydrologyData` after init.
+
+| flag | Fortran `lnd_in` | Julia (resolved) | verdict |
+|---|---|---|---|
+| `use_fates` | `.true.` | `true` | match |
+| `use_cn` | `.false.` | `false` | match |
+| `use_crop` | `.false.` | `false` | match |
+| `create_crop_landunit` | `.false.` | `false` | match — `clm_initialize.jl:159` sets `!use_fates`, so #265 lands on the correct side here |
+| `use_bedrock` | `.false.` | `false` | match — set explicitly by `build()` (#251/#252); with #252's conditional default (`use_fates` ⇒ `.false.`) the explicit pass is now belt-and-braces |
+| `use_aquifer_layer` | derived `.false.` (`lower_boundary_condition = 2` = `bc_zero_flux`; `SoilWaterMovementMod.F90:221-236`) | `false` (#259) | match |
+| `h2osfcflag` | not in `lnd_in` ⇒ CTSM default `1` (`SoilHydrologyType.F90:339`) | `1` (#225) | match |
+| `use_luna` | `.false.` | `false` | match — CTSM `endrun`s on LUNA+FATES (`controlMod.F90:505`), mirrored at `control.jl:104`; #267's `nothing` default resolves to `false` under FATES |
+| `use_hydrstress` | `.false.` | `false` | match — also mutually exclusive with FATES (`control.jl:102`) |
+| `use_fun` | `.false.` | n/a (no `varctl` field; FATES path never sets `bgc_vegetation.config.use_fun`) | match by construction |
+| `use_nitrif_denitrif` | `.true.` | `true` | match (inert at `use_cn=false`) |
+| `use_subgrid_fluxes` | `.true.` | `true` | match |
+| `irrigate` | `.false.` | `false` | match |
+| `use_cndv` / `use_c13` / `use_c14` | `.false.` | `false` | match |
+| all 13 `use_fates_*` sub-flags | `.false.` (incl. `fixed_biogeog`, `nocomp`, `sp`, `planthydro`, `cohort_age_tracking`, `tree_damage`, `ed_st3`, `ed_prescribed_phys`, `inventory_init`, `luh`, `lupft`, `potentialveg`) | all `false` | match — in particular `use_fates_fixed_biogeog=.false.` confirms the reference is the **unscreened** 14-PFT case #197 is *not* covered by |
+| `use_lch4` | `.false.` | `varctl.use_lch4 = true` **(≠)**, but `CLMDriverConfig.use_lch4 = false` | **benign, latent trap** — see below |
+
+**Verdict: no active mismatch.** The one discrepancy is cosmetic *on this path* but is
+a real latent trap worth recording: `clm_initialize!`'s kwarg default is
+`use_lch4=false` and it is what drives allocation and `CLMDriverConfig`, but the
+kwarg is **never written back to the `varctl` global**, which keeps its own
+independent default of `true` (`varctl.jl:110`). Nothing on the FATES path reads
+`varctl.use_lch4` (only `lake_temperature.jl:1158` and `control.jl`'s validator do,
+and this site has no lake column), so the 20-day comparison is unaffected — but any
+future harness that reads the global instead of the config would silently run a
+different model. Same class as #252/#259: a struct default that is CTSM's *code
+fallback* rather than its *namelist* value.
+
+---
+
+# D3 (2026-07-19): the 20-day comparison RE-RUN on the corrected footing
+
+#247 measured the 20-day divergence with the harness running `use_bedrock=true`
+against a reference that runs `.false.` — the mismatch #251/#252 then found and fixed.
+This section re-measures the same 480-step window with the harness now matched
+(flag-audited above, no active mismatch), against the **same** surviving Fortran
+reference dump (`<run dir>/fates_pdump_fortran.txt`, `stop_n = 480`).
+
+```bash
+FATES_PARITY_STEPS=480 julia +1.12 --project=. scripts/fates_fortran_parity.jl \
+    compare <run dir>/fates_pdump_fortran.txt
+```
+
+## Result: the over-drying is GONE and the growth stall went with it
+
+Site state at phase 18 (`updatesite`, end of each daily step), one row per day:
+
+| day | C julia | C fortran | relC | dbh julia | dbh fortran | relDBH | h2ovol1 J/F | ncoh J/F |
+|---|---|---|---|---|---|---|---|---|
+| 1  | 2548.10 | 2547.88 | +8.3e-05 | 1.8848 | 1.8848 | 0.0 | 0.3995 / 0.3979 | 14/14 |
+| 5  | 2605.83 | 2600.47 | +2.1e-03 | 1.8867 | 1.8865 | +9.5e-05 | 0.3530 / 0.3538 | 44/45 |
+| 10 | 2691.97 | 2683.57 | +3.1e-03 | 1.8893 | 1.8891 | +1.4e-04 | 0.3610 / 0.3612 | 50/50 |
+| 11 | 2558.50 | 2703.25 | **−5.4e-02** | 1.8899 | 1.8897 | +1.4e-04 | 0.3476 / 0.3475 | **43/50** |
+| 15 | 2576.87 | 2782.33 | −7.4e-02 | 2.0507 | 2.0474 | +1.6e-03 | 0.3615 / 0.3576 | 45/53 |
+| 20 | 2602.02 | 2888.45 | −9.9e-02 | 2.4888 | 2.5199 | **−1.2e-02** | 0.3314 / 0.3198 | 45/57 |
+
+Against #247's numbers (which stopped at day 19):
+
+| quantity | #247 (bedrock mismatch) | D3 (corrected) | verdict |
+|---|---|---|---|
+| `h2ovol1`, days 1–20 | J **0.11–0.14** vs F 0.32–0.34 (3× dry) | J 0.324–0.400 vs F 0.320–0.422, tracking to **~0.003–0.01** | **CLOSED** |
+| `maxdbh` day 19 | 1.9754 vs 2.5199 → **−22 %** | 2.3870 vs 2.4127 → **−1.1 %** | **CLOSED (20× better)** — the port now *enters* the day-13 vigorous-growth phase (1.89 → 2.49) instead of stalling |
+| `btran_ft` days 11–13 | J collapses to 0.0, F stays 1.0 | no collapse | **CLOSED** |
+| site carbon day 19 | −5.5 % | **−9.4 %** | **SURVIVES, and is a different mechanism** |
+
+So D2's fix is confirmed end-to-end: the host over-drying, the `btran_ft` collapse and
+the stature-growth stall were all one `use_bedrock` artefact, and with it gone the port
+tracks Fortran's dbh trajectory to ~1 %. The carbon gap, however, did **not** close —
+it got *worse*, which is the tell that it was never the same bug.
+
+## The surviving carbon gap, attributed: a **dead running-mean wiring** in the port
+
+Phase attribution (the #217 template) localised it in one step. Site carbon by phase
+on the day it breaks (day 11 = step 241) versus the day before:
+
+| phase | day 10 J / F | day 11 J / F |
+|---|---|---|
+| 10 `dyn_in` | 2673.26 / 2664.96 | 2691.97 / 2683.57 |
+| 11 `phenology` | 2673.26 / 2664.96 | **2537.27** / 2683.57 |
+| 13 `integrate` | 2692.05 / 2683.66 | 2558.59 / 2703.34 |
+| 15 `cohortfuse` (ncoh) | 50 / 50 | **43** / 50 |
+
+The entire loss appears **inside `phenology`**, where Fortran is a no-op. Cohort dumps
+show why: on 11 July the port flips `status` 2 → 1 and zeroes `leafc` on every
+**cold-deciduous** PFT (3, 6, 11) — a mid-summer leaf-off Fortran never performs.
+
+### Root cause: `InitTimeAveragingGlobals()` was ported and never called
+
+Instrumenting the site phenology state (`scripts/` probe, `vegtemp_memory` / `ncolddays`
+/ `cstatus` per day) showed `tveg24` advancing **only every second day** — each daily
+`phenology` call saw the same 24-hour mean twice, so `vegtemp_memory` filled at half
+rate and its still-**uninitialised 0.0 slots counted as cold days** (`0.0 <
+phen_coldtemp = 7.5`). On day 11 — the first day the `model_day > num_vegtemp_mem = 10`
+gate opens — `ncolddays = 6 > ncolddayslim = 5` and the cold leaf-off fired:
+
+```
+        pre-fix           post-fix
+day   tveg24  ncold     tveg24  ncold
+  1   15.000    10      15.000    10
+  3    3.993     8       5.152     9
+  5    7.451     8       7.900     9
+  7    6.692     8       7.700     8
+  9   12.359     8      12.383     6
+ 11   11.887     6 -> LEAF OFF    13.388  4  (no leaf-off)
+```
+(the pre-fix `tveg24` column repeats each value for two consecutive days — the tell)
+
+Fortran `FatesInterfaceMod.F90:1041-1047` defines every running-mean with
+**`up_period = hlm_stepsize`**, the host's actual timestep, and derives
+`n_mem = nint(mem_period/up_period)`. The port has all of this — `hlm_stepsize` and
+`InitTimeAveragingGlobals()` in `FatesInterfaceMod.jl` — and **neither was ever
+called or consumed anywhere in `src/`**. Patches instead used the `_patch_*`
+fallbacks in `FatesPatchMod.jl`, which hardcode `up_period = 1800 s, n_mem = 48`.
+On the reference case's `dtime = 3600 s` that is a **48-HOUR "24-hour" window**.
+
+This is the `dead-initcold-systemic` class: ported, correct, never wired. The
+source comment even advertised it ("not yet ported… can be re-pointed to the real
+definitions"), and the harness ran for the port's whole life on the stub.
+
+**Fix** (`fates(rmean)`): `clm_fates_init!` takes `dtime`, sets `hlm_stepsize[]` and
+calls `InitTimeAveragingGlobals()`; `InitRunningMeans!` selects the defined global
+via `_rmdef`, falling back to the `_patch_*` constant only when FATES init never ran
+(unit-test fixtures), so no fixture changes behaviour.
+
+### Result — the 20-day carbon gap closes
+
+| day | relC before | relC **after** | relDBH before | relDBH **after** | ncoh J/F before | **after** |
+|---|---|---|---|---|---|---|
+| 11 | −5.4e-02 | **+3.0e-03** | +1.4e-04 | +1.4e-04 | 43/50 | **50/50** |
+| 15 | −7.4e-02 | **+3.0e-03** | +1.6e-03 | +1.1e-02 | 45/53 | **53/53** |
+| 20 | −9.9e-02 | **+2.4e-03** | −1.2e-02 | +7.1e-03 | 45/57 | **57/57** |
+
+Site carbon tracks Fortran to **0.25 %** across the whole 20-day window (was −9.9 %),
+the demography is **cohort-count-exact against Fortran every day**, and the
+record-set mismatch rate drops from **311/481 to 96/481** at phase `fast` and
+**12/20 to 4/20** at the daily phases. Cold start is unchanged at `7.133e-16` and the
+first divergence is still the same host-driven `npp` `4.9218e-09` at step 0.
+
+**What still survives:** `maxdbh` runs **+0.7 – 1.1 % high** from day 14 (it was
+−1.2 % low before; the sign flipped, so this is a genuine residual and not the same
+defect), and the `hmort`-family `NaN-only-one-side` diagnostics are unchanged and
+pre-existing. Both are smaller than the two bugs already removed and are the next
+D-tier item, not a blocker.
