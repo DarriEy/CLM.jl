@@ -891,24 +891,34 @@ why D3's flag audit came back clean — but `fates_longhorizon.jl` and
 `fates_multisite_validation.jl` **inherit** it, so #252 silently flipped both harnesses
 from `use_bedrock = true` to `false`.
 
-**Attribution stops at the commit, NOT yet at the flag.** The obvious story — "the
-`use_bedrock` flip is the mechanism" — was tested and **does not hold**: re-running
-current `main` with `FATES_USE_BEDROCK=1` (added here) still dies at day 75. So either
-the flag flip is not the mechanism, or a second, independent cause entered after #252.
-The clean test is the flag pinned *at f2d805c itself*; until that is in hand, what is
-established is:
+### Pinning the flag: the mechanism holds at #252 — and exposes a SECOND defect
 
-* the failure begins at `f2d805c` and at exactly step 3601 from there onward;
-* #252's only `src/` changes are the `use_bedrock` kwarg becoming `Union{Bool,Nothing}`
-  in `clm_initialize.jl` and `clm_run.jl` — no physics — so the trigger is a *flag
-  resolution*, and the defect it exposes is older than #252;
-* #252 is almost certainly **correct** (it matches CTSM
-  `namelist_defaults_ctsm.xml:178-181`). It should not be reverted. What it did was stop
-  masking something.
+Re-running with `use_bedrock` pinned (`FATES_USE_BEDROCK`, added here) separates the two:
+
+| | `use_bedrock` inherited (`false`) | `use_bedrock = true` (pre-#252 value) |
+|---|---|---|
+| at `f2d805c` (#252) | dies day 74 | **89/90 PASS** — `ncoh` max 69, `npatch` 2 |
+| current `main` | dies day 74 | **still dies day 75** — `ncoh` max 363, `npatch` 5 |
+
+So:
+
+1. **At #252 the flip IS the mechanism** — restoring `use_bedrock = true` there fully
+   rescues the run. The defect it exposes is *older* than #252; #252's only `src/`
+   changes are the kwarg becoming `Union{Bool,Nothing}` in `clm_initialize.jl` /
+   `clm_run.jl`, no physics.
+2. **On current `main` that rescue no longer works**, so a **second, independent cause**
+   entered in `f2d805c..37db702`. The demography confirms it is a distinct fault: with
+   the flag pinned identically, `main` reaches `ncoh = 363 / npatch = 5` where #252
+   reaches `69 / 2` (and #197-era holds `122 / 2` out at day 149) — recruitment has run
+   away by roughly 5×.
+
+**#252 is correct and must not be reverted** (it matches CTSM
+`namelist_defaults_ctsm.xml:178-181`). There are now **two** defects to fix, and the
+first has been latent since long before either.
 
 Likewise, #227's collapse disappearing is a **measured fact but an unattributed one**.
-It is tempting to credit the same flip; that is exactly the inference just falsified
-above, so it is recorded here as correlation with #252's window, not as mechanism. Worth noting the demography also diverged sharply over that
+It is tempting to credit the same flip; given that the same inference just failed on
+`main`, it is recorded here as correlation with #252's window, not as mechanism. Worth noting the demography also diverged sharply over that
 range — at day ~144 the #197-era run holds `ncoh = 118, npatch = 2`, while current
 `main` had already reached `ncoh = 446, npatch = 6` by day 74. Note the daily FATES carbon balance holds *right up to the
 failure* in every case (`235/235`, `147/147`, `75/75` days) — a textbook instance of
