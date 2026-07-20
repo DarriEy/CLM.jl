@@ -2577,6 +2577,29 @@ function clm_drv_core!(config::CLMDriverConfig,
                                        nlevdecomp=varpar.nlevdecomp,
                                        use_fates_bgc=config.use_fates_bgc,
                                        fire_weather=fire_weather)
+
+            # Rebuild the CLM filters from the freshly-advanced patch population.
+            # Mirrors clm_driver.F90:1151 — `call setFilters(bounds_clump,
+            # glc_behavior)`, immediately after `dynamics_driv`, inside the same
+            # `use_fates`/`is_beg_curr_day` branch.
+            #
+            # `fates_set_filters!` (above, inside the daily step) sets the per-patch
+            # WEIGHTS and flips `pch.active[p]` for each live FATES patch — but the
+            # BitVector masks the biogeophysics actually loops over are built ONCE, by
+            # `set_filters!` in clm_initialize!, from the SURFDATA patch population.
+            # A disturbance that grows the FATES patch count past the number of HLM
+            # slots that surfdata left active therefore produced a patch that is
+            # `active` (so `balance_check!` audits it) but in NO flux filter (so
+            # nothing ever computes its energy). Its `t_veg` stayed at the cold-start
+            # value and `eflx_lwrad_out` stayed at 0, so
+            #     errlon = eflx_lwrad_out - eflx_lwrad_net - forc_lwrad = -forc_lwrad
+            # — the 300-400 W/m2 fatal longwave imbalance that killed every multi-year
+            # FATES run (#277 §4), always on the first step after the patch count
+            # crossed the reserved-and-active slot count. #252 (the CTSM-correct
+            # conditional `use_bedrock`) did not cause it; it only changed how fast
+            # the patch population grows, and so when the latent defect fires.
+            set_filters_one_group!(filt,    bounds, false, col, lun, pch, grc)
+            set_filters_one_group!(filt_ia, bounds, true,  col, lun, pch, grc)
         end
     end
 
