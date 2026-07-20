@@ -127,8 +127,83 @@ the three fields that are off — while leaving the deep-lake thermodynamics (a 
 integrator with a ~day-plus time constant) visibly unaffected. That matches the
 observed signature better than a mis-ported profile function does.
 
+## STEP 2 — what the residual actually is
+
+Two findings, both in the HARNESS rather than in the lake physics. Neither is a
+mis-ported kernel.
+
+### Finding A — the h0 record index was off by one (the FSH / EFLX_LH residual)
+
+The lake reference's history file indexes its own records unambiguously:
+
+```
+nstep       = [0, 1, 2, 3, ...]
+time        = [0.0, 0.0416667, 0.0833333, 0.125]        days since 2003-01-01
+time_bounds = [[0,0], [0,1/24], [1/24,2/24], [2/24,3/24]]
+```
+
+**Record 1 is the `nstep=0` cold-start dump over a ZERO-WIDTH interval `[0,0]`** — an
+instantaneous initial-state write, not a timestep average. Record 2 (`nstep=1`,
+bounds `[0, 1h]`) is the first actual model step. So **model step `s` is h0 record
+`s+1`**, and the harness's `fds[fn][1, s]` indexing compared every Julia step against
+the Fortran state ONE STEP BEHIND it.
+
+That single off-by-one accounts for the bulk of the reported FSH / EFLX_LH
+divergence. Cross-check on the raw values (`LAKE_DUMP=1`), before any change:
+
+| | Julia step 1 | h0 record 1 (`nstep=0`) | h0 record 2 (`nstep=1`) |
+|---|---|---|---|
+| FSH | 69.999 | 84.913 | **70.255** |
+| EFLX_LH | 44.276 | 53.756 | (see run output) |
+
+Julia's step 1 FSH matches record 2 to **0.4%**, against the 17.6% "residual" that the
+record-1 comparison reported. The port was right; the comparison was misaligned.
+
+This is the same class as the trap already recorded in MEMORY as
+*parity-before-vs-after-dump-trap* ("wrong dump manufactured a phantom bug"), and the
+eighth instance of the harness-input trap in this repo.
+
+**On the `LAKE_FORC_OFFSET = −1` measurement.** Shifting the FORCING back one hour
+appeared to cut `max|rel|` from 1.30e+01 to 9.6e-01. That number is **not** evidence
+and was not acted on: `max|rel|` over the run is dominated by the FSA dawn/dusk
+relative-diff artifact on near-zero solar (a known artifact, see the header of
+`gen_lake_ref.sh`), so shifting solar by an hour changes which near-zero denominator
+the maximum lands on. A one-hour forcing shift was ALSO partially compensating for
+Finding A by corrupting a second input — two wrongs moving the aggregate metric.
+The forcing mapping itself is fine: step `s` spans `(s-1)h → s·h` and reads its
+forcing accordingly; the only genuine defect there is the `max(s-1, 1)` clamp, which
+makes steps 1 and 2 both read hour 1 (`LAKE_FORC_EXACT=1` drops the clamp).
+
+### Finding B — `t_ref2m_patch` is never written on a lake patch (the TSA residual)
+
+`TSA` is not a 7-11% physics divergence. It is an **unwritten field**:
+
+```
+[dump s= 1] TSA J= 283.000 F= 259.463
+[dump s=24] TSA J= 283.000 F= 264.752
+[dump s=48] TSA J= 283.000 F= 270.141
+```
+
+Julia's `t_ref2m_patch` is **exactly 283.000 at all 48 steps** — the cold-start
+initialisation constant — while Fortran's TSA ranges over 254.98 – 270.14 K.
+
+`grep -rln 't_ref2m_patch\[' src/biogeophys/` returns only `bareground_fluxes.jl` and
+`urban_fluxes.jl`. Neither runs on a lake patch, so nothing ever writes the field
+there. CTSM's `LakeFluxesMod.F90` does compute it, carrying the full stability-
+dependent profile relations out of the Monin-Obukhov iteration.
+
+This is a genuine port gap of the **"ported then never called"** master class
+(`dead-initcold-systemic` in MEMORY) — a dead write, not a physics error. It is also
+the one place where the dead agents' 2-m-diagnostic hypothesis was pointing at
+something real, though for the wrong reason: the diagnostic is not computed from a
+single-regime profile, it is not computed at all.
+
+A fix is lake-landunit-gated by construction: nothing writes `t_ref2m_patch` on a lake
+patch today, so writing it there cannot change any non-lake result.
+
 ## Status
 
-STEP 1 recorded. Next: confirm the residual numbers, test the forcing-hour mapping
-empirically (cheap and decisive), and only then instrument the Monin-Obukhov
-iteration against `LakeFluxesMod.F90` (STEP 2, pattern = `scripts/probe_taf_fsh.jl`).
+STEP 1 complete (table above; `z0param_method` retracted as a dead end).
+STEP 2 complete: the residual is two harness/port defects, not a mis-ported
+Monin-Obukhov kernel. Instrumenting the MO iteration was NOT needed and would have
+chased a phantom — which is what the record-1 comparison had been manufacturing.
