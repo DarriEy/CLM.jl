@@ -738,3 +738,160 @@ first divergence is still the same host-driven `npp` `4.9218e-09` at step 0.
 defect), and the `hmort`-family `NaN-only-one-side` diagnostics are unchanged and
 pre-existing. Both are smaller than the two bugs already removed and are the next
 D-tier item, not a blocker.
+
+---
+
+# D4 (2026-07-20): re-evaluating the #197 screen and the #227 moisture BC after D3
+
+D3 (#274) closed the 20-day Bow window and, in doing so, cast doubt on two gated
+features that had never been validated against Fortran:
+
+* **#197** — `fates_biogeog_screen = :drop_cold_deciduous`, introduced to suppress a
+  multi-year **boom-bust die-back** at tropical Aripuanã.
+* **#227** — a harness-only growing-season root-zone **moisture prescription**,
+  introduced to stop boreal Krycklan collapsing to zero carbon.
+
+D3 suspected both of being *compensating workarounds for defects since fixed*. This
+section re-measures both on current `main`.
+
+## 1. #197 — D3's suspicion is WRONG: the running-mean bug was inert at `dtime = 1800`
+
+D3's hypothesis was that the die-back the screen suppresses was "partly the
+running-mean bug" — the 48-hour `tveg24` window firing a spurious cold leaf-off on
+exactly the cold-deciduous PFTs the screen drops. **That cannot be true, and the
+reason is structural, not statistical.**
+
+The bug's magnitude is a function of the host timestep. `_patch_fixed_24hr` hardcoded
+`up_period = 1800 s, n_mem = 48`; `InitTimeAveragingGlobals()` derives
+`n_mem = nint(86400/dt)` at `up_period = dt`. Comparing the two definitions directly:
+
+| `dtime` | global `fixed_24hr` | `_patch_fixed_24hr` fallback | fallback window in REAL time | identical? |
+|---|---|---|---|---|
+| **1800 s** | `up=1800, n_mem=48` | `up=1800, n_mem=48` | **24 h** | **YES — bit-identical** |
+| 3600 s | `up=3600, n_mem=24` | `up=1800, n_mem=48` | **48 h** | no |
+
+**Every number in #197 was produced by `scripts/fates_longhorizon.jl`, which runs at
+`dtime = 1800`** — the one timestep at which the pre-#274 fallback was *exactly
+correct*. The cold-leaf-off decision path reads only `tveg24` (`EDPhysiologyMod.jl:541`
+→ `vegtemp_memory` → `ncolddays`), and `tveg24` is defined by `fixed_24hr`. So the
+entire phenology branch D3 fixed is **byte-identical before and after #274 at
+`dtime = 1800`**. The 48-hour window was a property of the *Fortran reference case's*
+`dtime = 3600`, not of #197's evidence base.
+
+Corollary: the die-back mechanism #197 actually describes is a different branch
+entirely — the **400-day `nevercold` forced leaf reset** at `EDPhysiologyMod.jl:637`
+(`cstatus == phen_cstat_notcold && cndaysleafoff > 400`). That is a pure day counter.
+It cannot fire before model day 400, it is untouched by #274, and it is the reason the
+artifact is a *multi-year* one.
+
+**The screen is therefore NOT compensating for the defect #274 fixed.** It may still be
+compensating for something else, but D3's specific reasoning for retiring it does not
+hold and should not be acted on.
+
+## 2. #197 — but its evidence no longer reproduces AT ALL, in either arm
+
+Re-running #197's own recipe on current `main` (Aripuanã, `dtime = 1800`, 1460 days):
+
+| run | `fates_biogeog_screen` | result |
+|---|---|---|
+| baseline | `:none` | **dies at day 74** — `errlon = -412.97 W/m2` at `p=7`, FATAL |
+| screened | `:drop_cold_deciduous` | **dies at day 98** — `errlon = -405.41 W/m2` at `p=7`, FATAL |
+
+With balance hard-errors degraded to warnings (`FATES_SOFT_BALANCE=1`, added here,
+default off) the run gets one day further and then hits a hard FATES `endrun`:
+
+```
+✗ ERROR at step 3621 (day 75): ENDRUN: imaginary roots detected in
+                               QuadraticRootsSridharachary   (FatesUtilsMod.jl:201)
+```
+
+So the energy-balance blow-up corrupts the canopy state and FATES aborts inside
+photosynthesis. **Neither arm reaches model day 100, let alone the day-400 `nevercold`
+timer or the 4-year horizon #197's claim rests on.** The cold-start carbon still
+reproduces #197's number exactly (`2549`), so the setup is right — the model no longer
+survives the horizon.
+
+**Verdict on #197: NEITHER retire NOR validate it yet.** D3's stated ground for
+retirement is disproved (§1), and the measurement that would settle the question is
+blocked by §4. It is gated and default-off; leave it, with this section as the record
+of *why* it is unresolved rather than unexamined.
+
+## 3. #227 — this one IS compensating for something already fixed
+
+Unlike #197, #227's premise can be tested directly, because "prescription OFF" is
+already a configured site (`krycklan_baseline`, `soil_h2o = nothing`).
+
+| run | #227's report (then) | current `main` (now) |
+|---|---|---|
+| `krycklan_baseline` (prescription **OFF**) | cold `749.6` → **`0`**, monotone collapse; `btran = 0` every growing-season day | cold **`2549`** → `4040`; min `2008`; **no collapse, no boom-bust** (both checks PASS at day 235) |
+| `krycklan_screened` (prescription **ON**) | carbon `749.6` → `1990`, 10/10 pass | 10/10 pass over the full 365 days |
+
+Two things changed, and both matter:
+
+1. **The collapse is gone without the prescription.** Carbon *rises* 2549 → 4040 and is
+   still rising when the run stops. #227's entire justification was a monotone decline
+   to zero. It does not happen any more.
+2. **The cold start itself is different** — `749.6` then vs `2549` now. #227 was
+   measured on a materially different configuration. That is consistent with the driver
+   defaults that moved since (`use_bedrock` #251/#252 above all, plus #259, #225, #265,
+   #267-#269, #273): #227's root cause was a bone-dry root zone, and `use_bedrock`
+   truncates the soil column, which is exactly the mechanism #251/#252 corrected for the
+   Bow window. `fates_multisite_validation.jl` **inherits** those defaults rather than
+   setting them, so it was silently re-specified by each of those merges.
+
+**Verdict on #227: it is a compensating workaround for a defect that has since been
+fixed elsewhere.** It is harness-only (no `src/` change) and gated on `SiteCfg.soil_h2o`,
+so it distorts nothing by sitting there — but it should be **retired, or demoted to an
+explicitly-labelled diagnostic**, and the boreal band re-baselined from the unprimed run.
+The Fortran oracle D3 asked for (a boreal single-point reference cold-started identically
+with the prescription off) is no longer the first thing needed: the artifact it was meant
+to measure has already stopped reproducing.
+
+Caveat: the baseline run stopped at day 235 of 365 on the same fatal `errlon` (§4), so
+this is 235 days of evidence, not a full year. It is nonetheless decisive against a
+*monotone collapse from day 1*, which is what #227 described.
+
+## 4. The actual blocker: a fatal longwave balance error kills EVERY multi-year FATES run
+
+Not site-specific, not config-specific, and it is what stopped both investigations above:
+
+| site | config | dies at | `errlon` | patch |
+|---|---|---|---|---|
+| Aripuanã (tropical) | screen `:none` | day 74 | `-412.97 W/m2` | 7 |
+| Aripuanã (tropical) | screen `:drop_cold_deciduous` | day 98 | `-405.41 W/m2` | 7 |
+| Krycklan (boreal) | baseline, no moisture prime | day 235 | `-351.36 W/m2` | 7 |
+| Bow (the Fortran-validated site) | `FATES_WARMSOIL=0` | day 147 | `-294.76 W/m2` | 4 |
+
+Three sites, four configurations, errors of 300-400 W/m² on a longwave flux. The check
+itself is original (`ff6543c`, the first balance-check port), so what changed is the
+model, not the assertion. Note the daily FATES carbon balance holds *right up to the
+failure* in every case (`235/235`, `147/147`, `75/75` days) — a textbook instance of
+the `conservation-is-not-accuracy` class: the carbon books balance perfectly while the
+energy books are off by 400 W/m².
+
+**This is now the top D-tier item**, ahead of both #197 and #227: D1's long-standing
+"still open: a multi-year FATES run" is not merely unstarted, it is *impossible* on
+`main` today. Neither gated feature can be validated until it is fixed.
+
+## Reproducing
+
+```bash
+SD="…/My Drive/data/SYMFLUENCE_data"   # NOT the compHydro root — see below
+
+# #197 both arms (Aripuana, dtime=1800)
+SYMFLUENCE_DATA=$SD FATES_NDAYS=1460                  julia +1.12 --project=. scripts/fates_longhorizon.jl
+SYMFLUENCE_DATA=$SD FATES_NDAYS=1460 FATES_BIOGEOG=1  julia +1.12 --project=. scripts/fates_longhorizon.jl
+# add FATES_SOFT_BALANCE=1 to run past the fatal errlon (diagnostic only —
+# absolute carbon is NOT trustworthy with a known-open energy balance)
+
+# #227 both arms (Krycklan)
+SYMFLUENCE_DATA=$SD SITE=krycklan_baseline FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_multisite_validation.jl
+SYMFLUENCE_DATA=$SD SITE=krycklan_screened FATES_NDAYS=365 julia +1.12 --project=. scripts/fates_multisite_validation.jl
+```
+
+**Harness trap found while doing this:** `fates_multisite_validation.jl` **hardcoded**
+the data root, so it could only ever see `/Users/…/compHydro/SYMFLUENCE_data` — which
+holds none of the three FATES domains. They live under the Drive root. This is why #227
+reported "Tropical Aripuana data is absent in this environment" and skipped the tropical
+arm: the domain existed all along. Now honours `SYMFLUENCE_DATA` like every other
+harness (`test/testdata.jl::symfluence_data_root`).
