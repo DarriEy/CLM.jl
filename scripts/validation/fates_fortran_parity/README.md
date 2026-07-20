@@ -874,8 +874,32 @@ ran 149/150 days …  carbon: cold=2549 final=3822 …  daily balance held: 149/
 ★ FATES stable + demographically active over 150 days      (8/8 PASS, no errlon)
 ```
 
-versus current `main`, which dies at **day 74**. So the fault was introduced somewhere
-in `712cb5c..37db702`. Worth noting the demography also diverged sharply over that
+versus current `main`, which dies at **day 74**. Bisected over `712cb5c..37db702`
+(90-day Aripuanã baseline, 6 points):
+
+| commit | | 90-day run |
+|---|---|---|
+| `d7fb711` | #251 (docs only) | **89/90 PASS** |
+| `f2d805c` | **#252 — `use_bedrock` conditional default** | **dies day 74, `errlon` `p=7`** |
+| `6405ca1` | #225 | dies day 74 |
+| `bac5908` | #255 | dies day 74 |
+
+**The culprit is #252**, and the failure appears at *exactly* the same step (3601) from
+that commit onward. #252 made `use_bedrock`'s default conditional (`use_fates ⇒ false`);
+it had been `true`. `fates_fortran_parity.jl` passes the flag **explicitly**, which is
+why D3's flag audit came back clean — but `fates_longhorizon.jl` and
+`fates_multisite_validation.jl` **inherit** it, so #252 silently flipped both harnesses
+from `use_bedrock = true` to `false`.
+
+That single flip explains both open items at once:
+
+* **It is why #227's collapse disappeared.** Turning bedrock off gives the boreal root
+  zone back the soil column that #227 diagnosed as bone-dry — the same mechanism, at the
+  same site, that #251/#252 corrected for the Bow window. #227's moisture prescription
+  was compensating for `use_bedrock = true`.
+* **It is why no multi-year FATES run survives.** The deeper column exposes a latent
+  defect in the port that surfaces as a 300-400 W/m² longwave imbalance. #252 is almost
+  certainly *correct* (it matches CTSM); what it did was stop masking this. Worth noting the demography also diverged sharply over that
 range — at day ~144 the #197-era run holds `ncoh = 118, npatch = 2`, while current
 `main` had already reached `ncoh = 446, npatch = 6` by day 74. Note the daily FATES carbon balance holds *right up to the
 failure* in every case (`235/235`, `147/147`, `75/75` days) — a textbook instance of
