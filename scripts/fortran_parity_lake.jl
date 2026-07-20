@@ -9,7 +9,8 @@
 # Fortran reference (generated 2026-06-19, cold start, "SUCCESSFUL TERMINATION"):
 #   /Users/.../SYMFLUENCE_data/clm_lake_run/Bow_at_Banff_lumped.clm2.h0.2003-01-01-00000.nc
 # h0 vars are stored (time, [levlak,] lndgrid) → NCDatasets returns them reversed,
-# so a scalar field is f[1, s] and a per-level field is f[1, j, s] (s = step/record).
+# so a scalar field is f[1, rec] and a per-level field is f[1, j, rec], where
+# rec = s + LAKE_REC_SHIFT maps model step s onto its h0 record.
 #
 # Fields compared: TG, TLAKE (×10 levels), LAKEICEFRAC (×10) + LAKEICEFRAC_SURF,
 # EFLX_LH_TOT, FSH (sensible), FIRE (LW out), FSA (absorbed solar), TSA, H2OSNO.
@@ -55,6 +56,12 @@ const LAKE_FORC_OFFSET = parse(Int, get(ENV, "LAKE_FORC_OFFSET", "0"))
 # mechanistically-derived mapping step s -> forcing hour (s-1). The clamp makes
 # steps 1 AND 2 read hour 1, i.e. it corrupts step 1 and duplicates a record.
 const LAKE_FORC_EXACT = get(ENV, "LAKE_FORC_EXACT", "") == "1"
+# Model-step -> h0-record mapping. The h0 `nstep` axis of the lake reference is
+# [0, 1, 2, ...] and its `time_bounds` are [[0,0], [0,1h], [1h,2h], ...]: record 1
+# is the nstep=0 COLD-START dump over a ZERO-WIDTH interval, not a step average.
+# So model step s is h0 record s+1, and the historical `[1, s]` indexing compared
+# every Julia step against the Fortran state ONE STEP BEHIND it.
+const LAKE_REC_SHIFT = parse(Int, get(ENV, "LAKE_REC_SHIFT", "1"))
 
 const LAKE   = "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/clm_ports/CLM.jl/test_inputs/lake/surfdata_lake100.nc"
 const FP     = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters/clm5_params.nc"
@@ -148,7 +155,7 @@ function main(; nsteps::Int = 48)
         # scalar fields
         for (nm, getj, fn) in scalars
             haskey(fds, fn) || continue
-            per[nm] = _rel(Float64(getj()), _fv(fds[fn][1, s]))
+            per[nm] = _rel(Float64(getj()), _fv(fds[fn][1, s + LAKE_REC_SHIFT]))
         end
         # per-level lake fields: max|rel| over the 10 lake layers
         for (nm, jarr, fn) in [("TLAKE", temp.t_lake_col, "TLAKE"),
@@ -156,7 +163,7 @@ function main(; nsteps::Int = 48)
             haskey(fds, fn) || continue
             mx = 0.0
             for j in 1:nlevlak
-                r = _rel(Float64(jarr[c_lake, j]), _fv(fds[fn][1, j, s]))
+                r = _rel(Float64(jarr[c_lake, j]), _fv(fds[fn][1, j, s + LAKE_REC_SHIFT]))
                 isnan(r) || (mx = max(mx, r))
             end
             per[nm] = mx
@@ -167,25 +174,25 @@ function main(; nsteps::Int = 48)
         if get(ENV, "LAKE_ICE_PROBE", "") == "1" && s <= 14
             @printf("  [ice s=%2d] J_top=%.5f F_top=%.5f | J_tg=%.2f F_tg=%.2f | J_tlk1=%.2f F_tlk1=%.2f\n",
                 s, ls.lake_icefrac_col[c_lake,1], _fv(fds["LAKEICEFRAC"][1,1,s]),
-                temp.t_grnd_col[c_lake], _fv(fds["TG"][1,s]),
+                temp.t_grnd_col[c_lake], _fv(fds["TG"][1, s + LAKE_REC_SHIFT]),
                 temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,s]))
         end
         if get(ENV, "LAKE_AERO_PROBE", "") == "1" && s <= 3
             fv = inst.frictionvel
             @printf("  [aero s=%d] ustar=%.4f z0mg=%.3e z0hg=%.3e | J_FSH=%.2f F_FSH=%.2f J_LH=%.2f F_LH=%.2f\n",
                 s, fv.ustar_patch[p_lake], fv.z0mg_patch[p_lake], fv.z0hg_patch[p_lake],
-                inst.energyflux.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1,s]),
-                inst.energyflux.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1,s]))
+                inst.energyflux.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1, s + LAKE_REC_SHIFT]),
+                inst.energyflux.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1, s + LAKE_REC_SHIFT]))
         end
         # LAKE_DUMP: raw Julia-vs-Fortran values (not relative diffs) for the fields
         # in the open surface-flux residual, every step. Relative diffs hide a value
         # that is CONSTANT because it is never written (see TSA).
         if get(ENV, "LAKE_DUMP", "") == "1"
             @printf("  [dump s=%2d] TSA J=%8.3f F=%8.3f | FSH J=%8.3f F=%8.3f | LH J=%8.3f F=%8.3f | TG J=%8.3f F=%8.3f\n",
-                s, temp.t_ref2m_patch[p_lake], _fv(fds["TSA"][1,s]),
-                ef.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1,s]),
-                ef.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1,s]),
-                temp.t_grnd_col[c_lake], _fv(fds["TG"][1,s]))
+                s, temp.t_ref2m_patch[p_lake], _fv(fds["TSA"][1, s + LAKE_REC_SHIFT]),
+                ef.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1, s + LAKE_REC_SHIFT]),
+                ef.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1, s + LAKE_REC_SHIFT]),
+                temp.t_grnd_col[c_lake], _fv(fds["TG"][1, s + LAKE_REC_SHIFT]))
         end
         gmax = maximum(v for v in values(per) if !isnan(v); init=0.0)
         gmax_run = max(gmax_run, gmax)
@@ -195,7 +202,7 @@ function main(; nsteps::Int = 48)
                     string(Int.(inst.patch.column[1:np])))
             for (nm, getj, fn) in scalars
                 haskey(fds, fn) && @printf("    %-12s julia=%+11.4f  fortran=%+11.4f\n",
-                                           nm, Float64(getj()), _fv(fds[fn][1, s]))
+                                           nm, Float64(getj()), _fv(fds[fn][1, s + LAKE_REC_SHIFT]))
             end
         end
         nshow = SHOWALL ? length(per) : min(3, length(per))
