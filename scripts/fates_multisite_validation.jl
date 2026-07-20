@@ -170,8 +170,14 @@ end
 # conservation (the harness's actual invariant) is unaffected.
 # Effective moisture-prime fraction: the per-site cfg.soil_h2o, overridable for tuning
 # via FATES_SOIL_H2O (returns `nothing` unchanged so unprimed sites stay unprimed).
-_soil_h2o(cfg::SiteCfg) = cfg.soil_h2o === nothing ? nothing :
-    something(tryparse(Float64, get(ENV, "FATES_SOIL_H2O", "")), cfg.soil_h2o)
+# `FATES_SOIL_H2O=off` (or `none`/`0`) DISABLES the prime on a site that carries one —
+# the A/B switch that #278 used to measure the prescription against the fixed port.
+function _soil_h2o(cfg::SiteCfg)
+    cfg.soil_h2o === nothing && return nothing
+    ov = lowercase(strip(get(ENV, "FATES_SOIL_H2O", "")))
+    (ov == "off" || ov == "none" || ov == "0") && return nothing
+    return something(tryparse(Float64, ov), cfg.soil_h2o)
+end
 
 function prime_fates_soil_moisture!(inst, bounds, frac::Float64; thawed_only::Bool)
     col=inst.column; ss=inst.soilstate; temp=inst.temperature
