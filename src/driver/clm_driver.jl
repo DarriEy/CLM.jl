@@ -1901,6 +1901,22 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Configure solver to match Fortran namelist:
     #   use_aquifer_layer=true  → Zeng-Decker 2009 with BC_AQUIFER (default)
     #   use_aquifer_layer=false → Moisture form with BC_ZERO_FLUX
+    # CTSM refuses this pair outright (SoilWaterMovementMod.F90:181):
+    #   use_bedrock .and. lower_boundary_condition /= bc_zero_flux -> endrun
+    # CLM.jl mirrored CTSM's OTHER consistency check (ZD09 requires bc_aquifer,
+    # soil_water_movement.jl:687) but not this one -- and that guard lives in
+    # init_soilwater_movement, which only the tests call, so nothing on the live
+    # path validated anything. #276 measured what the unguarded pair does on the
+    # corrected tridiagonal solver: 8,748,338 mm of drainage from a site that
+    # received 404 mm of precipitation, with NO balance check firing (the runaway
+    # is in a term never debited against storage) and NO physics test noticing.
+    # Fail loudly at the call site instead.
+    if config.use_aquifer_layer && varctl.use_bedrock
+        error("clm_drv!: use_bedrock=true requires bc_zero_flux, i.e. " *
+              "use_aquifer_layer=false (CTSM SoilWaterMovementMod.F90:181). " *
+              "This pair yields unbounded drainage that no balance check detects.")
+    end
+
     swm_cfg = if config.use_aquifer_layer
         SoilWaterMovementConfig()  # ZD09 + BC_AQUIFER
     else

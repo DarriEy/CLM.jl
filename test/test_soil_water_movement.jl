@@ -204,6 +204,38 @@
     # ------------------------------------------------------------------
     # 8. init_soilwater_movement validation
     # ------------------------------------------------------------------
+    @testset "use_bedrock requires bc_zero_flux (CTSM SoilWaterMovementMod.F90:181)" begin
+        # CTSM endrun's on use_bedrock + a non-zero-flux lower BC. CLM.jl mirrored
+        # CTSM's OTHER check (ZD09 requires bc_aquifer) but not this one, and #276
+        # measured what the unguarded pair does on the corrected tridiagonal solver:
+        # 8,748,338 mm of drainage from a site that received 404 mm of precipitation,
+        # with NO balance check firing and NO physics test noticing. Assert the guard
+        # FIRES on the bad pair and stays silent on the CLM5 default, so this cannot
+        # regress into another silently-wrong configuration.
+        _saved = CLM.varctl.use_bedrock
+        try
+            CLM.varctl.use_bedrock = true
+            @test_throws ErrorException CLM.init_soilwater_movement(
+                soilwater_movement_method=CLM.ZENGDECKER_2009,
+                lower_boundary_condition=CLM.BC_AQUIFER)
+
+            # The CLM5 default pair (bedrock on, zero-flux lower BC) must pass.
+            cfg = CLM.init_soilwater_movement(
+                soilwater_movement_method=CLM.MOISTURE_FORM,
+                lower_boundary_condition=CLM.BC_ZERO_FLUX)
+            @test cfg.lower_boundary_condition == CLM.BC_ZERO_FLUX
+
+            # With bedrock off, the aquifer configuration is legal again.
+            CLM.varctl.use_bedrock = false
+            cfg2 = CLM.init_soilwater_movement(
+                soilwater_movement_method=CLM.ZENGDECKER_2009,
+                lower_boundary_condition=CLM.BC_AQUIFER)
+            @test cfg2.lower_boundary_condition == CLM.BC_AQUIFER
+        finally
+            CLM.varctl.use_bedrock = _saved
+        end
+    end
+
     @testset "init_soilwater_movement" begin
         # Default should work fine
         cfg = CLM.init_soilwater_movement()
