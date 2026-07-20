@@ -773,6 +773,27 @@ wrong default, not a deliberate experimental setting.
 A first full-suite attempt was killed by SIGTERM (`EXIT=143`) mid-run on the
 loaded shared box; it was rerun to completion rather than reported as green.
 
+### M2 close + M1 re-confirm (baseflow campaign)
+
+Julia 1.12, full suite, baseline established on the same merge-base (`37db702`):
+
+| Run | Pass | Fail | Broken | Total | Time |
+|---|---|---|---|---|---|
+| Baseline (unmodified `main`) | 26578 | 0 | 3 | 26581 | 27m15.6s |
+| After (`baseflow_scalar = 0.001` + pins) | 26585 | 0 | 3 | 26588 | 27m01.1s |
+| `use_aquifer_layer=true` (measurement only, not merged) | 26576 | **2** | 3 | 26581 | 27m03.7s |
+
+Baseline → After is `+7` total / `+7` pass, exactly the seven `@test` lines of
+the new `baseflow_scalar` testset; **no pre-existing assertion changed status.**
+
+The `use_aquifer_layer=true` arm is the sharper result. Flipping the whole
+soil-water lower boundary condition — a change the Bow probe shows moves
+drainage by seven orders of magnitude — produced exactly **two** failures out
+of 26 581, and both were `test_driver_defaults_audit.jl:100-101`, the assertions
+that read the default out of the AST. Not one physics assertion noticed. The
+only thing in the suite that saw it was the file written specifically to see
+defaults, which is this file's own thesis demonstrated rather than argued.
+
 ## Method note
 
 For each flag the check is three-layered, because agreeing with only one layer
