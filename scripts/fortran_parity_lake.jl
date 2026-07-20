@@ -156,6 +156,13 @@ function main(; nsteps::Int = 48)
     # exercise" was unanswerable. zeta is now carried out on frictionvel.zeta_patch.
     zetas = Float64[]
     regimes = Int[]
+    # Lake eddy-diffusivity depth-decay rate ks [1/m] (LakeFluxesMod.F90:755) and the
+    # roughness/resistance the surface flux hangs on. ks was hardwired to 0 (the
+    # gridcell latitude was never wired into the lake kernel), which makes
+    # exp(-ks*z) == 1 at every depth: the wind-driven eddy diffusivity then never
+    # decays and the whole 50 m column is coupled to the skin. Carried out per step
+    # so the suite can assert its VALUE, and the freeze it enables, per step.
+    kss = Float64[]; z0mgs = Float64[]; rahs = Float64[]
     zetat_h = 0.465   # temperature/humidity profile transition (FrictionVelocityMod)
     regime_of(z) = z < -zetat_h ? 1 : z < 0.0 ? 2 : z <= 1.0 ? 3 : 4
     for s in 1:nsteps
@@ -188,6 +195,16 @@ function main(; nsteps::Int = 48)
 
         zc = Float64(inst.frictionvel.zeta_patch[p_lake])
         push!(zetas, zc); push!(regimes, regime_of(zc))
+        push!(kss, Float64(inst.lakestate.ks_col[c_lake]))
+        push!(z0mgs, Float64(inst.frictionvel.z0mg_patch[p_lake]))
+        # rah inverted from the port's own flux definition (LakeFluxesMod.F90:526),
+        # the same inversion LAKE_AERO_PROBE applies to the Fortran h0 fields.
+        let rho = Float64(inst.atm2lnd.forc_rho_downscaled_col[c_lake]),
+            thm = Float64(inst.atm2lnd.forc_t_downscaled_col[c_lake]) + 0.0098*30.0,
+            fsh = Float64(inst.energyflux.eflx_sh_tot_patch[p_lake]),
+            tg  = Float64(inst.temperature.t_grnd_col[c_lake])
+            push!(rahs, abs(fsh) > 1e-8 ? rho*1004.64*(tg - thm)/fsh : NaN)
+        end
 
         per = Dict{String,Float64}()
         # scalar fields
@@ -211,11 +228,18 @@ function main(; nsteps::Int = 48)
         # Diagnostic probes (env-gated). LAKE_ICE_PROBE: Julia-vs-Fortran top/bottom ice fraction
         # + t_grnd + t_lake[1] (localizes the freeze trajectory). LAKE_AERO_PROBE: ustar/z0mg/z0hg
         # + FSH/LH (localizes the surface-flux residual = the lake-MO aerodynamic resistance).
-        if get(ENV, "LAKE_ICE_PROBE", "") == "1" && s <= 14
-            @printf("  [ice s=%2d] J_top=%.5f F_top=%.5f | J_tg=%.2f F_tg=%.2f | J_tlk1=%.2f F_tlk1=%.2f\n",
-                s, ls.lake_icefrac_col[c_lake,1], _fv(fds["LAKEICEFRAC"][1,1,s]),
-                temp.t_grnd_col[c_lake], _fv(fds["TG"][1, s + LAKE_REC_SHIFT]),
-                temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,s]))
+        if get(ENV, "LAKE_ICE_PROBE", "") == "1" && s <= 16
+            # NOTE: the per-level Fortran fields take the SAME record map as the
+            # scalars (s + LAKE_REC_SHIFT). An earlier revision of this probe read
+            # them at [.., s], i.e. one record behind everything else.
+            r = s + LAKE_REC_SHIFT
+            @printf("  [ice s=%2d] ice1 J=%.5f F=%.5f | tg J=%.3f F=%.3f | tlk1 J=%.3f F=%.3f | tlk2 J=%.3f F=%.3f | dzlk1=%.4f dzlk2=%.4f tke1=%.4f gnet=%.2f\n",
+                s, ls.lake_icefrac_col[c_lake,1], _fv(fds["LAKEICEFRAC"][1,1,r]),
+                temp.t_grnd_col[c_lake], _fv(fds["TG"][1, r]),
+                temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,r]),
+                temp.t_lake_col[c_lake,2], _fv(fds["TLAKE"][1,2,r]),
+                inst.column.dz_lake[c_lake,1], inst.column.dz_lake[c_lake,2],
+                ls.savedtke1_col[c_lake], ef.eflx_gnet_patch[p_lake])
         end
         # LAKE_AERO_PROBE: the Monin-Obukhov state the surface fluxes hang on.
         # Fortran does not write ustar/obu/zeta/rah to h0, but FSH, TG, TBOT, QBOT,
@@ -280,7 +304,7 @@ function main(; nsteps::Int = 48)
     counts = [count(==(r), regimes) for r in 1:4]
     @printf("zeta range over run: [%.3f, %.3f] | regime steps: 1(very unstable)=%d 2(unstable)=%d 3(stable)=%d 4(very stable)=%d\n",
             minimum(zetas), maximum(zetas), counts[1], counts[2], counts[3], counts[4])
-    return (; nsteps, jv, fv = fvv, gmax_run, zetas, regimes)
+    return (; nsteps, jv, fv = fvv, gmax_run, zetas, regimes, kss, z0mgs, rahs)
 end
 
 # Auto-run only when executed as a script; `include`d from a test, callers drive

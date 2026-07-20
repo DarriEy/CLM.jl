@@ -1585,7 +1585,7 @@ function clm_drv_core!(config::CLMDriverConfig,
                  a2l.forc_hgt_u_grc, a2l.forc_hgt_t_grc, a2l.forc_hgt_q_grc,
                  filt.lakec, filt.lakep,
                  bc_col, bc_patch;
-                 dtime=dtime)
+                 dtime=dtime, grc_lat=grc.lat)
 
 
     # SetActualRoughnessLengths — WIRED

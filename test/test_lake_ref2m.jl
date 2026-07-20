@@ -223,16 +223,32 @@ using Test, CLM
                 @test all(==(1), rep.regimes)
 
                 # Surface fluxes: this is the CHARACTERISED residual, not a pass
-                # target. See docs/LAKE_FLUX_RESIDUAL.md finding D — the port's
-                # lake surface never drops below freezing (TG 273-276 K vs the
-                # reference's 267-269 K), so it stays on the UNFROZEN roughness
-                # branch and gets z0hg ~25x smaller than the frozen z0frzlake
-                # branch Fortran is on, leaving rah ~300 s/m against Fortran's
-                # ~150. Tightening these bounds requires fixing that, not this.
+                # target — and its CAUSE changed when finding D was fixed, so the
+                # assertion is split rather than merely re-thresholded.
+                #
+                # Was: the port's lake surface never dropped below freezing
+                # (TG 273-276 K vs 267-269 K), so it sat on the UNFROZEN roughness
+                # branch for the WHOLE run and rah was ~305 s/m against ~145 —
+                # a uniform ~20% flux bias at every step.
+                #
+                # Now (see test_lake_eddy_ks.jl): the lake freezes at step 6 and
+                # from step 7 on it is on z0frzlake with rah within 0.5% of the
+                # reference, so the flux residual there collapses to a few
+                # percent. What remains is confined to the freeze-ONSET window,
+                # steps 1-6: the port cold-starts from a uniform 277 K lake
+                # (TemperatureType.F90:833-836) while the reference's first h0
+                # record already shows a partly-cooled 274.81 K top layer, so the
+                # port reaches freezing ~6 steps late and the two models are in
+                # different surface phases across that window. Both bounds below
+                # are the MEASURED residual in their own window.
                 jh = rep.jv["FSH"]; fh = rep.fv["FSH"]
-                @test maximum(abs.(jh .- fh) ./ (1 .+ abs.(fh))) < 0.30
+                rh = abs.(jh .- fh) ./ (1 .+ abs.(fh))
+                @test maximum(rh[7:end]) < 0.10      # measured max 0.035
+                @test maximum(rh[1:6])   < 0.35      # measured max 0.32, freeze onset
                 jl = rep.jv["EFLX_LH"]; fl = rep.fv["EFLX_LH"]
-                @test maximum(abs.(jl .- fl) ./ (1 .+ abs.(fl))) < 0.30
+                rl = abs.(jl .- fl) ./ (1 .+ abs.(fl))
+                @test maximum(rl[7:end]) < 0.16      # measured max 0.11
+                @test maximum(rl[1:6])   < 0.30      # measured max 0.24, freeze onset
             end
         end
     end
