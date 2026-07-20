@@ -147,6 +147,52 @@ physics passes `use_aquifer_layer=false` explicitly — `parity_run_domain.jl`,
 `probe_cbalance_decompose.jl`, `maritime_snow_step_dump.jl`. The default is
 believed by nobody who has checked it against Fortran.
 
+#### M1 RE-CONFIRMED on the fixed tridiagonal solver
+
+#259 measured the `false` flip as byte-identical across the full suite. That
+result was valid but rested on a compromised foundation: **both sides of it were
+solving soil water with a broken solver.** #263 subsequently found that
+`_tridiag_multi_kernel!` wrote `cp[col,jj]` and re-read `cp[col,jj-1]` on the
+next iteration, a store→load recurrence LLVM reorders at `-O2`, so
+`tridiagonal_multi!` returned wrong values on the CPU for any column with
+`nlevs >= 5`. `soil_water_movement.jl:1709` solves ~21 levels — and it is
+precisely the solver `use_aquifer_layer` selects between. The comparison has
+therefore been re-run on the corrected solver.
+
+**It still holds, and the evidence is now stronger than "nothing moved".**
+Re-running the 240-day Bow trajectory on the fixed solver with
+`use_aquifer_layer=true` against the `false` default:
+
+| | `false` (default) | `true` |
+|---|---|---|
+| `qflx_drain` (mm / 240 d) | 0.000000 | **8 748 338.42** |
+| total runoff (mm) | 377.032388 | **8 748 715.40** |
+| `qflx_surf` (mm) | 377.032388 | 376.959705 |
+| ET (mm) | 114.162495 | 112.046123 |
+| soil water (mm) | 284.044305 | 286.216041 |
+| precipitation (mm) | 404.066486 | 404.066486 |
+
+`true` returns **8.7 million mm of drainage from a site that received 404 mm of
+precipitation** — a runaway of about four orders of magnitude beyond the entire
+water input. So the two settings are emphatically *not* equivalent physics; the
+byte-identical suite is a statement about test coverage, nothing else.
+
+Note what did *not* happen: the run completed. Soil water, ET and surface runoff
+stayed plausible, and no balance check fired, because the runaway lives in a
+drainage term that is not debited against column storage. A conservation check
+cannot see this — same lesson as M2's partition shift, one register louder.
+
+Two honest caveats. First, this arm also carries `use_bedrock=true`, which is
+exactly the pair `SoilWaterMovementMod.F90:181` calls a fatal namelist
+inconsistency — so this measures the forbidden combination the port used to
+ship, which is the point, rather than the ZD09 solver in isolation. Second,
+CLM.jl does **not** currently mirror that `endrun`; `clm_initialize!` accepts
+`use_bedrock=true, use_aquifer_layer=true` silently. Porting the guard would
+have turned this runaway into a clear error message and is worth doing, but it
+is a behaviour change beyond this PR's scope.
+
+**Verdict: `use_aquifer_layer=false` is re-confirmed on the corrected solver.**
+
 ### M2 — `baseflow_scalar` (MISMATCH, live, 10×)
 
 ```xml
@@ -349,8 +395,8 @@ anyway: an inert wrong default is a landmine for the first consumer).
 |---|---|---|---|---|---|
 | `use_bedrock` | `nothing` → `!use_fates` | `.false.` if `use_fates`/`vichydro`/`clm4_5`; else `.true.` | **MATCH** (fixed #252) | zwt clamped to bedrock → runaway drainage | — |
 | `h2osfcflag` | `1` | `1` (code fallback `SoilHydrologyType.F90:339,347`) | **MATCH** (fixed #225) | surface-water store disabled | `parity_run_domain.jl` (now redundant) |
-| `use_aquifer_layer` | `true` | **`.false.`** (derived: `clm5_0`→method 1→lbc 2 = `bc_zero_flux`) | **MISMATCH** | selects CLM4.5 Zeng-Decker-2009 + aquifer solver instead of CLM5 moisture-form + zero-flux; CTSM `endrun`s on this combined with `use_bedrock=true` | 16 scripts (see M1) |
-| `baseflow_scalar` | `1.0e-2` | **`0.001`** (`lbc=2`); `1.d-2` only for `lbc=1` or `clm4_5` | **MISMATCH** | 10× drainage/baseflow rate | `parity_run_domain.jl` (per-domain) |
+| `use_aquifer_layer` | ~~`true`~~ → **`false`** | **`.false.`** (derived: `clm5_0`→method 1→lbc 2 = `bc_zero_flux`) | **CLOSED** (#259; re-confirmed on the fixed tridiagonal solver — see "M1 RE-CONFIRMED") | selected CLM4.5 Zeng-Decker-2009 + aquifer solver instead of CLM5 moisture-form + zero-flux; CTSM `endrun`s on this combined with `use_bedrock=true`. Measured on the corrected solver: `true` returns 8.7e6 mm of drainage from a 404 mm-of-precipitation site | 16 scripts (see M1) |
+| `baseflow_scalar` | ~~`1.0e-2`~~ → **`0.001`** | **`0.001`** (`lbc=2`); `1.d-2` only for `lbc=1` or `clm4_5` | **CLOSED** (see "M2 CLOSED" below) | was 10× on the drainage/baseflow rate; measured −7.6 % baseflow / +0.57 % surface runoff at MerBleue, exactly zero at Bow (branch never entered, in CTSM either) | `parity_run_domain.jl` (per-domain; 18/20 already `0.001`) |
 | `use_hydrstress` | `nothing` → `!use_fates` (**FIXED**) | **`.true.`** (`clm5_0`, non-FATES, `configuration="clm"`) | **COND-MISMATCH — CLOSED** | was: PHS off → BTRAN path; different gs/transpiration/GPP under stress | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `probe_h2osfc_subdaily.jl` |
 | `use_luna` | `nothing` → `!use_fates` | **`.true.`** (`clm5_0`, non-FATES) | **FIXED** (this campaign) | — but see the LUNA-consumption gap below: the flip is currently INERT on the default non-PHS path | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `fortran_parity_cn_coldstart.jl` (now redundant) |
 | `int_snow_max` | `2000.0` | `2000.` (`1.e30` for `clm4_5`) | **MATCH** | — | — |
@@ -548,6 +594,110 @@ Fortran parity evidence — exactly the treatment `use_hydrstress` and `use_luna
 are getting. Flipping it inside a sweep labelled "inert" would be the very bug
 this audit exists to catch.
 
+## M2 CLOSED — `baseflow_scalar` = `0.001`, and where the 10× actually bites
+
+The dedicated campaign M2-revisited asked for. Default changed `1.0e-2` → `0.001`
+at all four literals that carry it (`soil_hydrology.jl:44` `BASEFLOW_SCALAR[]`,
+`:66` the `SoilHydrologyConfig` field, `:77` the `init_soil_hydrology_config`
+kwarg, `clm_run.jl` the `clm_run!` kwarg). All four must move together: only
+`:44`/`:87` is read by physics, but `test_soil_hydrology_mod.jl:59` calls bare
+`init_soil_hydrology_config()`, so a partial change makes the live global
+depend on test *ordering*.
+
+### CTSM's conditional, verified three ways
+
+```xml
+<baseflow_scalar                lower_boundary_condition="2">0.001d00</baseflow_scalar>
+<baseflow_scalar                lower_boundary_condition="1">1.d-2</baseflow_scalar>
+<baseflow_scalar phys="clm4_5"  lower_boundary_condition="2">1.d-2</baseflow_scalar>
+```
+
+1. **The XML chain.** For `clm5_0`: `soilwater_movement_method=1`
+   (`defaults:419`) + `use_bedrock=.true.` (`defaults:180`) ⇒
+   `lower_boundary_condition=2` (`defaults:426`) ⇒ row 195 ⇒ **`0.001`**.
+   Row 196 needs `lbc=1`; row 197 needs `phys=clm4_5`. Neither matches, so the
+   resolution is unambiguous. (Under `clm4_5` proper, `swmm=0` ⇒ `lbc=4`, and
+   `baseflow_scalar` is not used at all — the definition entry says "ONLY used
+   if lower_boundary_condition is not aquifer or table".)
+2. **CTSM-emitted namelists on this machine.** Two independent
+   build-namelist outputs, both `phys=clm5_0`:
+   `domain_Bow_at_Banff_lumped/settings/CLM/lnd_in` and
+   `domain_Peatland_MerBleue_Canada/settings/CLM/lnd_in` each contain
+   `soilwater_movement_method = 1`, `use_bedrock = .true.`,
+   `lower_boundary_condition = 2`, and **`baseflow_scalar = 0.001d00`**.
+   This is the derivation confirmed end-to-end, not merely read off the XML.
+3. **CLM.jl already agreed with itself everywhere except the driver.**
+   `scripts/parity_run_domain.jl` sets `baseflow = 0.001` for **18 of its 20**
+   domains; the two exceptions are DDS-*calibrated* (Bow `0.0022119554`,
+   Stillwater `0.016035343`). `src/calibration/parameters.jl` already used
+   `0.001`. The driver default was the lone `1.0e-2` holdout — the same
+   "code fallback copied instead of the namelist default" pattern as
+   #252/#259/#273. `SoilHydrologyMod.F90:71`'s `= 1.e-2_r8` is exactly that
+   pre-namelist initialiser.
+
+### Measured effect of the 10× (this is a real physics change)
+
+`qflx_latflow_out` is guarded by `if zwt <= zi(nbedrock)` — the water table must
+reach *into* the bedrock layer for the power-law baseflow term to exist at all.
+That guard, not the coefficient, dominates:
+
+**Bow at Banff (240 d from the Fortran spun-up 2003 restart): exactly zero effect.**
+
+| | `1.0e-2` | `0.001` |
+|---|---|---|
+| runoff (mm) | 377.032388 | 377.032388 |
+| `qflx_latflow_out` (mm) | 0.000000 | 0.000000 |
+| soil water (mm) | 284.044305 | 284.044305 |
+| mean `zwt` (m) | 2.280000 | 2.280000 |
+
+Bit-identical, because `nbedrock=12` ⇒ `zi_bedrock = 1.88 m` while `zwt` sits at
+`2.28 m` — *below* bedrock — so `zwt <= zi_bedrock` is false at every one of the
+11 520 steps and the branch never executes. **This is not a port artifact:** the
+Fortran reference for the same site
+(`domain_Bow_at_Banff_lumped/simulations/clm_dds_calibration/CLM/…h0.2004-12-31…`)
+reports `QDRAI = 0.0` and `ZWT = 2.28 m` for all 365 days, with
+`QRUNOFF ≡ QOVER`. CLM.jl reproduces CTSM's own zero. At Bow the coefficient
+multiplies a branch the reference model never enters either.
+
+**MerBleue peat bog (240 d from its 2017 restart): the branch is live, and the
+10× moves it.**
+
+| | `1.0e-2` | `0.001` | Δ |
+|---|---|---|---|
+| `qflx_drain` / `latflow_out` (mm) | 63.690862 | 58.843222 | **−7.6 %** |
+| `qflx_surf` (mm) | 637.480694 | 641.131278 | **+0.57 %** |
+| total runoff (mm) | 701.171557 | 699.974499 | −0.17 % |
+| soil water (mm) | 745.978369 | 747.278950 | +0.17 % |
+| mean `zwt` (m) | 2.273917 | 2.223477 | 5.0 cm higher |
+| end `zwt` (m) | 2.280000 | 2.064378 | 21.6 cm higher |
+| ET (mm) | 260.082967 | 259.979444 | −0.04 % |
+
+Two things worth stating plainly:
+
+* **A 10× cut in the coefficient produces only a 7.6 % cut in baseflow.** The
+  term is strongly self-limiting: less drainage ⇒ water accumulates ⇒ `zwt`
+  rises ⇒ `(zi_bedrock − zwt)^n_baseflow` grows ⇒ drainage partly recovers. The
+  water table, not the coefficient, sets the flux.
+* **Total runoff barely moves (−0.17 %) while the partition moves much more**
+  (baseflow −7.6 %, surface runoff +0.57 %). A water-balance check sees almost
+  nothing here — the [CONSERVATION IS NOT ACCURACY] pattern again. The number
+  that changed is the one no balance check constrains.
+
+MerBleue's own CTSM-emitted `lnd_in` specifies `0.001`, so the direction is
+toward the reference, not away from it.
+
+### Why the test suite is nearly blind to this
+
+`test/test_hydrology_drainage.jl:281` calls `hydrology_drainage!` with
+`mask_hydrology = BitVector([false, false])`, so the drainage body never runs.
+`test_soil_lateral_flow.jl:274` and `test_soil_hydrology_mod.jl:465` call
+`subsurface_lateral_flow!` directly but assert only finiteness and
+`qflx_latflow_out ≥ 0` — one-sided bounds that hold for *any* non-negative
+coefficient. Every Fortran-parity test passes `baseflow_scalar` explicitly
+(`scripts/fortran_parity_common.jl:41` = the calibrated `0.0022119554`). The
+only assertion on the value itself was `test_soil_hydrology_mod.jl:45`, updated
+here, plus the new pin in `test_driver_defaults_audit.jl`.
+
 ## M6 revisited — classifying the 8 `use_cn` cascade flags
 
 Asked whether any of the cascade is inert under the default `use_cn=false` and
@@ -585,7 +735,7 @@ CN campaign outright.
 |---|---|
 | Flags audited | **~110** (16 driver-entry keywords + 79 `varctl` fields + `CLMDriverConfig` switches + the `use_flexibleCN` cascade) |
 | MATCH | ~85 |
-| MISMATCH — live physics | **3 remaining** (`use_aquifer_layer`, `baseflow_scalar`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3) |
+| MISMATCH — live physics | **1 remaining** (`convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3), `use_aquifer_layer` **fixed** (#259, re-confirmed here on the corrected tridiagonal solver), `baseflow_scalar` **fixed** (here, M2) |
 | MISMATCH — inert (0 reads / guarded) | 12 (`nsegspc`, `nyr_forcing`, `h2osno_max`, `n_dom_landunits`, `n_dom_pfts`, 6× `toosmall_*`, `downscale_hillslope_meteorology`, `z0param_method`) |
 | CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) |
 | Namelist-vs-code-fallback disagreements found | **14** — CLM.jl copied the code fallback in *every* case |
@@ -622,6 +772,27 @@ wrong default, not a deliberate experimental setting.
 
 A first full-suite attempt was killed by SIGTERM (`EXIT=143`) mid-run on the
 loaded shared box; it was rerun to completion rather than reported as green.
+
+### M2 close + M1 re-confirm (baseflow campaign)
+
+Julia 1.12, full suite, baseline established on the same merge-base (`37db702`):
+
+| Run | Pass | Fail | Broken | Total | Time |
+|---|---|---|---|---|---|
+| Baseline (unmodified `main`) | 26578 | 0 | 3 | 26581 | 27m15.6s |
+| After (`baseflow_scalar = 0.001` + pins) | 26585 | 0 | 3 | 26588 | 27m01.1s |
+| `use_aquifer_layer=true` (measurement only, not merged) | 26576 | **2** | 3 | 26581 | 27m03.7s |
+
+Baseline → After is `+7` total / `+7` pass, exactly the seven `@test` lines of
+the new `baseflow_scalar` testset; **no pre-existing assertion changed status.**
+
+The `use_aquifer_layer=true` arm is the sharper result. Flipping the whole
+soil-water lower boundary condition — a change the Bow probe shows moves
+drainage by seven orders of magnitude — produced exactly **two** failures out
+of 26 581, and both were `test_driver_defaults_audit.jl:100-101`, the assertions
+that read the default out of the AST. Not one physics assertion noticed. The
+only thing in the suite that saw it was the file written specifically to see
+defaults, which is this file's own thesis demonstrated rather than argued.
 
 ## Method note
 
