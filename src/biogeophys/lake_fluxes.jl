@@ -83,6 +83,8 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
     forc_t::V; forc_th::V; forc_q::V; forc_pbot::V; forc_rho::V; forc_lwrad::V
     # forcings (gridcell-indexed)
     forc_u::V; forc_v::V; forc_hgt_u::V; forc_hgt_t::V; forc_hgt_q::V
+    # gridcell latitude [radians] — LakeFluxesMod.F90:755 needs grc%lat(g) for ks
+    grc_lat::V
     # outputs (patch)
     eflx_sh_tot::V; eflx_sh_grnd::V; eflx_lh_tot::V; eflx_lh_grnd::V
     eflx_lwrad_out::V; eflx_lwrad_net::V; eflx_soil_grnd::V; eflx_gnet::V; taux::V; tauy::V
@@ -104,7 +106,8 @@ Adapt.@adapt_structure LakeFluxDV
 function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
                        waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
-                       forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc)
+                       forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
+                       grc_lat)
     return LakeFluxDV(;
         p_column = patch_data.column, p_gridcell = patch_data.gridcell,
         p_landunit = patch_data.landunit, c_gridcell = col_data.gridcell,
@@ -120,7 +123,7 @@ function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate
         forc_t = forc_t, forc_th = forc_th, forc_q = forc_q, forc_pbot = forc_pbot,
         forc_rho = forc_rho, forc_lwrad = forc_lwrad,
         forc_u = forc_u, forc_v = forc_v, forc_hgt_u = forc_hgt_u_grc,
-        forc_hgt_t = forc_hgt_t_grc, forc_hgt_q = forc_hgt_q_grc,
+        forc_hgt_t = forc_hgt_t_grc, forc_hgt_q = forc_hgt_q_grc, grc_lat = grc_lat,
         eflx_sh_tot = energyflux.eflx_sh_tot_patch,
         eflx_sh_grnd = energyflux.eflx_sh_grnd_patch,
         eflx_lh_tot = energyflux.eflx_lh_tot_patch,
@@ -160,6 +163,7 @@ end
         dz = d.dz; dz_lake = d.dz_lake; t_soisno = d.t_soisno; t_lake = d.t_lake
         t_grnd = d.t_grnd; sabg_arr = d.sabg
         h2osoi_liq = d.h2osoi_liq; h2osoi_ice = d.h2osoi_ice
+        grc_lat = d.grc_lat
         forc_t = d.forc_t; forc_th = d.forc_th; forc_q = d.forc_q
         forc_pbot = d.forc_pbot; forc_rho = d.forc_rho; forc_lwrad = d.forc_lwrad
         forc_u = d.forc_u; forc_v = d.forc_v
@@ -571,14 +575,24 @@ end
         u2m = max(T(0.1), ustar / T(VKC) * log(T(2.0) / z0mg))
         ust_lake[c] = ustar     # carry the friction velocity for next step's z0hg (LakeFluxesMod:761)
         ws_col[c] = T(1.2e-3) * u2m
-        # Wave-driven eddy-extinction coefficient ks = 6.6·sqrt(|sin(lat)|)·u2m^-1.84.
-        # The gridcell latitude is not yet wired in (simplified to 0), so the sqrt(|sin 0|)
-        # factor — and hence the whole term — is exactly 0. It MUST be written as a literal
-        # zero, not sqrt(smooth_abs(sin(zero(T))))·…: sqrt(0) has an Inf ForwardDiff
-        # derivative, so even with a zero-valued input the AD partial is Inf·0 = NaN, which
-        # poisons ks → the lake eddy diffusivity kme → the entire coupled lake temperature
-        # solve under AD (finite values, NaN gradients). Value is unchanged (ks = 0).
-        ks_col[c] = zero(T)
+        # Wave-driven eddy-extinction coefficient (LakeFluxesMod.F90:755)
+        #   ks = 6.6 * sqrt(|sin(lat)|) * u2m^-1.84      [1/m], lat in RADIANS
+        # `ks` is the DEPTH-DECAY RATE of the wind-driven eddy diffusivity in
+        # LakeTemperature: ke = vkc*ws*z/p0 * exp(-ks*z) / (1+37*ri^2). It was
+        # hardwired to zero here because the gridcell latitude had never been
+        # wired into the lake kernel — and `exp(-0*z) == 1` means the surface
+        # eddy diffusivity NEVER DECAYS WITH DEPTH: `ke` then grows linearly all
+        # the way to the lake bed, coupling the whole column to the skin. At Bow
+        # (lat 51.2 deg, u2m ~1.6 m/s) the true ks is ~2.4 /m, so at z = 5 m the
+        # port's diffusivity was exp(2.4*5) = 1.6e5 times too large. That is why
+        # the surface could never cool to freezing: every W/m2 the surface lost
+        # was replenished from 50 m of 277 K water instead of from the top ~0.3 m.
+        #
+        # AD note: the previous literal zero was justified by sqrt(0) having an
+        # Inf ForwardDiff derivative. That hazard is real but only at |sin(lat)|
+        # == 0 exactly (the equator), so branch on it rather than delete the term.
+        sinlat = abs(sin(grc_lat[g]))
+        ks_col[c] = sinlat > zero(T) ? T(6.6) * sqrt(sinlat) * u2m^T(-1.84) : zero(T)
 
         htvp_col[c] = htvp
     end
@@ -631,7 +645,8 @@ function lake_fluxes!(temperature::TemperatureData,
                        mask_lakep::AbstractVector{Bool},
                        bounds_col::UnitRange{Int},
                        bounds_patch::UnitRange{Int};
-                       dtime::Real = 1800.0)
+                       dtime::Real = 1800.0,
+                       grc_lat::Union{Nothing,AbstractVector{<:Real}} = nothing)
 
     nlevsno_val = varpar.nlevsno
     niters = 4  # stability iterations
@@ -642,7 +657,8 @@ function lake_fluxes!(temperature::TemperatureData,
     dv = _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
                        waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
-                       forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc)
+                       forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc,
+                       grc_lat === nothing ? zero(forc_hgt_u_grc) : grc_lat)
 
     FT = eltype(temperature.t_grnd_col)
     # Struct-first kernel (the DV is passed whole as the first arg): pick the

@@ -211,11 +211,18 @@ function main(; nsteps::Int = 48)
         # Diagnostic probes (env-gated). LAKE_ICE_PROBE: Julia-vs-Fortran top/bottom ice fraction
         # + t_grnd + t_lake[1] (localizes the freeze trajectory). LAKE_AERO_PROBE: ustar/z0mg/z0hg
         # + FSH/LH (localizes the surface-flux residual = the lake-MO aerodynamic resistance).
-        if get(ENV, "LAKE_ICE_PROBE", "") == "1" && s <= 14
-            @printf("  [ice s=%2d] J_top=%.5f F_top=%.5f | J_tg=%.2f F_tg=%.2f | J_tlk1=%.2f F_tlk1=%.2f\n",
-                s, ls.lake_icefrac_col[c_lake,1], _fv(fds["LAKEICEFRAC"][1,1,s]),
-                temp.t_grnd_col[c_lake], _fv(fds["TG"][1, s + LAKE_REC_SHIFT]),
-                temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,s]))
+        if get(ENV, "LAKE_ICE_PROBE", "") == "1" && s <= 16
+            # NOTE: the per-level Fortran fields take the SAME record map as the
+            # scalars (s + LAKE_REC_SHIFT). An earlier revision of this probe read
+            # them at [.., s], i.e. one record behind everything else.
+            r = s + LAKE_REC_SHIFT
+            @printf("  [ice s=%2d] ice1 J=%.5f F=%.5f | tg J=%.3f F=%.3f | tlk1 J=%.3f F=%.3f | tlk2 J=%.3f F=%.3f | dzlk1=%.4f dzlk2=%.4f tke1=%.4f gnet=%.2f\n",
+                s, ls.lake_icefrac_col[c_lake,1], _fv(fds["LAKEICEFRAC"][1,1,r]),
+                temp.t_grnd_col[c_lake], _fv(fds["TG"][1, r]),
+                temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,r]),
+                temp.t_lake_col[c_lake,2], _fv(fds["TLAKE"][1,2,r]),
+                inst.column.dz_lake[c_lake,1], inst.column.dz_lake[c_lake,2],
+                ls.savedtke1_col[c_lake], ef.eflx_gnet_patch[p_lake])
         end
         # LAKE_AERO_PROBE: the Monin-Obukhov state the surface fluxes hang on.
         # Fortran does not write ustar/obu/zeta/rah to h0, but FSH, TG, TBOT, QBOT,
