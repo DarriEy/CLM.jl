@@ -30,15 +30,32 @@ using CLM
         @test CLM.fates_dispersal_cadence_yearly  == 3
 
         # Mutable HLM control variables default to the unset sentinel and can be set.
-        @test CLM.hlm_numSWb[]   == CLM.fates_unset_int
-        @test CLM.hlm_name[]     == ""
-        @test CLM.hlm_stepsize[] == CLM.fates_unset_r8
-        CLM.hlm_numSWb[]   = num_rad_bands
-        CLM.hlm_name[]     = "CLM"
-        CLM.hlm_stepsize[] = 1800.0
-        @test CLM.hlm_numSWb[]   == num_rad_bands
-        @test CLM.hlm_name[]     == "CLM"
-        @test CLM.hlm_stepsize[] == 1800.0
+        #
+        # These are module GLOBALS, so this testset was both order-DEPENDENT and
+        # order-CORRUPTING: it asserted the live value still equalled the sentinel
+        # (true only while nothing had initialised them) and then left its own
+        # values behind for every later test. Wiring InitTimeAveragingGlobals()
+        # exposed that — hlm_stepsize is now legitimately set to the run's dtime.
+        # Save, reset to the sentinel to test the declared default, exercise the
+        # setter, then restore, so the assertion is about the code rather than
+        # about test ordering.
+        _saved = (CLM.hlm_numSWb[], CLM.hlm_name[], CLM.hlm_stepsize[])
+        try
+            CLM.hlm_numSWb[]   = CLM.fates_unset_int
+            CLM.hlm_name[]     = ""
+            CLM.hlm_stepsize[] = CLM.fates_unset_r8
+            @test CLM.hlm_numSWb[]   == CLM.fates_unset_int
+            @test CLM.hlm_name[]     == ""
+            @test CLM.hlm_stepsize[] == CLM.fates_unset_r8
+            CLM.hlm_numSWb[]   = num_rad_bands
+            CLM.hlm_name[]     = "CLM"
+            CLM.hlm_stepsize[] = 1800.0
+            @test CLM.hlm_numSWb[]   == num_rad_bands
+            @test CLM.hlm_name[]     == "CLM"
+            @test CLM.hlm_stepsize[] == 1800.0
+        finally
+            CLM.hlm_numSWb[], CLM.hlm_name[], CLM.hlm_stepsize[] = _saved
+        end
 
         # History dimension map vectors default to empty and accept assignment.
         @test isempty(CLM.fates_hdim_levsclass[])
