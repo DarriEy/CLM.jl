@@ -174,3 +174,50 @@ So the runaway scales with productivity, not with the filter fix: the same code 
 a bounded trajectory where GPP is small and an explosive one where GPP is large. That is
 consistent with too much assimilate reaching structural/diameter growth, and it is
 independent of #280.
+
+### `after` arm — `krycklan_baseline`: 1459/1460 days, 10/10 PASS
+
+```
+ran 1459/1460 days   carbon cold=2549 final=1505  min=1443  max=4140  peak=4140
+ncoh [14, 900]   npatch max=9   births 3100 / deaths 2926   10/10 PASS, no errlon
+```
+
+against `main`'s death at day 235. Like Bow, carbon stays bounded.
+
+## Result: defect 1 is CLOSED on all four configs
+
+| config | `before` (`main` b2fef5b) | `after` (#280) |
+|---|---|---|
+| `arip_none` | dies **day 74**, `errlon` −412.97 | **1459/1460**, 8/8 PASS |
+| `arip_screened` | dies **day 98**, `errlon` −405.41 | **1459/1460**, 8/8 PASS |
+| `bow_nowarm` | dies **day 148**, `errlon` −280.20 | **1459/1460**, 8/8 PASS |
+| `krycklan_baseline` | dies **day 235**, `errlon` −351.36 | **1459/1460**, 10/10 PASS |
+
+Three sites, four configs, 1460-day horizon, **no `errlon` anywhere**. The
+"no multi-year FATES run survives `main`" defect is closed.
+
+(The 1459 rather than 1460 is the harness's end-of-run day boundary, identical in
+every arm — not a failure.)
+
+## Defect 2 is NOT closed, and #280 cannot close it
+
+#277 separated two defects by pinning `use_bedrock=true`. Re-measured here on current
+`main` with that pin, 1460 d requested:
+
+```
+dies day 75, step 3649, p=7, errlon = -411.22
+ncoh range [14, 363]   npatch max 5   births 368 / deaths 19
+```
+
+That reproduces #277's number exactly: **`ncoh` 363 under the pin, against the
+#252-era's 69 — the ~5× recruitment runaway, alive on current `main`.**
+
+**#280 provably cannot touch it**, for a reason stronger than any measurement: the two
+arms are *byte-identical* over the whole window in which the runaway establishes itself.
+Day 60 of `arip_none` prints the same `ncoh 152`, `npatch 2`, `carbon 3396.3`,
+`maxdbh 5.0122`, `GPP 34678.025` on both arms, and the runaway is already at
+`ncoh 363` by day 74-75 — entirely inside that shared prefix. #280 defers a patch
+activation and rebuilds a filter; it changes nothing before the patch count crosses
+the slot threshold, so it cannot change how many cohorts recruit before then.
+
+**Defect 2 remains open and unattributed.** #280 closes defect 1 only.
