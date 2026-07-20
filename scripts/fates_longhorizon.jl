@@ -101,6 +101,14 @@ function carbon_budget(site)
     return nothing
 end
 
+# use_bedrock. This harness INHERITED the driver default, so #252 (which made that
+# default conditional -- `use_fates => false`, previously `true`) silently flipped it
+# under us. That flip is what makes every multi-year run here die at day 74 on a
+# 400 W/m2 longwave imbalance. `nothing` = inherit the (correct, CTSM-matching)
+# conditional default; FATES_USE_BEDROCK=1/0 pins it, for attributing that failure.
+_use_bedrock() = (v = get(ENV, "FATES_USE_BEDROCK", "");
+                  v == "1" ? true : v == "0" ? false : nothing)
+
 function build()
     fsurdat = get(ENV, "FATES_FSURDAT",
         "$DATA/domain_Aripuana_Amazon/settings/CLM/parameters/surfdata_clm.nc")
@@ -132,7 +140,7 @@ function build()
     # leaf temperature and hence non-NaN photosynthesis.
     inst, bounds, filt, _tm = _C.clm_initialize!(; fsurdat=fsurdat, paramfile=paramfile,
         use_fates=true, start_date=DateTime(fyr,1,1), dtime=1800,
-        fates_biogeog_screen=biogeog_screen)
+        fates_biogeog_screen=biogeog_screen, use_bedrock=_use_bedrock())
     biogeog_screen == :none || @printf("  fixed-biogeog screen: %s (climate-appropriate PFTs only)\n", biogeog_screen)
     # coszen closure reads grc.lat/lon (radians); ensure latdeg/londeg exist for the
     # forcing reader's time-interpolation of FSDS (fills from lat/lon if surfdata omits).
