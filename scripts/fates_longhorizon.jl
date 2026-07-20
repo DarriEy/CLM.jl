@@ -101,6 +101,16 @@ function carbon_budget(site)
     return nothing
 end
 
+# use_bedrock. This harness INHERITED the driver default, so #252 (which made that
+# default conditional -- `use_fates => false`, previously `true`) silently flipped it
+# under us. At #252 that flip IS what makes multi-year runs here die at day 74 on a
+# 400 W/m2 longwave imbalance (pinning it back to `true` there rescues the run) -- but
+# on current main pinning no longer rescues, so a SECOND defect followed it. See
+# fates_fortran_parity/README.md D4. `nothing` = inherit the (correct, CTSM-matching)
+# conditional default; FATES_USE_BEDROCK=1/0 pins it, for attributing that failure.
+_use_bedrock() = (v = get(ENV, "FATES_USE_BEDROCK", "");
+                  v == "1" ? true : v == "0" ? false : nothing)
+
 function build()
     fsurdat = get(ENV, "FATES_FSURDAT",
         "$DATA/domain_Aripuana_Amazon/settings/CLM/parameters/surfdata_clm.nc")
@@ -108,7 +118,16 @@ function build()
         "$DATA/domain_Aripuana_Amazon/settings/CLM/parameters/clm5_params.nc")
     fyr = parse(Int, get(ENV, "FATES_YEAR", "2004"))
     # Optional climate-appropriate PFT screening (fixed-biogeography). Default OFF ->
-    # the all-PFT NBG cold start (the boom-bust baseline). FATES_BIOGEOG selects a
+    # the all-PFT NBG cold start (the boom-bust baseline).
+    #
+    # STATUS (D4, 2026-07-20): #197's 4-year evidence for this screen NO LONGER
+    # REPRODUCES -- both arms die before day 100 on a fatal longwave imbalance (see
+    # fates_fortran_parity/README.md D4). Note also that D3/#274's suggestion that the
+    # screen compensates for the running-mean bug is DISPROVED: that bug was inert at
+    # this harness's dtime=1800. The screen is neither validated nor retired; treat any
+    # boom-bust claim from this script as unverified until the multi-year blocker is fixed.
+    #
+    # FATES_BIOGEOG selects a
     # named screen: "drop_cold_deciduous" (or "1") seeds only non-cold-deciduous PFTs
     # (evergreen + drought-deciduous) — the tropical-appropriate set for Aripuana, so
     # no cold-deciduous cohort is ever seeded/recruited to drive the die-back cycle.
@@ -132,7 +151,7 @@ function build()
     # leaf temperature and hence non-NaN photosynthesis.
     inst, bounds, filt, _tm = _C.clm_initialize!(; fsurdat=fsurdat, paramfile=paramfile,
         use_fates=true, start_date=DateTime(fyr,1,1), dtime=1800,
-        fates_biogeog_screen=biogeog_screen)
+        fates_biogeog_screen=biogeog_screen, use_bedrock=_use_bedrock())
     biogeog_screen == :none || @printf("  fixed-biogeog screen: %s (climate-appropriate PFTs only)\n", biogeog_screen)
     # coszen closure reads grc.lat/lon (radians); ensure latdeg/londeg exist for the
     # forcing reader's time-interpolation of FSDS (fills from lat/lon if surfdata omits).
@@ -166,6 +185,22 @@ function build()
             temp.t_grnd_col[c]=299.0
             for j in 1:ngr; temp.t_soisno_col[c, joff+j]=299.0; end
         end
+    end
+    # DIAGNOSTIC-ONLY escape hatch. On current `main` this site trips a FATAL
+    # longwave energy-balance error (errlon ~ -410 W/m2 at p=7) around day 74-98,
+    # so a multi-YEAR demographic trajectory cannot be measured at all. That is a
+    # real, unfixed defect and it is NOT the subject of this harness. Setting
+    # FATES_SOFT_BALANCE=1 degrades every hard balance error to a warning so the
+    # demography can be observed past it.
+    #
+    # A run with this set has a KNOWN, UNCLOSED energy balance: its absolute
+    # carbon numbers are NOT trustworthy. Use it only to read the SHAPE of the
+    # demographic trajectory (boom-bust vs. bounded), never as a parity or
+    # conservation result. Default OFF -> byte-identical, still fatal.
+    if get(ENV,"FATES_SOFT_BALANCE","0")=="1"
+        inst.balcheck.hard_error = false
+        println("  [DIAG] FATES_SOFT_BALANCE=1: balance hard errors degraded to warnings.")
+        println("         Absolute carbon is NOT trustworthy in this run — trajectory SHAPE only.")
     end
     config = _C.CLMDriverConfig(use_fates=true)
     filt_ia = _C.clump_filter_inactive_and_active
