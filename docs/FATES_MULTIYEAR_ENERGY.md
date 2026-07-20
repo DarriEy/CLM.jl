@@ -153,3 +153,24 @@ births 5209 / deaths 4434   8/8 PASS, no errlon
 against `main`'s death at day 98. Same picture as `arip_none`: the run completes, and
 the same unphysical growth rides along — `maxdbh` **1247 cm at day 1320** (12.5 m),
 carbon again **monotone** 2006 → 31900 with `min` = the cold start.
+
+### `after` arm — `bow_nowarm`: 1459/1460 days, 8/8 PASS
+
+```
+ran 1459/1460 days   carbon cold=2549 final=1991  min=1711  max=3937
+ncoh [14, 889]   npatch max=9   births 2625 / deaths 2211   8/8 PASS, no errlon
+```
+
+against `main`'s death at day 148.
+
+**This config is the informative one for the growth question.** Bow with
+`FATES_WARMSOIL=0` is the cold, GPP-limited site, and it is the only config whose
+carbon does *not* run away: it oscillates in **[1711, 3937]** and ends *below* its cold
+start, which is what a bounded quasi-steady demography looks like. `maxdbh` reaches
+159 cm by day 1020 — still too fast, but an order of magnitude short of Aripuanã's
+1247 cm over the same window.
+
+So the runaway scales with productivity, not with the filter fix: the same code produces
+a bounded trajectory where GPP is small and an explosive one where GPP is large. That is
+consistent with too much assimilate reaching structural/diameter growth, and it is
+independent of #280.
