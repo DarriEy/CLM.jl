@@ -864,7 +864,20 @@ Not site-specific, not config-specific, and it is what stopped both investigatio
 
 Three sites, four configurations, errors of 300-400 W/m² on a longwave flux. The check
 itself is original (`ff6543c`, the first balance-check port), so what changed is the
-model, not the assertion. Note the daily FATES carbon balance holds *right up to the
+model, not the assertion.
+
+**It is a REGRESSION, and it is bracketed.** The identical Aripuanã baseline run at
+#197's own merge commit (`712cb5c`) completes cleanly:
+
+```
+ran 149/150 days …  carbon: cold=2549 final=3822 …  daily balance held: 149/149
+★ FATES stable + demographically active over 150 days      (8/8 PASS, no errlon)
+```
+
+versus current `main`, which dies at **day 74**. So the fault was introduced somewhere
+in `712cb5c..37db702`. Worth noting the demography also diverged sharply over that
+range — at day ~144 the #197-era run holds `ncoh = 118, npatch = 2`, while current
+`main` had already reached `ncoh = 446, npatch = 6` by day 74. Note the daily FATES carbon balance holds *right up to the
 failure* in every case (`235/235`, `147/147`, `75/75` days) — a textbook instance of
 the `conservation-is-not-accuracy` class: the carbon books balance perfectly while the
 energy books are off by 400 W/m².
