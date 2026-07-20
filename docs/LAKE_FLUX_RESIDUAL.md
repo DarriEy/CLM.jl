@@ -411,6 +411,138 @@ above the 1e-05 floor, so it is currently inert), but it is a latent 1e5x floor
 error that will bite the moment D is fixed and the roughnesses move. Left
 unchanged here so it lands with its own evidence.
 
+## STEP 4 — D is CLOSED: `ks` (the eddy depth-decay rate) was hardwired to zero
+
+### The mechanism, with values
+
+`LakeFluxesMod.F90:755` computes the depth-decay rate of the lake's wind-driven
+eddy diffusivity, and `LakeTemperatureMod.F90:373` uses it:
+
+```
+ks = 6.6 * sqrt(|sin(lat)|) * u2m^-1.84                       [1/m], lat in RADIANS
+ke = vkc*ws*z_lake/p0 * exp(-ks*z_lake) / (1 + 37*ri^2)       [m2/s]
+```
+
+`lake_fluxes.jl` wrote **`ks_col[c] = zero(T)`** — a literal zero, because the
+gridcell latitude had never been wired into the lake kernel. The comment there
+justified the literal on AD grounds (`sqrt(0)` has an `Inf` ForwardDiff
+derivative), which is true at the equator and irrelevant everywhere else.
+
+`exp(-0*z) == 1` at every depth. So the surface eddy diffusivity **never decayed
+downward**: `ke` grew linearly with `z` all the way to the lake bed and the whole
+50 m column stayed turbulently coupled to the skin. At Bow (lat 51.17 deg,
+`u2m ~1.6 m/s`) the correct `ks` is **~2.4 /m**, so at 5 m depth the port's eddy
+diffusivity was `exp(2.4*5) = 1.6e5` times too large.
+
+The consequence is directly visible in `savedtke1 = kme(1)*cwat`, the top-layer
+eddy conductivity the surface solve conducts through:
+
+| | port (before) | port (after) | Fortran regime |
+|---|---|---|---|
+| `savedtke1`, steps 1-3 | 150-160 W/m/K | 131-133 | unfrozen eddy branch |
+| `savedtke1`, steps 7-16 | 148-160 W/m/K | **0.61-0.67** | frozen branch (`km + fangkm`) |
+
+With `tksur/dzsur = 150/0.05 = 3000 W/m2/K`, `t_grnd = ax/bx` is welded to
+`t_lake(1)`, and `t_lake(1)` is welded to 50 m of 277 K water. Every W/m2 the
+surface lost was replenished from the deep lake instead of from the top ~0.3 m,
+so `t_lake(1)` fell only ~0.12 K/step against a `gnet` of -280 W/m2 — which over
+0.1 m of water is 2.4 K/step. In the reference, layers 1+2 alone account for the
+entire `gnet` (-207 and -34 W/m2 against `gnet = -243`): **the reference barely
+mixes at all.**
+
+The chain, end to end:
+
+```
+ks = 0  ->  eddy diffusivity never decays with depth
+        ->  the whole 50 m column feeds the skin  (savedtke1 150 vs 0.6)
+        ->  t_grnd welded to t_lake(1) ~276 K, never reaches 273.15 K
+        ->  the UNFROZEN roughness branch stays selected (z0mg ~3.2e-5)
+        ->  z0hg ~9.5e-5 instead of ~7.6e-4
+        ->  rah ~305 s/m instead of ~145
+        ->  too little sensible+latent heat lost  ->  surface stays warm.
+```
+
+It is self-reinforcing, which is why three previous attempts inside the
+Monin-Obukhov solve could not move it.
+
+### The fix
+
+Wire `grc%lat` into the lake flux kernel (a new `grc_lat` field on `LakeFluxDV`,
+passed from `clm_drv_core!`) and restore the Fortran expression, branching on
+`|sin(lat)| > 0` so the equatorial `sqrt(0)` AD hazard the literal zero was
+guarding against is still handled — and handled without deleting the term.
+
+This is another instance of the master bug class in MEMORY
+(`dead-initcold-systemic`, "ported then never called"): the formula was ported
+correctly, its input never was, and the placeholder was documented as a
+simplification rather than as a defect.
+
+### Measured: the four numbers that decide whether D is closed
+
+`LAKE_AERO_PROBE=1`, steps 1-16. `rah_F` is inverted from the reference's own
+`FSH`/`TG`/`TBOT` (LakeFluxesMod.F90:526), so it compares like with like.
+
+| step | z0mg J before | z0mg J after | rah J before | rah J after | rah F | TG J before | TG J after | TG F |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 3.39e-05 | 3.39e-05 | 316.8 | 316.8 | 159.7 | 273.25 | 273.25 | 269.50 |
+| 5 | 3.19e-05 | 3.19e-05 | 305.4 | 305.4 | 146.6 | 274.90 | 273.99 | 267.57 |
+| 7 | 3.19e-05 | **1.000e-03** | 296.5 | **142.0** | 144.8 | 276.29 | **267.50** | 267.40 |
+| 10 | 3.11e-05 | **1.000e-03** | 296.5 | **144.4** | 144.9 | 275.96 | **267.28** | 267.25 |
+| 16 | 3.19e-05 | **1.000e-03** | 305.4 | **148.1** | 148.7 | 275.23 | **268.34** | 268.29 |
+
+* the surface reaches freezing (`t_lake(1)` hits exactly 273.150 at step 6 and
+  stays; before, `min(TG_J)` over 47 steps was 273.246 — it NEVER went below);
+* it picks up `z0frzlake = 1.000e-03` exactly, 31x the unfrozen Charnock value;
+* `rah` moves 305 -> ~145, onto the reference's 145-149 (**within 0.5%**);
+* `TG` tracks the reference to **0.04 K** from step 7 on, against 8-9 K before.
+
+Lake ice now forms: `LAKEICEFRAC_SURF` 0.000 at every one of 47 steps before,
+0.277 at step 16 after, against the reference's 0.361.
+
+### Per-field parity, before -> after (47 steps, max|rel|)
+
+| field | #279 head | after D | note |
+|---|---|---|---|
+| LAKEICE / LAKEICE_SRF | 3.80e-01 | **8.50e-02** | 4.5x |
+| FSA | 5.00e-01 | **3.80e-02** | dawn/dusk near-zero-solar artifact, moved off |
+| EFLX_LH | 2.70e-01 | 2.40e-01 | max now in the freeze-onset window |
+| FIRE | 1.40e-01 | 1.30e-01 | |
+| TG | 3.30e-02 | 3.10e-02 | |
+| TLAKE | 1.30e-02 | 1.20e-02 | |
+| TSA | 7.40e-03 | 7.40e-03 | unchanged (finding B) |
+| H2OSNO | 2.00e-01 | 2.00e-01 | unchanged |
+| **FSH** | 2.70e-01 | **3.30e-01** | **WORSE — see below** |
+| **run max\|rel\|** | 4.966e-01 | **3.308e-01** | |
+
+**FSH gets worse and that is reported, not tuned.** The FSH maximum moves INTO
+the freeze-onset window and grows there, while collapsing everywhere else:
+
+| step | 1 | 4 | 5 | 6 | 7 | 8 | 12 | 20 | 30 | 40 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| FSH rel before | 0.220 | 0.160 | 0.180 | 0.190 | 0.190 | 0.180 | 0.230 | 0.210 | 0.130 | 0.220 |
+| FSH rel after | 0.220 | 0.230 | 0.290 | 0.330 | **0.026** | **0.006** | **0.007** | **0.032** | **0.009** | **0.009** |
+
+From step 7 on FSH improves by **20-30x**. The surviving maximum is a
+**cold-start phase lag**, not an aerodynamic bias: the port cold-starts from a
+uniform 277 K lake (exactly CTSM's `TemperatureType.F90:833-836`) while the
+reference's first h0 record already shows a partly-cooled top layer
+(`TLAKE(1) = 274.81`, i.e. the reference has already shed ~255 W/m2 for one hour
+before the harness's step 1). The port therefore reaches freezing at step 6
+where the reference is frozen from its first record, and across steps 4-6 the
+two models are in DIFFERENT SURFACE PHASES — one on ice, one on open water.
+That is a residual worth its own investigation (it is a harness/reference
+alignment question about what the `nstep=0` record contains, not a kernel), and
+it is deliberately left open rather than absorbed into a looser tolerance.
+
+### Also fixed: the `MINZ0LAKE` / `FCRIT` mixed pair
+
+`MINZ0LAKE` is now `1.0e-10`, matching `FCRIT = 100.0` on the
+`lake_use_old_fcrit_minz0 = .false.` side of `LakeCon.F90:143-158` (CTSM's
+default, `LakeCon.F90:98`, and the reference's setting). This is **coupled to the
+D fix and had to land with it**: while the lake never froze, `z0hg ~9.5e-05` sat
+above the old `1e-05` floor and the mismatch was inert. Once D lets the surface
+freeze, the roughnesses move, and a floor 1e5x above CTSM's is a live error.
+
 ## Status
 
 STEP 1 complete (table above; `z0param_method` retracted as a dead end).
@@ -426,14 +558,21 @@ none of which is the Monin-Obukhov *iteration* that three previous fixes chased:
   scalar pair shared with the array form. The reference sits in regime 1 at every
   one of its 47 steps. FSH 3.10e-01 -> 2.70e-01, EFLX_LH 2.80e-01 -> 2.70e-01,
   and `ustar` moves onto the reference (0.075 -> 0.058 vs Fortran's ~0.061).
-- **D (port, NEW, open):** the run metric nevertheless went 3.11e-01 -> 4.97e-01,
-  because C broke up a compensating pair. The port's lake surface never freezes
-  (TG 273-276 K vs 267-269 K), so it stays on the UNFROZEN roughness branch and
-  runs `z0hg` ~25x below the frozen `z0frzlake` branch CTSM is on, leaving
-  `rah ~300` against Fortran's `~150`. That is a lake surface energy/ice-state
-  defect, upstream of the Monin-Obukhov solve, and it is the whole of the
-  surviving FSH/EFLX_LH/LAKEICE residual. See STEP 3 for the inverted-resistance
-  evidence.
+- **D (port, physics): FIXED.** `ks`, the depth-decay rate of the lake eddy
+  diffusivity (`LakeFluxesMod.F90:755`), was hardwired to zero because the
+  gridcell latitude had never been wired into the lake kernel — so `exp(-ks*z)`
+  was 1 at every depth and the whole 50 m column mixed to the skin. The surface
+  therefore could not reach freezing and stayed on the unfrozen roughness
+  branch. Fixed: lake now freezes at step 6, picks up `z0frzlake = 1e-3`,
+  `rah` 305 -> 145 (reference 145-149), `TG` within 0.04 K, `LAKEICE`
+  3.80e-01 -> 8.50e-02, run max|rel| 4.97e-01 -> 3.31e-01. FSH's maximum moves
+  into (and grows in) the freeze-onset window while improving 20-30x elsewhere;
+  see STEP 4.
+- **E (open, NEW):** the port and the reference are not aligned at step 1. The
+  port cold-starts at a uniform 277 K lake (CTSM's own cold start) while the
+  reference's first h0 record already shows `TLAKE(1) = 274.81`, one hour of
+  cooling ahead. The port reaches freezing ~6 steps late as a result, and that
+  lag is now the largest single contributor to the remaining metric.
 
 B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only
 over `mask_lakep`; nothing wrote `t_ref2m_patch` on a lake patch before), so

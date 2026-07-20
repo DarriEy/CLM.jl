@@ -156,6 +156,13 @@ function main(; nsteps::Int = 48)
     # exercise" was unanswerable. zeta is now carried out on frictionvel.zeta_patch.
     zetas = Float64[]
     regimes = Int[]
+    # Lake eddy-diffusivity depth-decay rate ks [1/m] (LakeFluxesMod.F90:755) and the
+    # roughness/resistance the surface flux hangs on. ks was hardwired to 0 (the
+    # gridcell latitude was never wired into the lake kernel), which makes
+    # exp(-ks*z) == 1 at every depth: the wind-driven eddy diffusivity then never
+    # decays and the whole 50 m column is coupled to the skin. Carried out per step
+    # so the suite can assert its VALUE, and the freeze it enables, per step.
+    kss = Float64[]; z0mgs = Float64[]; rahs = Float64[]
     zetat_h = 0.465   # temperature/humidity profile transition (FrictionVelocityMod)
     regime_of(z) = z < -zetat_h ? 1 : z < 0.0 ? 2 : z <= 1.0 ? 3 : 4
     for s in 1:nsteps
@@ -188,6 +195,16 @@ function main(; nsteps::Int = 48)
 
         zc = Float64(inst.frictionvel.zeta_patch[p_lake])
         push!(zetas, zc); push!(regimes, regime_of(zc))
+        push!(kss, Float64(inst.lakestate.ks_col[c_lake]))
+        push!(z0mgs, Float64(inst.frictionvel.z0mg_patch[p_lake]))
+        # rah inverted from the port's own flux definition (LakeFluxesMod.F90:526),
+        # the same inversion LAKE_AERO_PROBE applies to the Fortran h0 fields.
+        let rho = Float64(inst.atm2lnd.forc_rho_downscaled_col[c_lake]),
+            thm = Float64(inst.atm2lnd.forc_t_downscaled_col[c_lake]) + 0.0098*30.0,
+            fsh = Float64(inst.energyflux.eflx_sh_tot_patch[p_lake]),
+            tg  = Float64(inst.temperature.t_grnd_col[c_lake])
+            push!(rahs, abs(fsh) > 1e-8 ? rho*1004.64*(tg - thm)/fsh : NaN)
+        end
 
         per = Dict{String,Float64}()
         # scalar fields
@@ -287,7 +304,7 @@ function main(; nsteps::Int = 48)
     counts = [count(==(r), regimes) for r in 1:4]
     @printf("zeta range over run: [%.3f, %.3f] | regime steps: 1(very unstable)=%d 2(unstable)=%d 3(stable)=%d 4(very stable)=%d\n",
             minimum(zetas), maximum(zetas), counts[1], counts[2], counts[3], counts[4])
-    return (; nsteps, jv, fv = fvv, gmax_run, zetas, regimes)
+    return (; nsteps, jv, fv = fvv, gmax_run, zetas, regimes, kss, z0mgs, rahs)
 end
 
 # Auto-run only when executed as a script; `include`d from a test, callers drive
