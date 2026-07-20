@@ -88,8 +88,19 @@ const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicar
 _rel(j, f) = (isnan(j) || isnan(f)) ? NaN : abs(j - f) / (1 + abs(f))
 _fv(x) = ismissing(x) ? NaN : Float64(x)
 
+"""
+    main(; nsteps=48) -> NamedTuple or `missing`
+
+Runs the lake parity comparison and prints the per-step table. ALSO returns the
+raw per-step Julia and Fortran values (`jv` / `fv`, `Dict{String,Vector{Float64}}`
+keyed by the scalar field names below) so a TEST can assert VALUES rather than
+re-print relative diffs — `test_lake_ref2m.jl` uses this. Returns `missing` when
+the machine-local reference inputs are absent, so callers can skip.
+"""
 function main(; nsteps::Int = 48)
-    isfile(H0) || error("Fortran lake h0 reference not found: $H0")
+    if !isfile(H0) || !isfile(LAKE) || !isfile(FP) || !isfile(FFORC)
+        return missing
+    end
     base = DateTime(2003, 1, 1)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=LAKE, paramfile=FP,
         start_date=base, dtime=3600, use_cn=false, use_luna=false, use_bedrock=true,
@@ -136,6 +147,9 @@ function main(; nsteps::Int = 48)
 
     @printf("\n%-5s %-7s %11s | %s\n", "nstep", "tod", "global", "per-field max|rel|")
     gmax_run = 0.0
+    # Raw per-step values, returned for value-level assertions in the test suite.
+    jv = Dict{String,Vector{Float64}}(nm => Float64[] for (nm, _, _) in scalars)
+    fvv = Dict{String,Vector{Float64}}(nm => Float64[] for (nm, _, _) in scalars)
     for s in 1:nsteps
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0/CLM.SECSPDAY)
@@ -168,7 +182,9 @@ function main(; nsteps::Int = 48)
         # scalar fields
         for (nm, getj, fn) in scalars
             haskey(fds, fn) || continue
-            per[nm] = _rel(Float64(getj()), _fv(fds[fn][1, s + LAKE_REC_SHIFT]))
+            jval = Float64(getj()); fval = _fv(fds[fn][1, s + LAKE_REC_SHIFT])
+            push!(jv[nm], jval); push!(fvv[nm], fval)
+            per[nm] = _rel(jval, fval)
         end
         # per-level lake fields: max|rel| over the 10 lake layers
         for (nm, jarr, fn) in [("TLAKE", temp.t_lake_col, "TLAKE"),
@@ -226,8 +242,13 @@ function main(; nsteps::Int = 48)
     CLM.forcing_reader_close!(fr)
     close(fds)
     @printf("\nRun max |rel| over %d steps: %.3e\n", nsteps, gmax_run)
+    return (; nsteps, jv, fv = fvv, gmax_run)
 end
 
-let na = filter(a -> occursin(r"^\d+$", a), ARGS)
-    main(; nsteps = isempty(na) ? 48 : parse(Int, na[1]))
+# Auto-run only when executed as a script; `include`d from a test, callers drive
+# `main` themselves and read its return value.
+if abspath(PROGRAM_FILE) == @__FILE__
+    let na = filter(a -> occursin(r"^\d+$", a), ARGS)
+        main(; nsteps = isempty(na) ? 48 : parse(Int, na[1]))
+    end
 end

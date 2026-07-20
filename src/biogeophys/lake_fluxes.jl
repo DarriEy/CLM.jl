@@ -77,12 +77,18 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
     eflx_sh_tot::V; eflx_sh_grnd::V; eflx_lh_tot::V; eflx_lh_grnd::V
     eflx_lwrad_out::V; eflx_lwrad_net::V; eflx_soil_grnd::V; eflx_gnet::V; taux::V; tauy::V
     qflx_evap_soi::V; qflx_evap_tot::V; ustar::V; z0mg::V; z0hg::V; z0qg::V
+    # 2-m diagnostics (LakeFluxesMod.F90:708-717). These were NEVER written on a
+    # lake patch: `t_ref2m_patch` is touched only by bareground_fluxes.jl and
+    # urban_fluxes.jl, neither of which runs on a lake, so TSA on a 100%-lake
+    # gridcell sat at its cold-start 283.000 K for the whole run while Fortran's
+    # TSA ranged over 255-270 K. A dead write, not a physics error.
+    t_ref2m::V; q_ref2m::V; rh_ref2m::V
 end
 Adapt.@adapt_structure LakeFluxDV
 
 # Build a LakeFluxDV from the caller's state structs (array fields are shared refs).
 function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
-                       waterstatebulk, waterfluxbulk, col_data, patch_data,
+                       waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
                        forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc)
     return LakeFluxDV(;
@@ -113,7 +119,10 @@ function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate
         qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch,
         qflx_evap_tot = waterfluxbulk.wf.qflx_evap_tot_patch,
         ustar = frictionvel.ustar_patch, z0mg = frictionvel.z0mg_patch,
-        z0hg = frictionvel.z0hg_patch, z0qg = frictionvel.z0qg_patch)
+        z0hg = frictionvel.z0hg_patch, z0qg = frictionvel.z0qg_patch,
+        t_ref2m = temperature.t_ref2m_patch,
+        q_ref2m = waterdiagbulk.q_ref2m_patch,
+        rh_ref2m = waterdiagbulk.rh_ref2m_patch)
 end
 
 # --------------------------------------------------------------------------
@@ -302,6 +311,15 @@ end
         # ============================================================
         t_grnd_new = tgbef
         rah_c = one(T); raw_c = one(T); ram_c = one(T)   # converged resistances (set in loop)
+        # Converged profile coefficients + surface-air differences, carried OUT of
+        # the iteration for the 2-m diagnostics. Fortran computes t_ref2m in the
+        # loop that FOLLOWS the stability iteration (LakeFluxesMod.F90:708), using
+        # temp1/temp12m from the last FrictionVelocity call and dth/dqh as last set
+        # inside the iteration (F90:535-536) — i.e. BEFORE the Phase-3 freeze
+        # corrections adjust t_grnd. So these must be captured here, not recomputed
+        # from the corrected t_grnd.
+        temp1_c = one(T); temp2_c = one(T); temp12m_c = one(T); temp22m_c = one(T)
+        dth_c = zero(T); dqh_c = zero(T)
 
         for iter in 1:niters
             # Aerodynamic resistances
@@ -335,6 +353,21 @@ end
             # Transfer coefficients
             temp1 = T(VKC) / (log(zldis_t / z0hg) - stability_func2(zeta_t) + stability_func2(zeta0h))
             temp2 = T(VKC) / (log(zldis_q / z0qg) - stability_func2(zeta_q) + stability_func2(zeta0q))
+
+            # Same profile relations evaluated at 2 m (FrictionVelocityMod.F90:1010-1050).
+            # The 2-m reference height is 2 + z0, and Fortran short-circuits
+            # temp22m = temp12m when z0q == z0h (which is exactly the frozen-lake
+            # branch above, where z0qg is assigned from z0hg).
+            zldis_2h = T(2.0) + z0hg
+            zeta_2h = clamp(zldis_2h / obu, T(-100.0), T(ZETAMAX_LAKE))
+            temp12m = T(VKC) / (log(zldis_2h / z0hg) - stability_func2(zeta_2h) + stability_func2(zeta0h))
+            if z0qg == z0hg
+                temp22m = temp12m
+            else
+                zldis_2q = T(2.0) + z0qg
+                zeta_2q = clamp(zldis_2q / obu, T(-100.0), T(ZETAMAX_LAKE))
+                temp22m = T(VKC) / (log(zldis_2q / z0qg) - stability_func2(zeta_2q) + stability_func2(zeta0q))
+            end
 
             # Aerodynamic resistances
             ram = one(T) / (ustar * T(VKC) / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m)))
@@ -394,6 +427,12 @@ end
             obu = zldis_u / zeta_val
             obu = clamp(obu, T(-1e4), T(1e4))
             rah_c = rah; raw_c = raw; ram_c = ram   # carry converged (log + stability) resistances
+            temp1_c = temp1; temp2_c = temp2; temp12m_c = temp12m; temp22m_c = temp22m
+            dth_c = dth_new
+            # Fortran's dqh for the diagnostics is forc_q - QSat(t_grnd) evaluated at
+            # the UPDATED ground temperature (F90:532-536), not the Newton-linearised
+            # qsatg + qsatgdT*dT that dqh_new above carries for the thvstar update.
+            dqh_c = forc_q[c] - qsat_water(t_grnd_new, forc_pbot[c])
 
             # Update roughness for unfrozen lakes
             if tgbef > T(TFRZ)
@@ -480,6 +519,18 @@ end
         d.qflx_evap_soi[p] = qflx_evap_soi_p
         d.qflx_evap_tot[p] = qflx_evap_soi_p
 
+        # ---- 2-m diagnostics (LakeFluxesMod.F90:707-717) ----
+        # DEAD WRITE until now: nothing wrote t_ref2m_patch on a lake patch, so TSA
+        # on a 100%-lake gridcell reported the untouched cold-start 283.000 K at
+        # every step. Writing it here is lake-landunit-gated by construction — this
+        # kernel only ever runs over `mask_lakep`, and no other landunit's 2-m
+        # diagnostic reaches this code path.
+        d.t_ref2m[p] = thm + temp1_c * dth_c * (one(T) / temp12m_c - one(T) / temp1_c)
+        q_ref2m_p = forc_q[c] + temp2_c * dqh_c * (one(T) / temp22m_c - one(T) / temp2_c)
+        d.q_ref2m[p] = q_ref2m_p
+        (qsat_ref2m, _, _, _) = qsat(d.t_ref2m[p], forc_pbot[c])
+        d.rh_ref2m[p] = min(T(100.0), q_ref2m_p / qsat_ref2m * T(100.0))
+
         d.ustar[p] = ustar
         d.z0mg[p] = z0mg
         d.z0hg[p] = z0hg
@@ -563,7 +614,7 @@ function lake_fluxes!(temperature::TemperatureData,
     np == 0 && return nothing
 
     dv = _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
-                       waterstatebulk, waterfluxbulk, col_data, patch_data,
+                       waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
                        forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc)
 
