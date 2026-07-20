@@ -687,6 +687,13 @@ function init_soilwater_movement(; kwargs...)
         error("init_soilwater_movement: ZD09 must use bc_aquifer lower boundary condition")
     end
 
+    # CTSM's second consistency check, SoilWaterMovementMod.F90:181. The live
+    # path is guarded at the clm_drv! call site (this function is only reached
+    # from tests), but mirror it here so both entry points agree.
+    if varctl.use_bedrock && cfg.lower_boundary_condition != BC_ZERO_FLUX
+        error("init_soilwater_movement: use_bedrock requires bc_zero_flux lower boundary condition")
+    end
+
     return cfg
 end
 
