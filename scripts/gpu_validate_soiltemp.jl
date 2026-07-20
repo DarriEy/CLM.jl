@@ -119,7 +119,11 @@ function tests(to, ::Type{FT}) where {FT}
     # ssw also writes fn_h2osfc
     push!(results, _parity("rhs_ssw", to, FT, CLM._rhs_ssw_kernel!, nc, rv0,
         f -> begin fh = f(zeros(FT, nc));
-            ((f(I.mask), f(I.t_soisno), f(I.t_h2osfc), f(I.z), f(I.tk_h2osfc), f(I.dz_h2osfc),
+            # `itype` was added to _rhs_ssw_kernel! (soil_temperature.jl:1324) to
+            # decouple the urban roof/wall standing-water row, and this call was never
+            # updated — 13 args against a 14-arg kernel, so it died with a MethodError
+            # before running. Its two sibling calls just below already pass f(I.itype).
+            ((f(I.mask), f(I.itype), f(I.t_soisno), f(I.t_h2osfc), f(I.z), f(I.tk_h2osfc), f(I.dz_h2osfc),
               f(I.c_h2osfc), f(I.hs_h2osfc), f(I.dhsdT), fh, dt, NLEVSNO), (fh,)) end))
     push!(results, _parity("rhs_soil_urban", to, FT, CLM._rhs_soil_urban_kernel!, (nc, NLEVURB), rv0,
         f -> ((f(I.mask), f(I.itype), f(I.snl), f(I.t_soisno), f(I.fact), f(I.fn), f(I.dhsdT),
@@ -139,7 +143,8 @@ function tests(to, ::Type{FT}) where {FT}
     push!(results, _parity("mat_snow", to, FT, CLM._mat_snow_kernel!, (nc, NLEVSNO), bm0,
         f -> ((f(I.mask), f(I.snl), f(I.z), f(I.tk), f(I.fact), f(I.dhsdT), NLEVSNO), ())))
     push!(results, _parity("mat_ssw", to, FT, CLM._mat_ssw_kernel!, nc, bm0,
-        f -> ((f(I.mask), f(I.z), f(I.tk_h2osfc), f(I.dz_h2osfc), f(I.c_h2osfc), f(I.dhsdT),
+        # Same missing `itype` as the rhs_ssw call above (soil_temperature.jl:1513).
+        f -> ((f(I.mask), f(I.itype), f(I.z), f(I.tk_h2osfc), f(I.dz_h2osfc), f(I.c_h2osfc), f(I.dhsdT),
                dt, NLEVSNO), ())))
     push!(results, _parity("mat_soil_urban", to, FT, CLM._mat_soil_urban_kernel!, (nc, NLEVURB), bm0,
         f -> ((f(I.mask), f(I.itype), f(I.snl), f(I.z), f(I.zi), f(I.tk), f(I.fact), f(I.dhsdT),
@@ -170,7 +175,13 @@ function test_pc_h2osfc(to, ::Type{FT}, I, dt) where {FT}
     run!(s, to_) = (CLM._launch!(CLM._phase_change_h2osfc_kernel!, s.t_h2osfc, s.t_soisno, s.h2osfc,
         s.h2osno, s.ice, s.sd, s.isnow, s.xmf, s.q2i, s.e2s, _dev(to_, I.mask), _dev(to_, I.snl),
         _dev(to_, I.fact), _dev(to_, I.c_h2osfc), _dev(to_, I.frac_sno_eff), _dev(to_, I.frac_h2osfc),
-        _dev(to_, I.h2osoi_liq), _dev(to_, I.dhsdT), dt, NLEVSNO); s)
+        # Trailing `pck`: the PHASE_CHANGE_MASS_K smoothing constant, read on the HOST
+        # and passed in as a scalar (soil_temperature.jl:1822) precisely so the kernel
+        # never dereferences a host Ref on a device. Added to the kernel after this
+        # harness was written — 20 args against a 21-arg kernel, MethodError before
+        # running. Convert at the working eltype, exactly as the real launch does.
+        _dev(to_, I.h2osoi_liq), _dev(to_, I.dhsdT), dt, NLEVSNO,
+        convert(FT, CLM.PHASE_CHANGE_MASS_K[])); s)
     cpu = mkset(identity); run!(cpu, identity)
     dev = mkset(x -> _dev(to, x)); run!(dev, to)
     d = combinediff((cpu.t_h2osfc, dev.t_h2osfc), (cpu.t_soisno, dev.t_soisno),
@@ -204,7 +215,10 @@ function test_pc_beta(to, ::Type{FT}, I, dt) where {FT}
         backend = CLM._kernel_backend(lyr.t_soisno)
         CLM._phase_change_beta_kernel!(backend)(lyr, colv, pin, tmp, imelt,
             _dev(to_, I.mask), _dev(to_, I.urbpoi), _dev(to_, I.snl), _dev(to_, I.landunit),
-            _dev(to_, I.itype), _dev(to_, I.lun_itype), dt, NLEVSNO, NLEVGRND, NLEVURB, NLEVMAX;
+            _dev(to_, I.itype), _dev(to_, I.lun_itype), dt, NLEVSNO, NLEVGRND, NLEVURB, NLEVMAX,
+            # Same host-hoisted PHASE_CHANGE_MASS_K trailing scalar as the fn7 call
+            # above (real launch: soil_temperature.jl:2192).
+            convert(FT, CLM.PHASE_CHANGE_MASS_K[]);
             ndrange = nc)
         KernelAbstractions.synchronize(backend)
     end

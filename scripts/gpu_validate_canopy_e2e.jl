@@ -35,6 +35,9 @@ function build(::Type{FT}) where {FT}
     canopystate.elai_patch[1] = 2.0;  canopystate.esai_patch[1] = 0.5
     canopystate.laisun_patch[1] = 1.2; canopystate.laisha_patch[1] = 0.8
     canopystate.displa_patch[1] = 5.0; canopystate.htop_patch[1] = 10.0
+    # The bare-canopy z0 the ZengWang2007 blend re-seeds z0mv from each step; see the
+    # note at the z0mv_patch assignment below. Mirrors test/test_canopy_fluxes.jl:102.
+    canopystate.z0m_patch[1] = 0.5
     canopystate.frac_veg_nosno_patch[1] = 1; canopystate.dleaf_patch[1] = 0.04
     canopystate.stem_biomass_patch[1] = 0.0; canopystate.leaf_biomass_patch[1] = 0.0
 
@@ -47,6 +50,14 @@ function build(::Type{FT}) where {FT}
     frictionvel = CLM.FrictionVelocityData{FT}(); CLM.frictionvel_init!(frictionvel, np, nc)
     frictionvel.zetamaxstable = 0.5; frictionvel.zsno = 0.00085; frictionvel.zlnd = 0.000775
     frictionvel.z0mv_patch[1] = 0.5; frictionvel.z0hv_patch[1] = 0.5; frictionvel.z0qv_patch[1] = 0.5
+    # z0mv_patch is NOT an independent input: canopy_fluxes_core! re-seeds it from
+    # canopystate.z0m_patch every step (canopy_fluxes.jl:1709), matching Fortran's
+    # per-step z0mv = z0mr*htop recompute. That re-seed landed in 0e23b3e, which
+    # updated test/test_canopy_fluxes.jl:102 and test_canopy_reverse.jl but not this
+    # clone — so the 0.5 set above was overwritten by z0m_patch's NaN init
+    # (canopy_state.jl:124), and the `max(z0mv, z0mg)` floor at canopy_fluxes.jl:1029
+    # cannot rescue a NaN. Result: z0mv → forc_hgt_u → ustar → t_veg all NaN on the
+    # device while this harness reported it as a parity DIVERGENCE.
     frictionvel.z0mg_col[1] = 0.01; frictionvel.z0hg_col[1] = 0.01; frictionvel.z0qg_col[1] = 0.01
     frictionvel.forc_hgt_u_patch[1] = 30.0; frictionvel.forc_hgt_t_patch[1] = 30.0
     frictionvel.forc_hgt_q_patch[1] = 30.0

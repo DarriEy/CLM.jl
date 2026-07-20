@@ -1864,8 +1864,16 @@ function combine_snow_layers!(
     cv = CombineSnowCol(; h2osno_no_layers, snow_depth, frac_sno, frac_sno_eff, int_snow,
                         qflx_sl_top_soil)
 
+    # dtime is converted to the working eltype HERE, on the host. Passing the raw
+    # Float64 made `dt = T(dtime)` a DEVICE-side double conversion, and Metal cannot
+    # take a double at all: the kernel failed to compile outright with "unsupported
+    # use of double value", so combine_snow_layers! could never run on a Float32-only
+    # backend. The kernel-header note about converting literals covers exactly that —
+    # literals — and a scalar ARGUMENT slipped past it. Same host-side conversion the
+    # sibling launches in this file already do (lines 396, 663, 825). Identity on a
+    # Float64 backend, so the CPU path stays byte-identical.
     _launch!(_snowhyd_combine_kernel!, snl, m, a, cv, mask_snow, lun_itype, urbpoi,
-             col_landunit, dzmin, dtime, nlevsno, first(bounds), last(bounds);
+             col_landunit, dzmin, eltype(dz)(dtime), nlevsno, first(bounds), last(bounds);
              ndrange = length(snl))
     return nothing
 end
