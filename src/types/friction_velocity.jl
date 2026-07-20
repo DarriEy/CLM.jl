@@ -364,6 +364,85 @@ function stability_func2(zeta::Real)
 end
 
 # ==========================================================================
+# Scalar (GPU-safe) Monin-Obukhov profile denominators
+#
+# `friction_velocity!` above is the array/filter form of CTSM's
+# `FrictionVelocity`. Kernels that cannot call it — notably `lake_fluxes.jl`,
+# which must run the stability iteration per-thread — used to re-derive the
+# profile inline and only ever implemented ONE of CTSM's FOUR `zeta` regimes
+# (the plain unstable one), so a strongly-convective or stable surface silently
+# got the wrong transfer coefficient. These two helpers are the exact
+# `FrictionVelocityMod.F90` four-way branch as scalars, so there is a single
+# definition of the profile for every caller.
+#
+# Both return the DENOMINATOR of the profile relation (`vkc/denominator` is the
+# transfer coefficient; `vkc*um/denominator` is `ustar`). Eltype-generic and
+# branch-only, so they lower to valid Float32 Metal IR.
+#
+# Regimes (identical structure for momentum and heat, different transition
+# constant and different convective correction):
+#   1. zeta < -zeta*   very unstable — log capped at the transition, plus a
+#                      free-convection correction term
+#   2. zeta < 0        unstable      — plain log + StabilityFunc
+#   3. zeta <= 1       stable        — log + 5*zeta linear correction
+#   4. zeta > 1        very stable   — log capped at obu, plus 5*log(zeta)+zeta-1
+# ==========================================================================
+
+"Transition point of the flux-gradient relation, WIND profile (FrictionVelocityMod)."
+const ZETAM_PROFILE = 1.574
+"Transition point of the flux-gradient relation, TEMPERATURE/HUMIDITY profile."
+const ZETAT_PROFILE = 0.465
+
+"""
+    mo_profile_denom_m(zeta, zldis, z0m, obu) -> Real
+
+Momentum (wind) profile denominator; `ustar = VKC*um / mo_profile_denom_m(...)`.
+Scalar port of `FrictionVelocityMod.F90:847-861` — all four `zeta` regimes.
+"""
+@inline function mo_profile_denom_m(zeta::Real, zldis::Real, z0m::Real, obu::Real)
+    T = promote_type(typeof(zeta), typeof(zldis), typeof(z0m), typeof(obu))
+    ze = T(zeta); zl = T(zldis); z0 = T(z0m); ob = T(obu)
+    zetam = T(ZETAM_PROFILE)
+    if ze < -zetam                                        # 1. very unstable
+        return log(-zetam * ob / z0) - stability_func1(-zetam) +
+               stability_func1(z0 / ob) +
+               T(1.14) * ((-ze)^T(0.333) - zetam^T(0.333))
+    elseif ze < zero(T)                                   # 2. unstable
+        return log(zl / z0) - stability_func1(ze) + stability_func1(z0 / ob)
+    elseif ze <= one(T)                                   # 3. stable
+        return log(zl / z0) + T(5.0) * ze - T(5.0) * z0 / ob
+    else                                                  # 4. very stable
+        return log(ob / z0) + T(5.0) - T(5.0) * z0 / ob +
+               (T(5.0) * log(ze) + ze - one(T))
+    end
+end
+
+"""
+    mo_profile_denom_h(zeta, zldis, z0h, obu) -> Real
+
+Temperature/humidity profile denominator; `temp1 = VKC / mo_profile_denom_h(...)`.
+Scalar port of `FrictionVelocityMod.F90:946-960` — all four `zeta` regimes.
+Pass `z0q` to get the humidity (`temp2`) form; the branch structure is identical.
+"""
+@inline function mo_profile_denom_h(zeta::Real, zldis::Real, z0h::Real, obu::Real)
+    T = promote_type(typeof(zeta), typeof(zldis), typeof(z0h), typeof(obu))
+    ze = T(zeta); zl = T(zldis); z0 = T(z0h); ob = T(obu)
+    zetat = T(ZETAT_PROFILE)
+    if ze < -zetat                                        # 1. very unstable
+        return log(-zetat * ob / z0) - stability_func2(-zetat) +
+               stability_func2(z0 / ob) +
+               T(0.8) * (zetat^T(-0.333) - (-ze)^T(-0.333))
+    elseif ze < zero(T)                                   # 2. unstable
+        return log(zl / z0) - stability_func2(ze) + stability_func2(z0 / ob)
+    elseif ze <= one(T)                                   # 3. stable
+        return log(zl / z0) + T(5.0) * ze - T(5.0) * z0 / ob
+    else                                                  # 4. very stable
+        return log(ob / z0) + T(5.0) - T(5.0) * z0 / ob +
+               (T(5.0) * log(ze) + ze - one(T))
+    end
+end
+
+# ==========================================================================
 # MoninObukIni — Monin-Obukhov length initialization
 # ==========================================================================
 

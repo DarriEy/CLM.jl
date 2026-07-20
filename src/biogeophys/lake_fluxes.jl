@@ -77,12 +77,22 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
     eflx_sh_tot::V; eflx_sh_grnd::V; eflx_lh_tot::V; eflx_lh_grnd::V
     eflx_lwrad_out::V; eflx_lwrad_net::V; eflx_soil_grnd::V; eflx_gnet::V; taux::V; tauy::V
     qflx_evap_soi::V; qflx_evap_tot::V; ustar::V; z0mg::V; z0hg::V; z0qg::V
+    # 2-m diagnostics (LakeFluxesMod.F90:708-717). These were NEVER written on a
+    # lake patch: `t_ref2m_patch` is touched only by bareground_fluxes.jl and
+    # urban_fluxes.jl, neither of which runs on a lake, so TSA on a 100%-lake
+    # gridcell sat at its cold-start 283.000 K for the whole run while Fortran's
+    # TSA ranged over 255-270 K. A dead write, not a physics error.
+    t_ref2m::V; q_ref2m::V; rh_ref2m::V
+    # Converged Monin-Obukhov length + stability parameter. Fortran carries both
+    # as patch state; the port computed and discarded them, so nothing outside
+    # the kernel could tell WHICH stability regime a lake step was running in.
+    obu_out::V; zeta_out::V
 end
 Adapt.@adapt_structure LakeFluxDV
 
 # Build a LakeFluxDV from the caller's state structs (array fields are shared refs).
 function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
-                       waterstatebulk, waterfluxbulk, col_data, patch_data,
+                       waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
                        forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc)
     return LakeFluxDV(;
@@ -113,7 +123,11 @@ function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate
         qflx_evap_soi = waterfluxbulk.wf.qflx_evap_soi_patch,
         qflx_evap_tot = waterfluxbulk.wf.qflx_evap_tot_patch,
         ustar = frictionvel.ustar_patch, z0mg = frictionvel.z0mg_patch,
-        z0hg = frictionvel.z0hg_patch, z0qg = frictionvel.z0qg_patch)
+        z0hg = frictionvel.z0hg_patch, z0qg = frictionvel.z0qg_patch,
+        t_ref2m = temperature.t_ref2m_patch,
+        q_ref2m = waterdiagbulk.q_ref2m_patch,
+        rh_ref2m = waterdiagbulk.rh_ref2m_patch,
+        obu_out = frictionvel.obu_patch, zeta_out = frictionvel.zeta_patch)
 end
 
 # --------------------------------------------------------------------------
@@ -302,6 +316,20 @@ end
         # ============================================================
         t_grnd_new = tgbef
         rah_c = one(T); raw_c = one(T); ram_c = one(T)   # converged resistances (set in loop)
+        # Converged profile coefficients + surface-air differences, carried OUT of
+        # the iteration for the 2-m diagnostics. Fortran computes t_ref2m in the
+        # loop that FOLLOWS the stability iteration (LakeFluxesMod.F90:708), using
+        # temp1/temp12m from the last FrictionVelocity call and dth/dqh as last set
+        # inside the iteration (F90:535-536) — i.e. BEFORE the Phase-3 freeze
+        # corrections adjust t_grnd. So these must be captured here, not recomputed
+        # from the corrected t_grnd.
+        temp1_c = one(T); temp2_c = one(T); temp12m_c = one(T); temp22m_c = one(T)
+        dth_c = zero(T); dqh_c = zero(T)
+        # Converged Monin-Obukhov length / stability parameter. Fortran keeps
+        # these as patch state (`obu`, `zeta` in LakeFluxesMod); the port dropped
+        # them on the floor, which is why the stability REGIME the lake was
+        # actually running in could not be observed from outside the kernel.
+        zeta_conv = zero(T)
 
         for iter in 1:niters
             # Aerodynamic resistances
@@ -312,32 +340,50 @@ end
             zldis_t = max(zldis_t, z0hg + T(0.01))
             zldis_q = max(zldis_q, z0qg + T(0.01))
 
-            # Stability functions
+            # Stability parameter at each reference height.
+            #
+            # These are NOT clamped. The previous code clamped every zeta into
+            # [-100, ZETAMAX_LAKE=0.5] before evaluating the profile, which is
+            # Fortran's clamp on the zeta UPDATE (LakeFluxesMod.F90:544-551,
+            # applied below), not a clamp inside FrictionVelocity — CTSM's
+            # profile relations see the raw zldis/obu. Clamping here truncated
+            # exactly the strongly-convective range the four-regime branch exists
+            # to handle.
             zeta_u = zldis_u / obu
             zeta_t = zldis_t / obu
             zeta_q = zldis_q / obu
-            zeta0m = z0mg / obu
-            zeta0h = z0hg / obu
-            zeta0q = z0qg / obu
 
-            # Clamp zeta values
-            zeta_u = clamp(zeta_u, T(-100.0), T(ZETAMAX_LAKE))
-            zeta_t = clamp(zeta_t, T(-100.0), T(ZETAMAX_LAKE))
-            zeta_q = clamp(zeta_q, T(-100.0), T(ZETAMAX_LAKE))
-            zeta0m = clamp(zeta0m, T(-100.0), T(ZETAMAX_LAKE))
-            zeta0h = clamp(zeta0h, T(-100.0), T(ZETAMAX_LAKE))
-            zeta0q = clamp(zeta0q, T(-100.0), T(ZETAMAX_LAKE))
-
-            # Friction velocity
-            ustar = T(VKC) * um / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m))
+            # Profile relations — ALL FOUR of CTSM's zeta stability regimes
+            # (FrictionVelocityMod.F90:847-861 momentum, :946-960 heat/moisture).
+            # The port previously implemented regime 2 (plain unstable) ONLY, and
+            # `stability_func1/2` clamp their argument at 0, so above neutral the
+            # correction silently vanished and the stable regimes were unreachable.
+            # A 273 K lake under 255 K air is strongly convective: the reference
+            # run sits in regime 1 (very unstable), where CTSM caps the log at the
+            # -zetat transition and adds a free-convection correction the port had
+            # no term for. See docs/LAKE_FLUX_RESIDUAL.md finding C.
+            ustar = T(VKC) * um / mo_profile_denom_m(zeta_u, zldis_u, z0mg, obu)
             ustar = max(ustar, T(0.001))   # HARD: constant 0.001 m/s floor. At k=50 the width 0.0139 m/s is 14x this floor and comparable to ustar itself (~0.03 m/s), so the lake friction velocity was inflated ~8% -> eflx_lh_grnd off by 4.7 W/m2.
 
             # Transfer coefficients
-            temp1 = T(VKC) / (log(zldis_t / z0hg) - stability_func2(zeta_t) + stability_func2(zeta0h))
-            temp2 = T(VKC) / (log(zldis_q / z0qg) - stability_func2(zeta_q) + stability_func2(zeta0q))
+            temp1 = T(VKC) / mo_profile_denom_h(zeta_t, zldis_t, z0hg, obu)
+            temp2 = T(VKC) / mo_profile_denom_h(zeta_q, zldis_q, z0qg, obu)
+
+            # Same profile relations evaluated at 2 m (FrictionVelocityMod.F90:1010-1050).
+            # The 2-m reference height is 2 + z0, and Fortran short-circuits
+            # temp22m = temp12m when z0q == z0h (which is exactly the frozen-lake
+            # branch above, where z0qg is assigned from z0hg).
+            zldis_2h = T(2.0) + z0hg
+            temp12m = T(VKC) / mo_profile_denom_h(zldis_2h / obu, zldis_2h, z0hg, obu)
+            if z0qg == z0hg
+                temp22m = temp12m
+            else
+                zldis_2q = T(2.0) + z0qg
+                temp22m = T(VKC) / mo_profile_denom_h(zldis_2q / obu, zldis_2q, z0qg, obu)
+            end
 
             # Aerodynamic resistances
-            ram = one(T) / (ustar * T(VKC) / (log(zldis_u / z0mg) - stability_func1(zeta_u) + stability_func1(zeta0m)))
+            ram = one(T) / (ustar * T(VKC) / mo_profile_denom_m(zeta_u, zldis_u, z0mg, obu))
             rah = one(T) / (temp1 * ustar)
             raw = one(T) / (temp2 * ustar)
             ram = max(ram, one(T))
@@ -393,7 +439,14 @@ end
             end
             obu = zldis_u / zeta_val
             obu = clamp(obu, T(-1e4), T(1e4))
+            zeta_conv = zeta_val
             rah_c = rah; raw_c = raw; ram_c = ram   # carry converged (log + stability) resistances
+            temp1_c = temp1; temp2_c = temp2; temp12m_c = temp12m; temp22m_c = temp22m
+            dth_c = dth_new
+            # Fortran's dqh for the diagnostics is forc_q - QSat(t_grnd) evaluated at
+            # the UPDATED ground temperature (F90:532-536), not the Newton-linearised
+            # qsatg + qsatgdT*dT that dqh_new above carries for the thvstar update.
+            dqh_c = forc_q[c] - qsat_water(t_grnd_new, forc_pbot[c])
 
             # Update roughness for unfrozen lakes
             if tgbef > T(TFRZ)
@@ -480,7 +533,21 @@ end
         d.qflx_evap_soi[p] = qflx_evap_soi_p
         d.qflx_evap_tot[p] = qflx_evap_soi_p
 
+        # ---- 2-m diagnostics (LakeFluxesMod.F90:707-717) ----
+        # DEAD WRITE until now: nothing wrote t_ref2m_patch on a lake patch, so TSA
+        # on a 100%-lake gridcell reported the untouched cold-start 283.000 K at
+        # every step. Writing it here is lake-landunit-gated by construction — this
+        # kernel only ever runs over `mask_lakep`, and no other landunit's 2-m
+        # diagnostic reaches this code path.
+        d.t_ref2m[p] = thm + temp1_c * dth_c * (one(T) / temp12m_c - one(T) / temp1_c)
+        q_ref2m_p = forc_q[c] + temp2_c * dqh_c * (one(T) / temp22m_c - one(T) / temp2_c)
+        d.q_ref2m[p] = q_ref2m_p
+        (qsat_ref2m, _, _, _) = qsat(d.t_ref2m[p], forc_pbot[c])
+        d.rh_ref2m[p] = min(T(100.0), q_ref2m_p / qsat_ref2m * T(100.0))
+
         d.ustar[p] = ustar
+        d.obu_out[p] = obu
+        d.zeta_out[p] = zeta_conv
         d.z0mg[p] = z0mg
         d.z0hg[p] = z0hg
         d.z0qg[p] = z0qg
@@ -563,7 +630,7 @@ function lake_fluxes!(temperature::TemperatureData,
     np == 0 && return nothing
 
     dv = _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate,
-                       waterstatebulk, waterfluxbulk, col_data, patch_data,
+                       waterstatebulk, waterdiagbulk, waterfluxbulk, col_data, patch_data,
                        forc_t, forc_th, forc_q, forc_pbot, forc_rho, forc_lwrad,
                        forc_u, forc_v, forc_hgt_u_grc, forc_hgt_t_grc, forc_hgt_q_grc)
 

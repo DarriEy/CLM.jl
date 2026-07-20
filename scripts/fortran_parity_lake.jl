@@ -88,8 +88,19 @@ const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicar
 _rel(j, f) = (isnan(j) || isnan(f)) ? NaN : abs(j - f) / (1 + abs(f))
 _fv(x) = ismissing(x) ? NaN : Float64(x)
 
+"""
+    main(; nsteps=48) -> NamedTuple or `missing`
+
+Runs the lake parity comparison and prints the per-step table. ALSO returns the
+raw per-step Julia and Fortran values (`jv` / `fv`, `Dict{String,Vector{Float64}}`
+keyed by the scalar field names below) so a TEST can assert VALUES rather than
+re-print relative diffs — `test_lake_ref2m.jl` uses this. Returns `missing` when
+the machine-local reference inputs are absent, so callers can skip.
+"""
 function main(; nsteps::Int = 48)
-    isfile(H0) || error("Fortran lake h0 reference not found: $H0")
+    if !isfile(H0) || !isfile(LAKE) || !isfile(FP) || !isfile(FFORC)
+        return missing
+    end
     base = DateTime(2003, 1, 1)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=LAKE, paramfile=FP,
         start_date=base, dtime=3600, use_cn=false, use_luna=false, use_bedrock=true,
@@ -136,6 +147,17 @@ function main(; nsteps::Int = 48)
 
     @printf("\n%-5s %-7s %11s | %s\n", "nstep", "tod", "global", "per-field max|rel|")
     gmax_run = 0.0
+    # Raw per-step values, returned for value-level assertions in the test suite.
+    jv = Dict{String,Vector{Float64}}(nm => Float64[] for (nm, _, _) in scalars)
+    fvv = Dict{String,Vector{Float64}}(nm => Float64[] for (nm, _, _) in scalars)
+    # Converged lake zeta per step, and the Monin-Obukhov stability REGIME it
+    # lands in. CTSM's profile relations branch four ways on zeta; the port used
+    # to implement only regime 2, so "which regime does this reference actually
+    # exercise" was unanswerable. zeta is now carried out on frictionvel.zeta_patch.
+    zetas = Float64[]
+    regimes = Int[]
+    zetat_h = 0.465   # temperature/humidity profile transition (FrictionVelocityMod)
+    regime_of(z) = z < -zetat_h ? 1 : z < 0.0 ? 2 : z <= 1.0 ? 3 : 4
     for s in 1:nsteps
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0/CLM.SECSPDAY)
@@ -164,11 +186,16 @@ function main(; nsteps::Int = 48)
             is_beg_curr_year=CLM.is_beg_curr_year(tm), dtime=3600.0, mon=mon, day=d,
             photosyns=inst.photosyns)
 
+        zc = Float64(inst.frictionvel.zeta_patch[p_lake])
+        push!(zetas, zc); push!(regimes, regime_of(zc))
+
         per = Dict{String,Float64}()
         # scalar fields
         for (nm, getj, fn) in scalars
             haskey(fds, fn) || continue
-            per[nm] = _rel(Float64(getj()), _fv(fds[fn][1, s + LAKE_REC_SHIFT]))
+            jval = Float64(getj()); fval = _fv(fds[fn][1, s + LAKE_REC_SHIFT])
+            push!(jv[nm], jval); push!(fvv[nm], fval)
+            per[nm] = _rel(jval, fval)
         end
         # per-level lake fields: max|rel| over the 10 lake layers
         for (nm, jarr, fn) in [("TLAKE", temp.t_lake_col, "TLAKE"),
@@ -190,12 +217,34 @@ function main(; nsteps::Int = 48)
                 temp.t_grnd_col[c_lake], _fv(fds["TG"][1, s + LAKE_REC_SHIFT]),
                 temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,s]))
         end
-        if get(ENV, "LAKE_AERO_PROBE", "") == "1" && s <= 3
+        # LAKE_AERO_PROBE: the Monin-Obukhov state the surface fluxes hang on.
+        # Fortran does not write ustar/obu/zeta/rah to h0, but FSH, TG, TBOT, QBOT,
+        # PBOT, WIND and TAUX ARE there, and the flux definitions invert exactly:
+        #   rah = rho*cp*(TG - thm)/FSH        (LakeFluxesMod.F90:526)
+        #   ram = -rho*u/TAUX                  (LakeFluxesMod.F90:699)
+        # so the Fortran aerodynamic resistances are RECOVERABLE from the reference
+        # and can be compared against the port's directly. That is the only way to
+        # tell WHICH of the four stability regimes the reference actually ran in.
+        if get(ENV, "LAKE_AERO_PROBE", "") == "1" && s <= 16
             fv = inst.frictionvel
-            @printf("  [aero s=%d] ustar=%.4f z0mg=%.3e z0hg=%.3e | J_FSH=%.2f F_FSH=%.2f J_LH=%.2f F_LH=%.2f\n",
-                s, fv.ustar_patch[p_lake], fv.z0mg_patch[p_lake], fv.z0hg_patch[p_lake],
-                inst.energyflux.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1, s + LAKE_REC_SHIFT]),
-                inst.energyflux.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1, s + LAKE_REC_SHIFT]))
+            rec = s + LAKE_REC_SHIFT
+            rgas = 287.058; cp = 1004.64
+            pbot = _fv(fds["PBOT"][1, rec]); tbot = _fv(fds["TBOT"][1, rec])
+            qbot = _fv(fds["QBOT"][1, rec]); tgF = _fv(fds["TG"][1, rec])
+            fshF = _fv(fds["FSH"][1, rec]); tauxF = _fv(fds["TAUX"][1, rec])
+            windF = _fv(fds["WIND"][1, rec])
+            rhoF = pbot / (rgas * tbot * (1 + 0.61 * qbot))
+            thmF = tbot + 0.0098 * 30.0
+            rahF = rhoF * cp * (tgF - thmF) / fshF
+            ramF = -rhoF * windF / tauxF
+            # same inversion on the Julia side, from the port's own state
+            tgJ = temp.t_grnd_col[c_lake]; fshJ = ef.eflx_sh_tot_patch[p_lake]
+            rhoJ = inst.atm2lnd.forc_rho_downscaled_col[c_lake]
+            thmJ = inst.atm2lnd.forc_t_downscaled_col[c_lake] + 0.0098 * 30.0
+            rahJ = rhoJ * cp * (tgJ - thmJ) / fshJ
+            @printf("  [aero s=%2d] zeta=%9.3f obu=%9.3f ustar=%.4f z0mg=%.3e z0hg=%.3e | rah J=%7.1f F=%7.1f | ram F=%7.1f | TG J=%.2f F=%.2f\n",
+                s, fv.zeta_patch[p_lake], fv.obu_patch[p_lake], fv.ustar_patch[p_lake],
+                fv.z0mg_patch[p_lake], fv.z0hg_patch[p_lake], rahJ, rahF, ramF, tgJ, tgF)
         end
         # LAKE_DUMP: raw Julia-vs-Fortran values (not relative diffs) for the fields
         # in the open surface-flux residual, every step. Relative diffs hide a value
@@ -226,8 +275,18 @@ function main(; nsteps::Int = 48)
     CLM.forcing_reader_close!(fr)
     close(fds)
     @printf("\nRun max |rel| over %d steps: %.3e\n", nsteps, gmax_run)
+    # Which stability regime did each step actually run in? A fix to the missing
+    # regimes proves nothing if the reference never leaves the one already there.
+    counts = [count(==(r), regimes) for r in 1:4]
+    @printf("zeta range over run: [%.3f, %.3f] | regime steps: 1(very unstable)=%d 2(unstable)=%d 3(stable)=%d 4(very stable)=%d\n",
+            minimum(zetas), maximum(zetas), counts[1], counts[2], counts[3], counts[4])
+    return (; nsteps, jv, fv = fvv, gmax_run, zetas, regimes)
 end
 
-let na = filter(a -> occursin(r"^\d+$", a), ARGS)
-    main(; nsteps = isempty(na) ? 48 : parse(Int, na[1]))
+# Auto-run only when executed as a script; `include`d from a test, callers drive
+# `main` themselves and read its return value.
+if abspath(PROGRAM_FILE) == @__FILE__
+    let na = filter(a -> occursin(r"^\d+$", a), ARGS)
+        main(; nsteps = isempty(na) ? 48 : parse(Int, na[1]))
+    end
 end
