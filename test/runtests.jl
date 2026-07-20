@@ -422,6 +422,7 @@ using CLM
             "test_multisite_robustness.jl",      # off-Bow driver robustness (gated)
             "test_glacier_robustness.jl",        # glacier istice driver robustness (gated)
             "test_lake_water_balance.jl",        # lake istdlak column water balance closes (gated)
+            "test_lake_ref2m.jl",                # lake 2-m diagnostics vs Fortran + the four MO stability regimes (gated)
             "test_snow_robustness.jl",           # deep-snowpack / cold-soil robustness (gated)
             "test_urban_robustness.jl",          # urban isturb roof/wall/road robustness (gated)
             "test_init_cold_wiring.jl",          # every *_init_cold! is CALLED on the live init path (+ NaN sweep, gated)

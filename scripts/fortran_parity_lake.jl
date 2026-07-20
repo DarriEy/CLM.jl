@@ -150,6 +150,14 @@ function main(; nsteps::Int = 48)
     # Raw per-step values, returned for value-level assertions in the test suite.
     jv = Dict{String,Vector{Float64}}(nm => Float64[] for (nm, _, _) in scalars)
     fvv = Dict{String,Vector{Float64}}(nm => Float64[] for (nm, _, _) in scalars)
+    # Converged lake zeta per step, and the Monin-Obukhov stability REGIME it
+    # lands in. CTSM's profile relations branch four ways on zeta; the port used
+    # to implement only regime 2, so "which regime does this reference actually
+    # exercise" was unanswerable. zeta is now carried out on frictionvel.zeta_patch.
+    zetas = Float64[]
+    regimes = Int[]
+    zetat_h = 0.465   # temperature/humidity profile transition (FrictionVelocityMod)
+    regime_of(z) = z < -zetat_h ? 1 : z < 0.0 ? 2 : z <= 1.0 ? 3 : 4
     for s in 1:nsteps
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0/CLM.SECSPDAY)
@@ -177,6 +185,9 @@ function main(; nsteps::Int = 48)
             is_beg_curr_day=CLM.is_beg_curr_day(tm), is_end_curr_day=CLM.is_end_curr_day(tm),
             is_beg_curr_year=CLM.is_beg_curr_year(tm), dtime=3600.0, mon=mon, day=d,
             photosyns=inst.photosyns)
+
+        zc = Float64(inst.frictionvel.zeta_patch[p_lake])
+        push!(zetas, zc); push!(regimes, regime_of(zc))
 
         per = Dict{String,Float64}()
         # scalar fields
@@ -206,12 +217,34 @@ function main(; nsteps::Int = 48)
                 temp.t_grnd_col[c_lake], _fv(fds["TG"][1, s + LAKE_REC_SHIFT]),
                 temp.t_lake_col[c_lake,1], _fv(fds["TLAKE"][1,1,s]))
         end
-        if get(ENV, "LAKE_AERO_PROBE", "") == "1" && s <= 3
+        # LAKE_AERO_PROBE: the Monin-Obukhov state the surface fluxes hang on.
+        # Fortran does not write ustar/obu/zeta/rah to h0, but FSH, TG, TBOT, QBOT,
+        # PBOT, WIND and TAUX ARE there, and the flux definitions invert exactly:
+        #   rah = rho*cp*(TG - thm)/FSH        (LakeFluxesMod.F90:526)
+        #   ram = -rho*u/TAUX                  (LakeFluxesMod.F90:699)
+        # so the Fortran aerodynamic resistances are RECOVERABLE from the reference
+        # and can be compared against the port's directly. That is the only way to
+        # tell WHICH of the four stability regimes the reference actually ran in.
+        if get(ENV, "LAKE_AERO_PROBE", "") == "1" && s <= 16
             fv = inst.frictionvel
-            @printf("  [aero s=%d] ustar=%.4f z0mg=%.3e z0hg=%.3e | J_FSH=%.2f F_FSH=%.2f J_LH=%.2f F_LH=%.2f\n",
-                s, fv.ustar_patch[p_lake], fv.z0mg_patch[p_lake], fv.z0hg_patch[p_lake],
-                inst.energyflux.eflx_sh_tot_patch[p_lake], _fv(fds["FSH"][1, s + LAKE_REC_SHIFT]),
-                inst.energyflux.eflx_lh_tot_patch[p_lake], _fv(fds["EFLX_LH_TOT"][1, s + LAKE_REC_SHIFT]))
+            rec = s + LAKE_REC_SHIFT
+            rgas = 287.058; cp = 1004.64
+            pbot = _fv(fds["PBOT"][1, rec]); tbot = _fv(fds["TBOT"][1, rec])
+            qbot = _fv(fds["QBOT"][1, rec]); tgF = _fv(fds["TG"][1, rec])
+            fshF = _fv(fds["FSH"][1, rec]); tauxF = _fv(fds["TAUX"][1, rec])
+            windF = _fv(fds["WIND"][1, rec])
+            rhoF = pbot / (rgas * tbot * (1 + 0.61 * qbot))
+            thmF = tbot + 0.0098 * 30.0
+            rahF = rhoF * cp * (tgF - thmF) / fshF
+            ramF = -rhoF * windF / tauxF
+            # same inversion on the Julia side, from the port's own state
+            tgJ = temp.t_grnd_col[c_lake]; fshJ = ef.eflx_sh_tot_patch[p_lake]
+            rhoJ = inst.atm2lnd.forc_rho_downscaled_col[c_lake]
+            thmJ = inst.atm2lnd.forc_t_downscaled_col[c_lake] + 0.0098 * 30.0
+            rahJ = rhoJ * cp * (tgJ - thmJ) / fshJ
+            @printf("  [aero s=%2d] zeta=%9.3f obu=%9.3f ustar=%.4f z0mg=%.3e z0hg=%.3e | rah J=%7.1f F=%7.1f | ram F=%7.1f | TG J=%.2f F=%.2f\n",
+                s, fv.zeta_patch[p_lake], fv.obu_patch[p_lake], fv.ustar_patch[p_lake],
+                fv.z0mg_patch[p_lake], fv.z0hg_patch[p_lake], rahJ, rahF, ramF, tgJ, tgF)
         end
         # LAKE_DUMP: raw Julia-vs-Fortran values (not relative diffs) for the fields
         # in the open surface-flux residual, every step. Relative diffs hide a value
@@ -242,7 +275,12 @@ function main(; nsteps::Int = 48)
     CLM.forcing_reader_close!(fr)
     close(fds)
     @printf("\nRun max |rel| over %d steps: %.3e\n", nsteps, gmax_run)
-    return (; nsteps, jv, fv = fvv, gmax_run)
+    # Which stability regime did each step actually run in? A fix to the missing
+    # regimes proves nothing if the reference never leaves the one already there.
+    counts = [count(==(r), regimes) for r in 1:4]
+    @printf("zeta range over run: [%.3f, %.3f] | regime steps: 1(very unstable)=%d 2(unstable)=%d 3(stable)=%d 4(very stable)=%d\n",
+            minimum(zetas), maximum(zetas), counts[1], counts[2], counts[3], counts[4])
+    return (; nsteps, jv, fv = fvv, gmax_run, zetas, regimes)
 end
 
 # Auto-run only when executed as a script; `include`d from a test, callers drive
