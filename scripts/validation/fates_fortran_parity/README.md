@@ -891,15 +891,24 @@ why D3's flag audit came back clean — but `fates_longhorizon.jl` and
 `fates_multisite_validation.jl` **inherit** it, so #252 silently flipped both harnesses
 from `use_bedrock = true` to `false`.
 
-That single flip explains both open items at once:
+**Attribution stops at the commit, NOT yet at the flag.** The obvious story — "the
+`use_bedrock` flip is the mechanism" — was tested and **does not hold**: re-running
+current `main` with `FATES_USE_BEDROCK=1` (added here) still dies at day 75. So either
+the flag flip is not the mechanism, or a second, independent cause entered after #252.
+The clean test is the flag pinned *at f2d805c itself*; until that is in hand, what is
+established is:
 
-* **It is why #227's collapse disappeared.** Turning bedrock off gives the boreal root
-  zone back the soil column that #227 diagnosed as bone-dry — the same mechanism, at the
-  same site, that #251/#252 corrected for the Bow window. #227's moisture prescription
-  was compensating for `use_bedrock = true`.
-* **It is why no multi-year FATES run survives.** The deeper column exposes a latent
-  defect in the port that surfaces as a 300-400 W/m² longwave imbalance. #252 is almost
-  certainly *correct* (it matches CTSM); what it did was stop masking this. Worth noting the demography also diverged sharply over that
+* the failure begins at `f2d805c` and at exactly step 3601 from there onward;
+* #252's only `src/` changes are the `use_bedrock` kwarg becoming `Union{Bool,Nothing}`
+  in `clm_initialize.jl` and `clm_run.jl` — no physics — so the trigger is a *flag
+  resolution*, and the defect it exposes is older than #252;
+* #252 is almost certainly **correct** (it matches CTSM
+  `namelist_defaults_ctsm.xml:178-181`). It should not be reverted. What it did was stop
+  masking something.
+
+Likewise, #227's collapse disappearing is a **measured fact but an unattributed one**.
+It is tempting to credit the same flip; that is exactly the inference just falsified
+above, so it is recorded here as correlation with #252's window, not as mechanism. Worth noting the demography also diverged sharply over that
 range — at day ~144 the #197-era run holds `ncoh = 118, npatch = 2`, while current
 `main` had already reached `ncoh = 446, npatch = 6` by day 74. Note the daily FATES carbon balance holds *right up to the
 failure* in every case (`235/235`, `147/147`, `75/75` days) — a textbook instance of
