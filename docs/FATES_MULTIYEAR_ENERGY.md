@@ -48,3 +48,25 @@ where #274's flag audit was pointed.
 ## Log
 
 (appended as the investigation proceeds)
+
+### 2026-07-20 — validation matrix opened (rebased on `main` @ b2fef5b, post-#281/#282)
+
+Reproduction environment pinned:
+
+```
+SD="…/My Drive/data/SYMFLUENCE_data"   # NOT the compHydro root — holds all 3 FATES domains
+```
+
+Four configs, both arms (`before` = `main` b2fef5b, `after` = this branch), 1460 d:
+
+| key | harness | env |
+|---|---|---|
+| `arip_none` | `fates_longhorizon.jl` | (defaults) |
+| `arip_screened` | `fates_longhorizon.jl` | `FATES_BIOGEOG=1` |
+| `bow_nowarm` | `fates_longhorizon.jl` | `FATES_WARMSOIL=0` + Bow era5 fsurdat/param/forcing |
+| `krycklan_baseline` | `fates_multisite_validation.jl` | `SITE=krycklan_baseline` |
+
+**First result:** `arip_none` on this branch reaches **day 120 clean, 8/8 PASS**, against a
+`main` death at **day 74**. Per `conservation-is-not-accuracy` the accompanying
+`119/119` daily carbon balance is NOT cited as evidence — the survival past the
+`errlon` step is.
