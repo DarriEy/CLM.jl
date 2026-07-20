@@ -324,7 +324,14 @@ function main()
             @printf("        PFT7 smpsc=%.0f smpso=%.0f\n", ep.smpsc[7], ep.smpso[7])
         end
         if is_beg && i>1
-            daycount = Dates.dayofyear(step_start) - 1
+            # ELAPSED days since the start of the run, NOT day-of-year. This was
+            # `Dates.dayofyear(step_start) - 1`, which RESETS every 1 January — so on
+            # any run past 365 days every day-indexed number the script reports (the
+            # sampled rows, `nan_days`, the "ran N/M days" summary and the s/yr-sim
+            # rate) silently restarted from 0, and a year-2 failure printed as a
+            # two-digit day indistinguishable from a year-1 one. Harmless while
+            # multi-year FATES was impossible; actively misleading now that it isn't.
+            daycount = Dates.value(Date(step_start) - Date(start_date))
             day_gpp=acc_gpp; day_npp=acc_npp; acc_gpp=0.0; acc_npp=0.0   # close out the day
             days_advanced += 1
             bal_ok = _C.TotalBalanceCheck(site, -1) === nothing
