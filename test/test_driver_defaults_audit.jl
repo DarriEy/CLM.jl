@@ -188,6 +188,37 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test CLM.VarCtl().use_hydrstress == false
     end
 
+    @testset "baseflow_scalar == 0.001 — and all FOUR literals agree (row M2)" begin
+        # namelist_defaults_ctsm.xml:195-197 keys this on lower_boundary_condition:
+        #   lbc=2 -> 0.001 | lbc=1 -> 1.d-2 | phys=clm4_5 + lbc=2 -> 1.d-2
+        # For clm5_0 the chain is soilwater_movement_method=1 (defaults:419) +
+        # use_bedrock=.true. (defaults:180) => lbc=2 (defaults:426) => 0.001.
+        # The port shipped 1.0e-2 — CTSM's CODE FALLBACK
+        # (SoilHydrologyMod.F90:71 `= 1.e-2_r8`, the pre-namelist initialiser),
+        # the identical trap as #252/#259/#273. Corroborated by two
+        # CTSM-emitted lnd_in files (Bow, MerBleue): both `0.001d00`.
+        @test _RUN_KW[:baseflow_scalar] == 0.001
+
+        # WHY ALL FOUR, NOT JUST THE ONE PHYSICS READS.
+        # Only BASEFLOW_SCALAR[] is read by the drainage kernels, but
+        # test_soil_hydrology_mod.jl calls a bare init_soil_hydrology_config()
+        # to "reset to defaults". If the struct/kwarg defaults disagreed with the
+        # Ref, that call would silently install the OTHER value into the live
+        # global — making the physics depend on test execution ORDER. Pin the
+        # agreement itself, not just the value.
+        @test CLM.BASEFLOW_SCALAR[] == 0.001            # module Ref (live)
+        @test CLM.SoilHydrologyConfig().baseflow_scalar == 0.001
+        @test CLM.init_soil_hydrology_config().baseflow_scalar == 0.001
+        @test CLM.BASEFLOW_SCALAR[] == 0.001            # ...and it stayed put
+
+        # The calibration path already used the CTSM value; it must not drift
+        # back apart from the driver (they disagreed for the port's whole life
+        # until this row was closed).
+        hydro = filter(p -> p.name == "baseflow_scalar", CLM.default_hydrology_params())
+        @test length(hydro) == 1
+        @test hydro[1].default_value == 0.001
+    end
+
     @testset "int_snow_max == 2000.0" begin
         # namelist_defaults_ctsm.xml:476 (clm4_5 variant is 1.e30).
         @test _INIT_KW[:int_snow_max] == 2000.0

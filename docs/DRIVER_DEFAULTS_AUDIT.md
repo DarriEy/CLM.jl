@@ -395,7 +395,7 @@ anyway: an inert wrong default is a landmine for the first consumer).
 |---|---|---|---|---|---|
 | `use_bedrock` | `nothing` → `!use_fates` | `.false.` if `use_fates`/`vichydro`/`clm4_5`; else `.true.` | **MATCH** (fixed #252) | zwt clamped to bedrock → runaway drainage | — |
 | `h2osfcflag` | `1` | `1` (code fallback `SoilHydrologyType.F90:339,347`) | **MATCH** (fixed #225) | surface-water store disabled | `parity_run_domain.jl` (now redundant) |
-| `use_aquifer_layer` | `true` | **`.false.`** (derived: `clm5_0`→method 1→lbc 2 = `bc_zero_flux`) | **MISMATCH** | selects CLM4.5 Zeng-Decker-2009 + aquifer solver instead of CLM5 moisture-form + zero-flux; CTSM `endrun`s on this combined with `use_bedrock=true` | 16 scripts (see M1) |
+| `use_aquifer_layer` | ~~`true`~~ → **`false`** | **`.false.`** (derived: `clm5_0`→method 1→lbc 2 = `bc_zero_flux`) | **CLOSED** (#259; re-confirmed on the fixed tridiagonal solver — see "M1 RE-CONFIRMED") | selected CLM4.5 Zeng-Decker-2009 + aquifer solver instead of CLM5 moisture-form + zero-flux; CTSM `endrun`s on this combined with `use_bedrock=true`. Measured on the corrected solver: `true` returns 8.7e6 mm of drainage from a 404 mm-of-precipitation site | 16 scripts (see M1) |
 | `baseflow_scalar` | ~~`1.0e-2`~~ → **`0.001`** | **`0.001`** (`lbc=2`); `1.d-2` only for `lbc=1` or `clm4_5` | **CLOSED** (see "M2 CLOSED" below) | was 10× on the drainage/baseflow rate; measured −7.6 % baseflow / +0.57 % surface runoff at MerBleue, exactly zero at Bow (branch never entered, in CTSM either) | `parity_run_domain.jl` (per-domain; 18/20 already `0.001`) |
 | `use_hydrstress` | `nothing` → `!use_fates` (**FIXED**) | **`.true.`** (`clm5_0`, non-FATES, `configuration="clm"`) | **COND-MISMATCH — CLOSED** | was: PHS off → BTRAN path; different gs/transpiration/GPP under stress | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `probe_h2osfc_subdaily.jl` |
 | `use_luna` | `nothing` → `!use_fates` | **`.true.`** (`clm5_0`, non-FATES) | **FIXED** (this campaign) | — but see the LUNA-consumption gap below: the flip is currently INERT on the default non-PHS path | `parity_run_domain.jl`, `parity_run_domain_gpu.jl`, `fortran_parity_cn_coldstart.jl` (now redundant) |
@@ -735,7 +735,7 @@ CN campaign outright.
 |---|---|
 | Flags audited | **~110** (16 driver-entry keywords + 79 `varctl` fields + `CLMDriverConfig` switches + the `use_flexibleCN` cascade) |
 | MATCH | ~85 |
-| MISMATCH — live physics | **3 remaining** (`use_aquifer_layer`, `baseflow_scalar`, `convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3) |
+| MISMATCH — live physics | **1 remaining** (`convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3), `use_aquifer_layer` **fixed** (#259, re-confirmed here on the corrected tridiagonal solver), `baseflow_scalar` **fixed** (here, M2) |
 | MISMATCH — inert (0 reads / guarded) | 12 (`nsegspc`, `nyr_forcing`, `h2osno_max`, `n_dom_landunits`, `n_dom_pfts`, 6× `toosmall_*`, `downscale_hillslope_meteorology`, `z0param_method`) |
 | CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) |
 | Namelist-vs-code-fallback disagreements found | **14** — CLM.jl copied the code fallback in *every* case |
