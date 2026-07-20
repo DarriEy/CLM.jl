@@ -69,18 +69,25 @@ const AREAFRAC_TEMPERATE = _areafrac((2, 4, 6))
 # frozen-root exclusion doesn't spuriously zero water uptake (real leaf temp still
 # comes from the energy balance on the real forcing). Tropical ~299, boreal ~281,
 # temperate ~286 K.
-# soil_h2o: OPTIONAL cold-start root-zone LIQUID moisture prime (fraction of watsat),
-# mirroring soil_tk. The generic surfdata cold start loads the FATES column with
-# 0.75*watsat of water, but at the ~272 K cold-start temperature that water is stored
-# entirely as ICE; the harness then warms the soil (soil_tk) but never thaws the ice.
-# Over a wrapped single-year of forcing the ice melts and the meltwater DRAINS away, so
-# by growing season the boreal root zone is bone-dry (smp << wilting) -> btran=0 -> GPP=0
-# -> the stand starves on maintenance respiration. A real spun-up boreal soil holds
-# field-capacity liquid water through the growing season, so this is a cold-start /
-# short-spin artifact, not real physics. `soil_h2o` re-asserts that growing-season
-# liquid state at cold start for cold/under-moist sites (see build_site).
-# `nothing` = no prime (tropical/temperate already reach healthy equilibria — leave them
-# byte-identical). Bounded by watsat, so it can never exceed pore space.
+# soil_h2o: RETIRED as a site default (#278) — now `nothing` for EVERY site, and kept
+# only as an opt-in DIAGNOSTIC knob (`FATES_SOIL_H2O=<frac>`; see `_soil_h2o`).
+#
+# HISTORY. #227 added this as a cold-start root-zone LIQUID moisture prime (fraction of
+# watsat) for the boreal site, on the reasoning that the generic surfdata cold start
+# loads the FATES column with 0.75*watsat stored entirely as ICE at ~272 K; the harness
+# warms the soil (soil_tk) but never thaws it, the meltwater drains before leaf-on, and
+# the boreal root zone goes bone-dry (smp << wilting) -> btran=0 -> GPP=0 -> collapse.
+#
+# THAT COLLAPSE NO LONGER REPRODUCES. Measured on current `main` (#278) with the prime
+# explicitly OFF and nothing else changed, `krycklan_screened` runs 364/365 days and
+# passes ALL TEN checks: carbon 749.6 -> 1737, 2nd-half band [1169, 2341], no collapse,
+# no boom-bust. #227's premise was an artifact of defects fixed elsewhere since (the
+# `use_bedrock` inherited-default mismatch, #251/#252, above all).
+#
+# AND IT WAS NOT INERT — leaving it on distorted a now-correct model. Same site, same
+# PFT set, prime ON vs OFF: final carbon 1986 vs 1737 (+14.3%), peak 2569 vs 2341
+# (+9.7%), maxdbh 2.225 vs 2.135 cm (+4.2%). It was still injecting water and inflating
+# growth by ~10-14%, which is why it is retired as a default rather than left sitting.
 struct SiteCfg
     key::String; label::String; domain::String; fyr::Int
     screen::Symbol; areafrac::Union{Nothing,Vector{Float64}}
@@ -99,7 +106,9 @@ const SITES = Dict(
         "domain_Aripuana_Amazon", 2004, :none, nothing, 299.0, 0.0, Inf),
     "krycklan_screened" => SiteCfg("krycklan_screened",
         "Krycklan (boreal Sweden) — SCREENED boreal tree set {2,3,6}",
-        "domain_Boreal_Krycklan_Sweden", 2010, :none, AREAFRAC_BOREAL, 281.0, 200.0, 6000.0, 0.75),
+        # soil_h2o retired (#278): the collapse it compensated for is gone, and it was
+        # inflating carbon ~14%. Band re-baselined from the un-primed run (final 1737).
+        "domain_Boreal_Krycklan_Sweden", 2010, :none, AREAFRAC_BOREAL, 281.0, 200.0, 6000.0, nothing),
     "krycklan_baseline" => SiteCfg("krycklan_baseline",
         "Krycklan (boreal Sweden) — BASELINE all-14-PFT",
         "domain_Boreal_Krycklan_Sweden", 2010, :none, nothing, 281.0, 0.0, Inf),
@@ -154,28 +163,29 @@ function max_dbh(site)
     return md
 end
 
-# ---- growing-season root-zone moisture prescription --------------------------
-# Prescribe a spun-up boreal soil-moisture boundary condition on the FATES column's
-# root zone: set each (thawed) soil layer to `frac`*watsat of LIQUID water, zeroing its
-# ice. This is NOT a water-conservation claim — it is a prescribed-soil-moisture forcing
-# (a standard land-model technique for isolating vegetation dynamics from water-balance
-# spin-up), applied only to sites that carry a soil_h2o. The short single-year wrapped
-# forcing here cannot reproduce the multi-decade boreal water balance: the cold-start
-# ice load drains below field capacity before leaf-on, so without this the boreal root
-# zone is desert-dry (smp << wilting) all growing season -> btran=0 -> GPP=0 -> collapse.
-# A real spun-up boreal forest's thawed active layer holds ~field-capacity water through
-# the growing season. `thawed_only=true` (the daily re-assertion) touches only layers
-# above freezing, so it never fights the freeze/thaw physics; frozen layers are correctly
-# left as non-uptake layers. Bounded by watsat -> never exceeds pore space. Carbon
-# conservation (the harness's actual invariant) is unaffected.
-# Effective moisture-prime fraction: the per-site cfg.soil_h2o, overridable for tuning
-# via FATES_SOIL_H2O (returns `nothing` unchanged so unprimed sites stay unprimed).
-# `FATES_SOIL_H2O=off` (or `none`/`0`) DISABLES the prime on a site that carries one —
-# the A/B switch that #278 used to measure the prescription against the fixed port.
+# ---- root-zone moisture prescription — DIAGNOSTIC ONLY, OFF BY DEFAULT -------
+# !!! This is NOT part of any validated configuration. It was #227's boreal fix; #278
+# !!! retired it (see the SiteCfg.soil_h2o note). No site carries a soil_h2o any more,
+# !!! so this code is unreachable unless you opt in with FATES_SOIL_H2O=<frac>.
+#
+# What it does: sets each (thawed) soil layer of the FATES column to `frac`*watsat of
+# LIQUID water, zeroing its ice — a prescribed-soil-moisture boundary condition, not a
+# water-conservation claim. `thawed_only=true` (the daily re-assertion) touches only
+# layers above freezing, so it never fights the freeze/thaw physics. Bounded by watsat,
+# so it can never exceed pore space, and it does not touch carbon pools.
+#
+# When it is legitimately useful: as a DIAGNOSTIC, to test whether a given failure is
+# moisture-mediated at all (prime the soil; if the symptom survives, water is not the
+# lever). It is NOT a way to make a run pass — anything it "fixes" is, on the current
+# port, evidence of a defect to find rather than a spin-up artifact to paper over.
+# Carbon conservation is unaffected by it, so a green balance says nothing here
+# (`conservation-is-not-accuracy`); measured effect at Krycklan was +14.3% final carbon.
+#
+# Opt in with FATES_SOIL_H2O=<fraction of watsat>, e.g. FATES_SOIL_H2O=0.75 restores
+# #227's setting. `off`/`none`/`0` (and unset) leave every site un-primed.
 function _soil_h2o(cfg::SiteCfg)
-    cfg.soil_h2o === nothing && return nothing
     ov = lowercase(strip(get(ENV, "FATES_SOIL_H2O", "")))
-    (ov == "off" || ov == "none" || ov == "0") && return nothing
+    (isempty(ov) || ov == "off" || ov == "none" || ov == "0") && return cfg.soil_h2o
     return something(tryparse(Float64, ov), cfg.soil_h2o)
 end
 
@@ -236,15 +246,14 @@ function build_site(cfg::SiteCfg)
             for j in 1:ngr; temp.t_soisno_col[c, joff+j]=cfg.soil_tk; end
         end
     end
-    # Climate-appropriate growing-season root-zone LIQUID moisture prescription (see the
-    # SiteCfg.soil_h2o note + prime_fates_soil_moisture!). Applied once here at cold start;
-    # run_site re-asserts it each growing-season day for THAWED layers, because the short
-    # wrapped forcing drains the root zone below field capacity long before the growing
-    # season otherwise. Gated on cfg.soil_h2o !== nothing so tropical/temperate stay
-    # byte-identical.
+    # DIAGNOSTIC root-zone moisture prescription — off unless FATES_SOIL_H2O is set
+    # (retired as a site default by #278; see prime_fates_soil_moisture!). Applied once
+    # here at cold start; run_site re-asserts it each day for THAWED layers.
     if _soil_h2o(cfg) !== nothing
         np = prime_fates_soil_moisture!(inst, bounds, _soil_h2o(cfg); thawed_only=false)
-        @printf("  soil moisture prime: %d FATES col(s) root zone set to %.2f*watsat LIQUID\n", np, _soil_h2o(cfg))
+        @printf("  !! DIAGNOSTIC soil moisture prime ACTIVE: %d FATES col(s) root zone set to\n", np)
+        @printf("  !! %.2f*watsat LIQUID. This is NOT a validated config (#227, retired by #278):\n", _soil_h2o(cfg))
+        @printf("  !! it inflates Krycklan final carbon ~14%%. Results are diagnostic only.\n")
     end
     config = _C.CLMDriverConfig(use_fates=true)
     filt_ia = _C.clump_filter_inactive_and_active
@@ -285,8 +294,8 @@ function run_site(cfg::SiteCfg, ndays::Int)
         sod = Dates.hour(step_start)*3600 + Dates.minute(step_start)*60 + Dates.second(step_start)
         calday = Dates.dayofyear(step_start) + sod/86400.0
         (declin, _e) = _C.compute_orbital(calday); nextsw_cday = calday + Int(dtime)/86400.0
-        # Re-assert the prescribed growing-season root-zone moisture for THAWED layers
-        # once per day (see prime_fates_soil_moisture!). Only for sites carrying soil_h2o.
+        # Re-assert the DIAGNOSTIC root-zone moisture for THAWED layers once per day
+        # (see prime_fates_soil_moisture!). No-op unless FATES_SOIL_H2O opts in.
         if is_beg && _soil_h2o(cfg) !== nothing
             prime_fates_soil_moisture!(inst, bounds, _soil_h2o(cfg); thawed_only=true)
         end
