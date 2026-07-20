@@ -27,6 +27,14 @@ using CLM
 using Printf
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 
+# Eltype-coercing pre-adaptor: converts float arrays to the backend's working
+# precision so whole structs carrying stray Float64 defaults can be adapted onto a
+# Float32-only backend. Integer/Bool arrays pass through unchanged.
+struct _ToFT{T} end
+CLM.Adapt.adapt_storage(::_ToFT{T}, x::AbstractArray{<:AbstractFloat}) where {T} = T.(x)
+CLM.Adapt.adapt_storage(::_ToFT{T}, x::AbstractArray{<:Integer}) where {T} = x
+CLM.Adapt.adapt_storage(::_ToFT{T}, x::AbstractArray{Bool}) where {T} = x
+
 # reldiff: NaN-aware (both-NaN agrees; one-sided NaN flags divergence).
 function reldiff(a, b)
     A = Array(a); B = Array(b); m = 0.0
@@ -138,7 +146,10 @@ function build(::Type{FT}) where {FT}
 
     return (; nc, snl, dz, zi, z, t, ice, liq, snwrds, h2osno_no, snow_depth,
             frac_sno, frac_sno_eff, int_snow, aer, lun_itype, urbpoi, col_landunit,
-            qflx_sl_top_soil = zeros(nc))
+            # zeros(nc) defaults to Float64; CombineSnowCol declares all six fields
+            # with ONE shared type parameter V, so a Float64 here fails to unify with
+            # the Float32 siblings on a Float32-only backend.
+            qflx_sl_top_soil = zeros(FT, nc))
 end
 
 function run_cpu!(B, mask, bounds)
@@ -180,7 +191,17 @@ function main(backend)
         m_cpu = falses(nc); for c in 1:4; m_cpu[c] = true; end   # col 5 (snl=0) excluded
 
         # Device snapshot of the populated initial state BEFORE the CPU run mutates B.
-        ad(x) = CLM.Adapt.adapt(device_array_type(), x)
+        #
+        # Coerce float arrays to the backend's working precision BEFORE adapting.
+        # build(FT) makes the arrays it populates at FT, but `aer` is a whole
+        # AerosolData struct and the fields this harness never assigns keep their
+        # @kwdef default — a literal `Float64[]`, which stays Float64 even in an
+        # AerosolData{Float32}. Metal rejects a Float64 array at adapt time even when
+        # it is EMPTY, so `ad(B.aer)` threw "Metal does not support Float64 values"
+        # before a single kernel launched — this harness has never actually run on
+        # Metal. Coercing first is also correct on a Float64 backend (FT is Float64
+        # there, so the conversion is an identity).
+        ad(x) = CLM.Adapt.adapt(device_array_type(), CLM.Adapt.adapt(_ToFT{FT}(), x))
         D = (; nc,
             snl = ad(B.snl), dz = ad(B.dz), zi = ad(B.zi), z = ad(B.z), t = ad(B.t),
             ice = ad(B.ice), liq = ad(B.liq), snwrds = ad(B.snwrds),

@@ -125,8 +125,17 @@ function tests(to, ::Type{FT}) where {FT}
         (NC, NLAK - 1), kme0,
         f -> begin
             tkl = f(zeros(FT, NC, NLAK)); frzn = f(fill(false, NC))
+            # The trailing five (lakepuddling, lake_no_ed, depthcrit, mixfact, n2min)
+            # were added to _lake_diffusivity_kernel! in src/ and this harness was
+            # never updated, so the call had 18 args against a 24-arg kernel and died
+            # with a MethodError before running — it has been dead since the signature
+            # changed. Values are the LakeCon defaults (lake_con.jl:82,85,89,93) and
+            # N2MIN (lake_temperature.jl:17), i.e. what a default run actually uses.
+            # lakedepth above spans 2..100 m against depthcrit=25, so the deep-mixing
+            # branch these parameters gate is genuinely exercised.
             ((tkl, frzn, f(trues(NC)), f(rhow_in), f(z_lake), f(ws_in), f(ks_in), f(t_grnd),
-              f(t_lake), f(snl), f(lakedepth), f(icefrac), NLAK, km, p0, cwat, tkice_eff),
+              f(t_lake), f(snl), f(lakedepth), f(icefrac), NLAK, km, p0, cwat, tkice_eff,
+              false, false, FT(25.0), FT(10.0), FT(CLM.N2MIN)),
              (tkl,))
         end))
     return results
