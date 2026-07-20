@@ -96,3 +96,49 @@ every one of the four** — independent of site, PFT set, forcing, and day of de
 is the signature the root cause predicts: the failure fires when the FATES patch
 population crosses the reserved-and-active HLM slot count, not at any site-specific
 physical threshold.
+
+### `after` arm — `arip_none`: 1459/1460 days, 8/8 PASS
+
+```
+ran 1459/1460 days   carbon cold=2549 final=1.728e+04   ncoh [14, 893]   npatch max=9
+births 5196 / deaths 4795   8/8 PASS, no errlon
+```
+
+against `main`'s death at day 74. **Defect 1 is closed for this config.**
+
+**The fix is a no-op until the defect fires.** Day 60 is *identical* on both arms —
+`ncoh 152`, `npatch 2`, `carbon 3396.3`, `maxdbh 5.0122`, `GPP 34678.025` — so #280
+changes nothing about the model until the FATES patch population crosses the
+reserved-and-active slot count. That is the strongest single piece of evidence that it
+is a filter/activation fix and not a physics change.
+
+Note the daily carbon balance held **1459/1459**. Per `conservation-is-not-accuracy`
+that is NOT offered as evidence of anything; see the next section for what it is blind to.
+
+### But the surviving run is not a physical one — `maxdbh` reaches 9.35 m
+
+The trajectory the fix makes reachable (day / `ncoh` / `npatch` / carbon / `maxdbh` cm):
+
+```
+  60  152 2   3396.3    5.01     900  349 4   3180.7  342.67
+ 120  878 9   4748.4   22.76    1020  287 4   8585.4  506.55
+ 180  881 9   4115     88.55    1140  294 4  12127    655.33
+ 240  490 5   4460    219.01    1260  310 4  14679    774.57
+ 360  460 5   6624.3  418.35    1380  363 5  15771    866.38
+ 600  840 9  11332    367.32    1440  408 5  17006    935.19
+```
+
+`maxdbh` goes **1.88 cm → 935 cm** in 1459 days ≈ **234 cm/yr**. A fast tropical pioneer
+does 1–5 cm/yr. This is **50–200× too fast**, and it ends at a 9.35 m diameter tree.
+
+**#280 does not cause it.** The rate is already wrong inside the byte-identical shared
+prefix: 1.8848 → 5.0122 cm over the first 60 days is **19 cm/yr**, on the step range
+where both arms agree to every printed digit. #280 only makes the later trajectory
+*reachable*; the growth defect was always there, hidden behind a day-74 death.
+
+Site carbon rises **monotonically** 2549 → 17006 (`min` = the cold start, `max` = the
+final day) with one die-back at ~day 900 (11988 → 3180.7). The harness's
+`[PASS] carbon bounded (no blow-up/collapse)` passes on that trajectory, as does
+`carbon conserved EVERY day` (1459/1459) — **neither check can see a growth rate two
+orders of magnitude too fast**, because carbon that is mis-allocated to stem is still
+conserved. Textbook `conservation-is-not-accuracy`.
