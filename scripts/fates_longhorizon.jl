@@ -116,7 +116,16 @@ function build()
         "$DATA/domain_Aripuana_Amazon/settings/CLM/parameters/clm5_params.nc")
     fyr = parse(Int, get(ENV, "FATES_YEAR", "2004"))
     # Optional climate-appropriate PFT screening (fixed-biogeography). Default OFF ->
-    # the all-PFT NBG cold start (the boom-bust baseline). FATES_BIOGEOG selects a
+    # the all-PFT NBG cold start (the boom-bust baseline).
+    #
+    # STATUS (D4, 2026-07-20): #197's 4-year evidence for this screen NO LONGER
+    # REPRODUCES -- both arms die before day 100 on a fatal longwave imbalance (see
+    # fates_fortran_parity/README.md D4). Note also that D3/#274's suggestion that the
+    # screen compensates for the running-mean bug is DISPROVED: that bug was inert at
+    # this harness's dtime=1800. The screen is neither validated nor retired; treat any
+    # boom-bust claim from this script as unverified until the multi-year blocker is fixed.
+    #
+    # FATES_BIOGEOG selects a
     # named screen: "drop_cold_deciduous" (or "1") seeds only non-cold-deciduous PFTs
     # (evergreen + drought-deciduous) — the tropical-appropriate set for Aripuana, so
     # no cold-deciduous cohort is ever seeded/recruited to drive the die-back cycle.
