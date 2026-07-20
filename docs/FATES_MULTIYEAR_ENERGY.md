@@ -142,3 +142,14 @@ final day) with one die-back at ~day 900 (11988 → 3180.7). The harness's
 `carbon conserved EVERY day` (1459/1459) — **neither check can see a growth rate two
 orders of magnitude too fast**, because carbon that is mis-allocated to stem is still
 conserved. Textbook `conservation-is-not-accuracy`.
+
+### `after` arm — `arip_screened`: 1459/1460 days, 8/8 PASS
+
+```
+ran 1459/1460 days   carbon cold=2006 final=3.190e+04   ncoh [9, 848]   npatch max=9
+births 5209 / deaths 4434   8/8 PASS, no errlon
+```
+
+against `main`'s death at day 98. Same picture as `arip_none`: the run completes, and
+the same unphysical growth rides along — `maxdbh` **1247 cm at day 1320** (12.5 m),
+carbon again **monotone** 2006 → 31900 with `min` = the cold start.
