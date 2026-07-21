@@ -329,28 +329,57 @@ Should only be called if `use_cn` is true.
 
 Ported from `InitEachTimeStep` in `CNVegetationFacade.F90`.
 
-Note: In the Fortran, this calls ZeroDWT and ZeroGRU on the carbon flux,
-nitrogen flux, carbon state, and nitrogen state types. Those methods ARE ported
-(`cnveg_carbon_flux_zero_dwt!` / `_zero_gru!`, `cnveg_nitrogen_flux_zero_dwt!` /
-`_zero_gru!`, `cnveg_carbon_state_zero_dwt!`, `cnveg_nitrogen_state_zero_dwt!`,
-in `src/types/cn_veg_*.jl`) — they are simply not invoked from this facade.
-Ported, not wired here.
+In the Fortran, this calls ZeroDWT and ZeroGRU on the carbon flux, nitrogen flux,
+carbon state, and nitrogen state types (`CNVegetationFacade::InitEachTimeStep`).
+ZeroDWT zeros the dynamic-landuse transfer/conversion/seed/product fluxes and the
+displayed/stored veg-C/N diagnostics at the START of the step — BEFORE
+`dynSubgrid_driver` recomputes the dwt fluxes at a year boundary. This is the ONLY
+place those dwt fluxes are zeroed: the per-step `SetValues` reset (which runs later,
+inside the CN driver) must NOT touch them, or it wipes what dynSubgrid just wrote.
 """
 function cn_vegetation_init_each_timestep!(veg::CNVegetationData;
                                             mask_soilc::AbstractVector{Bool},
                                             mask_soilp::AbstractVector{Bool},
                                             bounds_col::UnitRange{Int},
-                                            bounds_patch::UnitRange{Int})
-    cfg = veg.config
+                                            bounds_patch::UnitRange{Int},
+                                            bounds_grc::UnitRange{Int} = 1:0,
+                                            nlevdecomp_full::Int = 0,
+                                            i_litr_max::Int = I_LITR1)
+    # ZeroDWT (C flux, N flux, C state, N state) + ZeroGRU (C flux, N flux) —
+    # mirrors CNVegetationFacade::InitEachTimeStep. Runs at step start, before
+    # dynSubgrid_driver. Guarded so a caller with unsized/empty CN state (e.g. a
+    # minimal driver smoke test that never allocated the dwt flux arrays) falls
+    # back to the previous no-op instead of indexing an empty array.
+    cf = veg.cnveg_carbonflux_inst
+    nf = veg.cnveg_nitrogenflux_inst
+    cs = veg.cnveg_carbonstate_inst
+    ns = veg.cnveg_nitrogenstate_inst
+    grc_ok = !isempty(bounds_grc) &&
+             length(cf.dwt_conv_cflux_grc) >= last(bounds_grc) &&
+             length(nf.dwt_conv_nflux_grc) >= last(bounds_grc) &&
+             length(cf.gru_conv_cflux_grc) >= last(bounds_grc) &&
+             length(nf.gru_conv_nflux_grc) >= last(bounds_grc)
+    col_ok = !isempty(bounds_col) && nlevdecomp_full > 0 &&
+             size(cf.dwt_frootc_to_litr_c_col, 1) >= last(bounds_col) &&
+             size(cf.dwt_frootc_to_litr_c_col, 2) >= nlevdecomp_full &&
+             size(nf.dwt_frootn_to_litr_n_col, 1) >= last(bounds_col) &&
+             size(nf.dwt_frootn_to_litr_n_col, 2) >= nlevdecomp_full
+    patch_ok = !isempty(bounds_patch) &&
+               length(cs.totc_patch) >= last(bounds_patch) &&
+               length(ns.totn_patch) >= last(bounds_patch)
 
-    # ZeroDWT / ZeroGRU — all four ported (see the docstring), none called here.
-    # cnveg_carbonflux_inst%ZeroDWT   → cnveg_carbon_flux_zero_dwt!   (ported, not wired here)
-    # c13_/c14_ carbonflux ZeroDWT    → same routine on the isotope insts (if use_c13/use_c14)
-    # cnveg_nitrogenflux_inst%ZeroDWT → cnveg_nitrogen_flux_zero_dwt! (ported, not wired here)
-    # cnveg_carbonstate_inst%ZeroDWT  → cnveg_carbon_state_zero_dwt!  (ported, not wired here)
-    # cnveg_nitrogenstate_inst%ZeroDWT→ cnveg_nitrogen_state_zero_dwt!(ported, not wired here)
-    # cnveg_carbonflux_inst%ZeroGRU   → cnveg_carbon_flux_zero_gru!   (ported, not wired here)
-    # cnveg_nitrogenflux_inst%ZeroGRU → cnveg_nitrogen_flux_zero_gru! (ported, not wired here)
+    if grc_ok && col_ok
+        cnveg_carbon_flux_zero_dwt!(cf, bounds_grc, bounds_col;
+            nlevdecomp_full=nlevdecomp_full, i_litr_max=i_litr_max)
+        cnveg_nitrogen_flux_zero_dwt!(nf, bounds_grc, bounds_col;
+            nlevdecomp_full=nlevdecomp_full, i_litr_max=i_litr_max)
+        cnveg_carbon_flux_zero_gru!(cf, bounds_grc)
+        cnveg_nitrogen_flux_zero_gru!(nf, bounds_grc)
+    end
+    if patch_ok
+        cnveg_carbon_state_zero_dwt!(cs, bounds_patch)
+        cnveg_nitrogen_state_zero_dwt!(ns, bounds_patch)
+    end
 
     return nothing
 end

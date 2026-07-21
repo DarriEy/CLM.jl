@@ -1977,6 +1977,15 @@ function _zero_cnveg_flux_arrays!(cf)
         # dwt inputs are added BEFORE this per-step reset) and zeroed only after the
         # soil-matrix solve — so it must survive the step-start reset.
         (name === :matrix_Cinput_col || name === :matrix_Ninput_col) && continue
+        # Dynamic-landuse (dwt_*) transfer/conversion/seed/product fluxes. Fortran's
+        # CNVeg{Carbon,Nitrogen}FluxType::SetValues does NOT touch any dwt_ field
+        # (verified: 0 dwt refs in either SetValues) — they are managed solely by
+        # ZeroDwt, which runs at the START of the timestep (InitEachTimeStep), BEFORE
+        # dynSubgrid_driver computes them. Blanket-zeroing them here (SetValues runs
+        # in the CN driver, AFTER dynSubgrid) wiped the conversion/seed/product fluxes
+        # that dynSubgrid had just written, so on a transient year-boundary step the
+        # gridcell C/N balance saw the store drop but read every dwt term as 0.
+        startswith(String(name), "dwt_") && continue
         arr = getfield(cf, name)
         (arr isa AbstractArray && !isempty(arr) && eltype(arr) <: Real) || continue
         fill!(arr, zero(eltype(arr)))

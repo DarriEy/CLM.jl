@@ -122,8 +122,10 @@
         cf.dwt_frootc_to_litr_c_col .= 5.0
         cf.dwt_livecrootc_to_cwdc_col .= 7.0
 
+        # i_litr_max spans the litter sub-pool (3rd) dim — matches Fortran ZeroDwt's
+        # `do i = i_litr_min, i_litr_max`. Here the fixture allocated that dim as 2.
         CLM.cnveg_carbon_flux_zero_dwt!(cf, 1:ng, 1:nc;
-                                         nlevdecomp_full=2, ndecomp_pools=2)
+                                         nlevdecomp_full=2, i_litr_max=2)
 
         @test all(x -> x == 0.0, cf.dwt_seedc_to_leaf_grc)
         @test all(x -> x == 0.0, cf.dwt_conv_cflux_grc)

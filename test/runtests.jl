@@ -197,6 +197,7 @@ using CLM
     include("test_dyn_subgrid_driver.jl")
     include("test_dyn_subgrid_cnbal_wiring.jl")
     include("test_dyn_subgrid_e2e.jl")  # transient dyn_subgrid driven through the real clm_drv! loop
+    include("test_dyn_subgrid_cn_e2e.jl")  # transient dyn_subgrid + use_cn: dwt fluxes survive to the balance check
     include("test_initialization.jl")
     include("test_multigridcell_surfdata.jl")
     include("test_crop_collapse_static.jl")
