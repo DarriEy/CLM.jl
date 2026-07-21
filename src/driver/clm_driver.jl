@@ -860,12 +860,18 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Initialize mass balance checks for C and N
     # ========================================================================
     if config.use_cn
-        # InitEachTimeStep — WIRED
+        # InitEachTimeStep — WIRED. Zeros the dwt/gru landuse fluxes at step start
+        # (ZeroDWT/ZeroGRU), BEFORE dynSubgrid_driver recomputes them at a year
+        # boundary. Must run before begin_cn_gridcell_balance so the gridcell begin
+        # store and the dwt terms are captured on the same footing.
         cn_vegetation_init_each_timestep!(inst.bgc_vegetation;
             mask_soilc=filt.soilc,
             mask_soilp=filt.soilp,
             bounds_col=bc_col,
-            bounds_patch=bc_patch)
+            bounds_patch=bc_patch,
+            bounds_grc=bc_grc,
+            nlevdecomp_full=varpar.nlevdecomp_full,
+            i_litr_max=config.i_litr_max)
     end
     if config.use_cn || config.use_fates_bgc
         # InitGridcellBalance — WIRED

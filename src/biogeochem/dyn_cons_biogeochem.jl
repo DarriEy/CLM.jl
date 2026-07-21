@@ -793,6 +793,14 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
     ns = soilbiogeochem_nitrogenstate
 
     dzs = dzsoi_decomp[]
+    # Fortran DynamicColumnAdjustments loops the vertical index `do j = 1, nlevdecomp`
+    # (SoilBiogeochemCarbon/NitrogenStateType.F90) — NOT over the full allocated
+    # depth. The vr_col pools are allocated 1:nlevdecomp_full (25 on this grid) but
+    # only 1:nlevdecomp (=length(dzsoi_decomp), 20) carry decomposition state, and
+    # dzsoi_decomp itself is only nlevdecomp long. Iterating size(_,2) here overran
+    # dzsoi_decomp on the real cold-start sizing (the wiring test happened to size
+    # its arrays to nlevdecomp, so it never exposed this).
+    nlevdecomp = length(dzs)
 
     # Backend-aware adjustment scratch (device-resident when the soil BGC state
     # is on-device; the per-level depth-integration uses zero_col!/accumulate_
@@ -804,17 +812,15 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
     zero_col!(cs.dyn_cbal_adjustments_col, begc, endc)
 
     ndecomp_pools_c = size(cs.decomp_cpools_vr_col, 3)
-    nlevdecomp_c    = size(cs.decomp_cpools_vr_col, 2)
     for l in 1:ndecomp_pools_c
-        for j in 1:nlevdecomp_c
+        for j in 1:nlevdecomp
             update_column_state_no_special_handling!(updater, bounds, clump_index,
                 col, @view(cs.decomp_cpools_vr_col[:, j, l]); adjustment = adjustment)
             accumulate_scaled_col!(cs.dyn_cbal_adjustments_col, adjustment, dzs[j], begc, endc)
         end
     end
 
-    nlevc_trunc = size(cs.ctrunc_vr_col, 2)
-    for j in 1:nlevc_trunc
+    for j in 1:nlevdecomp
         update_column_state_no_special_handling!(updater, bounds, clump_index,
             col, @view(cs.ctrunc_vr_col[:, j]); adjustment = adjustment)
         accumulate_scaled_col!(cs.dyn_cbal_adjustments_col, adjustment, dzs[j], begc, endc)
@@ -824,17 +830,15 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
     zero_col!(ns.dyn_nbal_adjustments_col, begc, endc)
 
     ndecomp_pools_n = size(ns.decomp_npools_vr_col, 3)
-    nlevdecomp_n    = size(ns.decomp_npools_vr_col, 2)
     for l in 1:ndecomp_pools_n
-        for j in 1:nlevdecomp_n
+        for j in 1:nlevdecomp
             update_column_state_no_special_handling!(updater, bounds, clump_index,
                 col, @view(ns.decomp_npools_vr_col[:, j, l]); adjustment = adjustment)
             accumulate_scaled_col!(ns.dyn_nbal_adjustments_col, adjustment, dzs[j], begc, endc)
         end
     end
 
-    nlevn_trunc = size(ns.ntrunc_vr_col, 2)
-    for j in 1:nlevn_trunc
+    for j in 1:nlevdecomp
         update_column_state_no_special_handling!(updater, bounds, clump_index,
             col, @view(ns.ntrunc_vr_col[:, j]); adjustment = adjustment)
         accumulate_scaled_col!(ns.dyn_nbal_adjustments_col, adjustment, dzs[j], begc, endc)
@@ -845,8 +849,7 @@ function dyn_cnbal_col!(bounds::BoundsType, clump_index::Int,
     end
 
     if use_nitrif_denitrif
-        nlevsmin = size(ns.smin_no3_vr_col, 2)
-        for j in 1:nlevsmin
+        for j in 1:nlevdecomp
             # These pools aren't included in the overall N balance (totn), so
             # track them separately (reset each level, matching Fortran).
             zero_col!(ns.dyn_no3bal_adjustments_col, begc, endc)
