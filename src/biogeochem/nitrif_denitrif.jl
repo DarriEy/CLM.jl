@@ -544,9 +544,12 @@ end
 # use_fun=.false. branch). Applies the per-step N fluxes — deposition/fixation,
 # gross mineralization, immobilization, plant uptake, nitrification,
 # denitrification, supplement — to smin_nh4_vr / smin_no3_vr and updates the
-# diagnostic sminn_vr. (The decomp-N-pools sourcesink part of NStateUpdate1 is
-# already handled in n_state_update1!.) Runs after n_state_update1! (Fortran
-# CNDriverNoLeaching order, line 658).
+# diagnostic sminn_vr. The ORGANIC decomp-N-pools side of NStateUpdate1 (the
+# cascade donor/receiver transfers into decomp_npools_sourcesink) is handled in
+# `n_state_update1!` (`_nsu1_col_kernel!`), which MUST run first so the organic
+# pools lose the N that this routine mineralizes into the smin pool — otherwise
+# the net mineralization is created from nothing. Runs after n_state_update1!
+# (Fortran CNDriverNoLeaching order, line 658).
 #
 # GPU: one KA kernel, one thread per column (the nlevdecomp loop runs in-thread,
 # byte-identical to the host loop and race-free — each thread owns its column).

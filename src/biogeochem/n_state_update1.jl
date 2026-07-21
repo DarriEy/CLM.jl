@@ -247,7 +247,10 @@ _nsu1_nf(nf) = _NSU1NF(;
 # --- Kernel: column-level soil decomposition input fluxes (one thread per column) ---
 @kernel function _nsu1_col_kernel!(@Const(mask_soilc), @Const(col_is_fates),
         @Const(phenology_n_to_litr_n_col), decomp_npools_sourcesink_col,
-        nlevdecomp::Int, i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
+        @Const(decomp_cascade_ntransfer_vr_col), @Const(decomp_cascade_sminn_flux_vr_col),
+        @Const(cascade_donor_pool), @Const(cascade_receiver_pool),
+        nlevdecomp::Int, ndecomp_cascade_transitions::Int,
+        i_litr_min::Int, i_litr_max::Int, i_cwd::Int,
         use_soil_matrixcn::Bool, dt)
     c = @index(Global)
     @inbounds if mask_soilc[c]
@@ -262,6 +265,39 @@ _nsu1_nf(nf) = _NSU1NF(;
                     # NOTE(wjs, 2017-01-02) This used to be set to a non-zero value, but the
                     # terms have been moved to NStateUpdateDynPatch. Explicitly zeroed here.
                     decomp_npools_sourcesink_col[c, j, i_cwd] = zero(T)
+                end
+            end
+        end
+
+        # Decomposition-cascade N transfers into the organic decomp pools.
+        # Ported from SoilBiogeochemNStateUpdate1Mod.F90:118-160 (the N analogue of
+        # the carbon block in `_csu1_col_kernel!`). The MINERAL-N side of the cascade
+        # (gross mineralization + immobilization) is applied separately in
+        # `soilbiogeochem_n_state_update1!`. WITHOUT this block the net-mineralized N
+        # was ADDED to the smin pool but never REMOVED from the organic pools, so a
+        # column created N equal to the net mineralization each step (~3e-4 gN/m2/step
+        # in the Bow use_cn summer; the whole errnb residual documented in
+        # docs/CN_BALANCE_STATUS.md). Runs for all soil columns (fates handled apart),
+        # matching the carbon kernel. Sequential k within each column thread => the
+        # donor/receiver += into shared pool indices is race-free.
+        if !use_soil_matrixcn
+            for j in 1:nlevdecomp
+                for k in 1:ndecomp_cascade_transitions
+                    # N loss from the donor decomposing pool
+                    decomp_npools_sourcesink_col[c, j, cascade_donor_pool[k]] =
+                        decomp_npools_sourcesink_col[c, j, cascade_donor_pool[k]] -
+                        decomp_cascade_ntransfer_vr_col[c, j, k] * dt
+                    if cascade_receiver_pool[k] != 0  # skip terminal transitions
+                        # N gain to the receiver pool: transferred N + cascade mineral-N flux
+                        decomp_npools_sourcesink_col[c, j, cascade_receiver_pool[k]] =
+                            decomp_npools_sourcesink_col[c, j, cascade_receiver_pool[k]] +
+                            (decomp_cascade_ntransfer_vr_col[c, j, k] +
+                             decomp_cascade_sminn_flux_vr_col[c, j, k]) * dt
+                    else  # terminal transitions: debit donor by the cascade mineral-N flux
+                        decomp_npools_sourcesink_col[c, j, cascade_donor_pool[k]] =
+                            decomp_npools_sourcesink_col[c, j, cascade_donor_pool[k]] -
+                            decomp_cascade_sminn_flux_vr_col[c, j, k] * dt
+                    end
                 end
             end
         end
@@ -507,6 +543,9 @@ function n_state_update1!(ns_veg::CNVegNitrogenStateData,
                            i_litr_min::Int,
                            i_litr_max::Int,
                            i_cwd::Int,
+                           cascade_donor_pool::AbstractVector{<:Integer} = Int[],
+                           cascade_receiver_pool::AbstractVector{<:Integer} = Int[],
+                           ndecomp_cascade_transitions::Int = 0,
                            npcropmin::Int = NPCROPMIN,
                            nrepr::Int = NREPR,
                            repr_grain_min::Int = 1,
@@ -520,9 +559,14 @@ function n_state_update1!(ns_veg::CNVegNitrogenStateData,
 
     # --- Column loop: soil decomposition input fluxes (one thread per column) ---
     _FT = eltype(nf_soil.decomp_npools_sourcesink_col)
+    _donor    = _to_backend_like(nf_soil.decomp_npools_sourcesink_col, _FT, cascade_donor_pool)
+    _receiver = _to_backend_like(nf_soil.decomp_npools_sourcesink_col, _FT, cascade_receiver_pool)
     _launch!(_nsu1_col_kernel!, mask_soilc, col_is_fates,
         nf_veg.phenology_n_to_litr_n_col, nf_soil.decomp_npools_sourcesink_col,
-        nlevdecomp, i_litr_min, i_litr_max, i_cwd, use_soil_matrixcn, _FT(dt))
+        nf_soil.decomp_cascade_ntransfer_vr_col, nf_soil.decomp_cascade_sminn_flux_vr_col,
+        _donor, _receiver,
+        nlevdecomp, ndecomp_cascade_transitions, i_litr_min, i_litr_max, i_cwd,
+        use_soil_matrixcn, _FT(dt))
 
     # --- Patch loop: vegetation N state updates (one thread per patch) ---
     ns = _nsu1_ns(ns_veg)

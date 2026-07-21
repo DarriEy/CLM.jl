@@ -1,16 +1,19 @@
 # CN mass-conservation check — status
 
-**The carbon check is ON by default and FATAL.** The nitrogen check is ON and fatal at
-Fortran's `nerror`, which it passes, but it has one documented open residual (below).
+**Both the carbon and nitrogen checks are ON by default and FATAL, and both now
+conserve to the machine-precision floor.** The one previously-documented nitrogen
+residual (net mineralization created in the soil) is **RESOLVED** — see "Resolved" below.
 
 | | threshold | Bow `use_cn`, worst over summer (28 steps) + autumn (480-step free run) |
 |---|---|---|
 | `errcb_col` | `cerror` = 1e-7 | **1.4e-11** ✅ |
 | `errcb_grc` | `cerror` = 1e-7 | **1.4e-11** ✅ |
-| `errnb_col` | `nerror` = 1e-3 (fatal) | **3.1e-4** ✅ passes |
-| `errnb_col` | `nwarning` = 1e-7 (warn) | **3.1e-4** ❌ **exceeds — see "Open" below** |
+| `errnb_col` | `nerror` = 1e-3 (fatal) | **1.1e-12** ✅ passes |
+| `errnb_col` | `nwarning` = 1e-7 (warn) | **1.1e-12** ✅ (was 3.1e-4) |
 
-Harness: `scripts/cn_conservation_audit.jl [summer|autumn|both]`.
+Harness: `scripts/cn_conservation_audit.jl [summer|autumn|both]`. N-side pool
+audits: `scripts/probe_veg_pool_audit_n.jl`, `scripts/probe_n_split_vegsoil.jl`,
+`scripts/probe_n_column_balance.jl`.
 
 ---
 
@@ -109,38 +112,59 @@ four orders of margin under `cerror` = 1e-7. The check is **ON by default and FA
 
 ---
 
-## Open: nitrogen is created in the vegetation pools (~3.3e-4 gN/m2/step)
+## Resolved: net mineralization was created in the SOIL, not the vegetation
 
-The N budget clears Fortran's `nerror` (1e-3) but not its `nwarning` (1e-7).
-**Neither threshold has been retuned and no term has been re-zeroed.** The warning is
-capped with `maxlog` only so that one documented, non-fatal residual does not emit an
-identical line on all 480 steps of a free run.
+The residual was **~3.05e-4 gN/m2/step of net mineralization added to the soil mineral
+pool but never removed from the soil organic (decomp) pools** — the soil decomposition
+cascade's N-transfer step into `decomp_npools_vr` was **entirely missing** from the port.
 
-Localised (`scripts/probe_veg_pool_audit.jl`, summer, Bow column 1, one step):
+### How the earlier "it's in the vegetation" reading was a red herring
+The old localisation compared `d(veg N)` against a `soil N` total and concluded veg gains
+more than soil supplies. But splitting the column N into veg / soil-mineral / soil-decomp
+(`scripts/probe_n_split_vegsoil.jl`) shows the veg side conserves exactly:
 
 ```
-d(totn_col) = +3.25e-4      <- the N pool GROWS
-d(soil N)   = -6.70e-4      <- soil supplies 6.70e-4
-d(veg N)    = +9.95e-4      <- vegetation gains 9.95e-4
-                                => +3.25e-4 gN/m2/step created from nothing, in VEG
+veg (p2c totn_patch)  d = +9.95e-4   = plant uptake 1.02e-3 − litterfall 2.5e-5   ✔
+soil mineral (sminn)  d = −6.95e-4                                                  ← too small
+soil decomp pools     d = +2.52e-5   = litterfall only                             ← should also LOSE ~3e-4
+TOTN_COL              d = +3.25e-4   ← created
 ```
 
-So nitrogen is created inside the **vegetation** N pools, not lost in the veg→soil
-transfer (that transfer conserves exactly now — it shares the `lf_f` and `nlevdecomp`
-fixes with carbon, and the N side of `n_state_update1` shares the `is_woody` fix). It is
-concentrated in the **growing season**: in the autumn window most steps sit at ~1e-13 and
-the worst is 1.07e-5, versus 3.1e-4 in summer — consistent with an error in the active
-N-uptake / allocation / retranslocation path rather than in turnover.
+`scripts/probe_n_column_balance.jl` confirms the plant-uptake path is airtight under FUN:
+`p2c(sminn_to_plant_fun) − vr_soil_debit = 0.0` (and `Nfix ≈ 0`, so the FUN-fixation
+`nfix_to_sminn` p2c is not involved here). The mineral pool is debited exactly what the
+plant takes up. The leak is that decomposition adds **gross_nmin − actual_immob**
+(net mineralization) to `smin_nh4_vr` in `soilbiogeochem_n_state_update1!`
+(`nitrif_denitrif.jl`) while the matching **organic-side** debit was never applied.
 
-Two adjacent dead inputs were also observed and are *not* the cause (they would make the
-pool grow *less*, not more), but should be chased with it:
+### The bug
+`SoilBiogeochemNStateUpdate1Mod.F90:118-160` builds `decomp_npools_sourcesink` from the
+cascade — donor pool loses `decomp_cascade_ntransfer_vr`, receiver gains
+`ntransfer + decomp_cascade_sminn_flux_vr`, terminal transitions debit the donor by the
+mineral-N flux — and that sourcesink is applied to `decomp_npools_vr` (via litter vertical
+transport). The **carbon** column kernel `_csu1_col_kernel!` (`c_state_update1.jl:367-382`)
+ports this exactly. The **nitrogen** column kernel `_nsu1_col_kernel!`
+(`n_state_update1.jl`) did **not**: it only SET `decomp_npools_sourcesink_col = phenology
+litterfall` and stopped. So the organic pools received litterfall but never lost the N
+that decomposition mineralized into the smin pool → N created = net mineralization, every
+step. It concentrated in the growing season because that is when decomposition (warm, wet
+soil) and net mineralization peak. Carbon could not catch it: carbon has no
+mineral-pool analogue — its cascade just respires to the atmosphere and was ported.
 
-* `ndep_to_sminn_col` reads **0.0** — atmospheric N deposition reaches the mineral pool
-  nowhere.
-* `nfix_to_sminn_col` reads **0.0** — biological N fixation likewise.
+### The fix
+Add the N-cascade donor/receiver/terminal block to `_nsu1_col_kernel!`, a line-for-line
+mirror of the carbon kernel and of the Fortran N formulas
+(`decomp_cascade_ntransfer_vr_col` + `decomp_cascade_sminn_flux_vr_col`), gated on
+`!use_soil_matrixcn` and threaded through `n_state_update1!` from `cn_driver.jl`
+(`cascade_donor_pool` / `cascade_receiver_pool` / `ndecomp_cascade_transitions`, the same
+three the C update already receives). The new kwargs default to a no-op
+(`ndecomp_cascade_transitions = 0`) so existing unit-test callers stay bit-identical.
 
-**Next step:** run the N analogue of `scripts/probe_veg_pool_audit.jl` — snapshot every
-patch-level N pool (`npool`, `retransn`, leaf/froot/livestem/... N and their
-storage/xfer) across one step and compare each pool's delta against the fluxes that are
-supposed to move it. Carbon's culprit fell out of exactly that audit the moment the grass
-patch was seen to close to machine precision while the tree patch did not.
+**Result:** `errnb_col` fell from **3.1e-4 → 1.1e-12** (summer) and holds at the ~1e-12
+floor across the 480-step autumn free run — four orders under `nwarning` = 1e-7, matching
+the carbon side. Both checks are **ON by default and FATAL**.
+
+### Adjacent observations (not the cause; left as-is)
+* `ndep_to_sminn_col` reads 0.0 (no ndep stream fed to this harness) and FUN `Nfix ≈ 0`
+  in this window — neither contributes to the residual, and both are correctly wired
+  (deposition via `n_deposition!`, FUN fixation p2c'd to `nfix_to_sminn_col` in `fun.jl`).
