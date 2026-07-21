@@ -146,6 +146,23 @@ function make_driver_data(; ng=2, nl=3, nc=4, np=6)
     p.medlynslope     = fill(6.0, npft)
     p.crop          = fill(0.0, npft)
 
+    # --- PHS (plant hydraulic stress) PFT parameters ---
+    # #267/#271 shape: CLMDriverConfig() now resolves use_hydrstress=true (CTSM's
+    # clm5_0 non-FATES default), so this fixture RUNS the PHS path and has to
+    # supply what PHS reads. test/test_clm_driver.jl was updated when the default
+    # flipped; this clone was not, which killed EVERY whole-driver GPU harness:
+    # get_froot_carbon_patch's SP branch indexes froot_leaf[pft] with no @inbounds
+    # (BoundsError on the 0-element default) and psn_phs_pass1_update! raises its
+    # "pftcon was not initialized for a use_hydrstress run" guard. Both fire before
+    # any device comparison, so clmdrv_e2e / clmdrv_cn_e2e reported a hard failure
+    # rather than a parity number.
+    #
+    # Real clm5_params.nc values, matching test/test_clm_driver.jl exactly — this
+    # block is the sync obligation named at the top of this file.
+    p.froot_leaf    = fill(2.8143, npft)
+    p.root_radius   = fill(CLM.ROOT_RADIUS_PARAM, npft)
+    p.root_density  = fill(CLM.ROOT_DENSITY_PARAM, npft)
+
     photosyns = CLM.PhotosynthesisData()
     CLM.photosynthesis_data_init!(photosyns, np)
 

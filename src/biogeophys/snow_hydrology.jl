@@ -1648,14 +1648,22 @@ Adapt.@adapt_structure CombineSnowCol
             j += 1
         end
 
-        # Recompute snow depth and total water
-        cv.snow_depth[c] = zr
+        # Recompute snow depth and total water. Accumulate into a LOCAL, not into the
+        # array element cv.snow_depth[c]: a loop-carried `+=` on an array cell is the
+        # store→load recurrence the KA CPU backend miscompiles (see the tridiagonal_multi!
+        # case, #263). Left as `cv.snow_depth[c] +=` it dropped all but the last layer's
+        # dz under --check-bounds=yes, so a healthy 0.054 m two-layer pack read as 0.004 m,
+        # tripped the `< dzmin` all-snow-gone branch, and wrongly collapsed the column to
+        # snl=0 — while the device and the normally-compiled CPU (which don't reorder the
+        # recurrence) stayed correct at snl=-2. h2osno_total was already a local.
+        snow_depth_acc = zr
         h2osno_total = zr
         for jl in (snl[c]+1):0
             jj = jl + nlevsno
-            cv.snow_depth[c] += m.dz[c, jj]
+            snow_depth_acc += m.dz[c, jj]
             h2osno_total += m.h2osoi_ice[c, jj] + m.h2osoi_liq[c, jj]
         end
+        cv.snow_depth[c] = snow_depth_acc
 
         # Check if all snow gone
         if cv.snow_depth[c] > zr
@@ -1864,8 +1872,16 @@ function combine_snow_layers!(
     cv = CombineSnowCol(; h2osno_no_layers, snow_depth, frac_sno, frac_sno_eff, int_snow,
                         qflx_sl_top_soil)
 
+    # dtime is converted to the working eltype HERE, on the host. Passing the raw
+    # Float64 made `dt = T(dtime)` a DEVICE-side double conversion, and Metal cannot
+    # take a double at all: the kernel failed to compile outright with "unsupported
+    # use of double value", so combine_snow_layers! could never run on a Float32-only
+    # backend. The kernel-header note about converting literals covers exactly that —
+    # literals — and a scalar ARGUMENT slipped past it. Same host-side conversion the
+    # sibling launches in this file already do (lines 396, 663, 825). Identity on a
+    # Float64 backend, so the CPU path stays byte-identical.
     _launch!(_snowhyd_combine_kernel!, snl, m, a, cv, mask_snow, lun_itype, urbpoi,
-             col_landunit, dzmin, dtime, nlevsno, first(bounds), last(bounds);
+             col_landunit, dzmin, eltype(dz)(dtime), nlevsno, first(bounds), last(bounds);
              ndrange = length(snl))
     return nothing
 end

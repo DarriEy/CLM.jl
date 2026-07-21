@@ -1528,9 +1528,30 @@ end
 # with an internal serial iv loop. params_inst scalars bundled in `prm`; overrides
 # / leaf_mr_vcm / flags / lmrc resolved on the host. kn + jmax_z_local are local
 # scratch matrices; lmr_z is the phase-selected ps field.
+# Per-PFT parameter bundle for the NON-PHS Pass-2 kernel (Metal 31-arg-buffer
+# reduction). #268 added three arguments to _psn_pass2_kernel! (crop_pft,
+# vcmaxcint_sun and the use_luna flag) for the new non-PHS LUNA branch, taking it
+# from 29 to 32 indirect argument buffers — one over Apple's hard limit. Metal
+# refused the kernel outright:
+#
+#   NSError: Total number of indirect argument buffer resources exceeded for
+#            buffers (32/31) (AGXMetalG16X, code 3)
+#
+# so the default (non-PHS) photosynthesis path could not run on Metal at all.
+# Folding the six loose per-PFT vectors into ONE struct costs 5 buffers, the same
+# device-view-bundle trick the PHS pass already uses (_Psn2Pft/_Psn2Idx below) and
+# that fire_base.jl uses for the same reason. PFT params are Float64-pinned on the
+# AD path, so they get their own shared type parameter Vp and never unify with Dual
+# state. Fields are aliased straight back into the call below, so
+# `_psn_pass2_body!` — which the AD host loop calls directly — is UNCHANGED.
+Base.@kwdef struct _PsnP2Pft{Vp}
+    slatop_pft::Vp; leafcn_pft::Vp; flnr_pft::Vp; fnitr_pft::Vp
+    lmr_intercept_atkin::Vp; crop_pft::Vp
+end
+Adapt.@adapt_structure _PsnP2Pft
+
 @kernel function _psn_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
-        @Const(ivt), @Const(slatop_pft), @Const(leafcn_pft), @Const(flnr_pft),
-        @Const(fnitr_pft), @Const(lmr_intercept_atkin), @Const(crop_pft),
+        @Const(ivt), pft::_PsnP2Pft,
         @Const(dayl_factor), @Const(t10), @Const(t_veg),
         @Const(btran), @Const(tlai_z), @Const(par_z_in), @Const(vcmaxcint),
         @Const(vcmaxcint_sun), @Const(nrad), prm, vcmax25_scale, jmax25top_sf_val,
@@ -1538,8 +1559,8 @@ end
         light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
         is_sun::Bool, leafresp_ryan::Int)
     p = @index(Global)
-    _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft, leafcn_pft,
-        flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor, t10, t_veg,
+    _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, pft.slatop_pft, pft.leafcn_pft,
+        pft.flnr_pft, pft.fnitr_pft, pft.lmr_intercept_atkin, pft.crop_pft, dayl_factor, t10, t_veg,
         btran, tlai_z, par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, vcmax25_scale,
         jmax25top_sf_val, leaf_mr_vcm, use_cn, use_luna, light_inhibit, leafresp_method,
         nlevcan, is_sun, leafresp_ryan)
@@ -1704,6 +1725,24 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
     # leafresp_method≠Ryan. It is a CONSTANT parameter — it carries no derivative,
     # so it must NOT be promoted to the AD element type T (see _psn_pft_like).
     lmr_intercept_atkin = _psn_pft_like(slatop_pft, params_inst.lmr_intercept_atkin)
+    # #268 added `crop_pft` as a KERNEL ARGUMENT of _psn_pass2_kernel! (it gates the
+    # new non-PHS LUNA branch). Its signature default is a host `Float64[]`
+    # (photosynthesis.jl:2350), and a kernel argument is rejected for being
+    # non-bitstype whether or not the body ever reads it — so every device caller of
+    # the non-PHS photosynthesis! that did not explicitly pass crop_pft stopped
+    # compiling ("passing non-bitstype argument"). Substituting a backend-matched
+    # zero vector keeps the device container (a device array stays a device array)
+    # and is semantically "no crop", which is what an empty crop_pft meant. Same
+    # guard #273 added for this parameter one file over in canopy_fluxes.jl, and the
+    # same shape as `_psn_pft_like` directly above.
+    crop_pft = isempty(crop_pft) ? zero(slatop_pft) : crop_pft
+    # #268 added `vcmaxcint_sun` the same way, with the same host `Float64[]` default
+    # (photosynthesis.jl:2366) — the second half of the same regression. Modelled on
+    # its sibling `vcmaxcint` (patch-indexed, same container) rather than on
+    # slatop_pft, which is PFT-indexed. An empty vcmaxcint_sun is never indexed (the
+    # host path runs fine with the default), so the substitute is never read either;
+    # it exists purely so the kernel argument is bitstype on a device.
+    vcmaxcint_sun = isempty(vcmaxcint_sun) ? zero(vcmaxcint) : vcmaxcint_sun
     dv = _psn_dv(ps)
     if _PSN_CI_AD_HOSTLOOP[]
         @inbounds for p in 1:length(bounds_patch)
@@ -1716,8 +1755,10 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
         end
     else
         be = _kernel_backend(t_veg)
-        _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
-            leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor,
+        pft_b = _PsnP2Pft(; slatop_pft = slatop_pft, leafcn_pft = leafcn_pft,
+                            flnr_pft = flnr_pft, fnitr_pft = fnitr_pft,
+                            lmr_intercept_atkin = lmr_intercept_atkin, crop_pft = crop_pft)
+        _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, pft_b, dayl_factor,
             t10, t_veg, btran, tlai_z,
             par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, T(overrides.vcmax25_scale),
             T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, use_luna, ps.light_inhibit,
