@@ -222,33 +222,33 @@ using Test, CLM
                 @test all(z -> z < -0.465, rep.zetas)
                 @test all(==(1), rep.regimes)
 
-                # Surface fluxes: this is the CHARACTERISED residual, not a pass
-                # target — and its CAUSE changed when finding D was fixed, so the
-                # assertion is split rather than merely re-thresholded.
+                # Surface fluxes: the CHARACTERISED residual, split by window
+                # because the cause differs between them (not a re-thresholded
+                # pass target).
                 #
-                # Was: the port's lake surface never dropped below freezing
-                # (TG 273-276 K vs 267-269 K), so it sat on the UNFROZEN roughness
-                # branch for the WHOLE run and rah was ~305 s/m against ~145 —
-                # a uniform ~20% flux bias at every step.
+                # History: (D, ks fix) the port's lake used to never freeze, sitting
+                # on the unfrozen roughness branch all run (~20% flux bias). Then it
+                # froze at step 6 but late — because the cold start SEEDED savedtke1
+                # high, welding the surface to the 277 K deep water for ~5 steps.
                 #
-                # Now (see test_lake_eddy_ks.jl): the lake freezes at step 6 and
-                # from step 7 on it is on z0frzlake with rah within 0.5% of the
-                # reference, so the flux residual there collapses to a few
-                # percent. What remains is confined to the freeze-ONSET window,
-                # steps 1-6: the port cold-starts from a uniform 277 K lake
-                # (TemperatureType.F90:833-836) while the reference's first h0
-                # record already shows a partly-cooled 274.81 K top layer, so the
-                # port reaches freezing ~6 steps late and the two models are in
-                # different surface phases across that window. Both bounds below
-                # are the MEASURED residual in their own window.
+                # Now (cold_start.jl restores the faithful molecular TKWAT, matching
+                # LakeStateType.F90:248): the surface cools freely and freezes at
+                # step ~2, so from step 3 on the flux residual COLLAPSES to a few
+                # percent (FSH ~0.05, EFLX_LH ~0.11) — a 4-6x improvement over the
+                # seeded 0.2-0.3. What remains is an isolated STEP-1/2 over-cool
+                # (t_grnd 265 vs the reference's 269.5): the seed had been masking it
+                # by smearing it across steps 4-6. That first-step transient is the
+                # freeze-onset residual STILL OPEN (docs/LAKE_FLUX_RESIDUAL.md) — a
+                # separate first-step flux/alignment defect, deliberately NOT hidden
+                # by re-seeding. All four bounds are the MEASURED residual per window.
                 jh = rep.jv["FSH"]; fh = rep.fv["FSH"]
                 rh = abs.(jh .- fh) ./ (1 .+ abs.(fh))
-                @test maximum(rh[7:end]) < 0.10      # measured max 0.035
-                @test maximum(rh[1:6])   < 0.35      # measured max 0.32, freeze onset
+                @test maximum(rh[3:end]) < 0.08      # measured max 0.049, post-freeze bulk
+                @test maximum(rh[1:2])   < 0.70      # measured max 0.642, step-1 over-cool (open)
                 jl = rep.jv["EFLX_LH"]; fl = rep.fv["EFLX_LH"]
                 rl = abs.(jl .- fl) ./ (1 .+ abs.(fl))
-                @test maximum(rl[7:end]) < 0.16      # measured max 0.11
-                @test maximum(rl[1:6])   < 0.30      # measured max 0.24, freeze onset
+                @test maximum(rl[3:end]) < 0.15      # measured max 0.113, post-freeze bulk
+                @test maximum(rl[1:2])   < 0.72      # measured max 0.681, step-1 over-cool (open)
             end
         end
     end
