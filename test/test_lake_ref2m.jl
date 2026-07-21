@@ -231,24 +231,31 @@ using Test, CLM
                 # froze at step 6 but late — because the cold start SEEDED savedtke1
                 # high, welding the surface to the 277 K deep water for ~5 steps.
                 #
-                # Now (cold_start.jl restores the faithful molecular TKWAT, matching
-                # LakeStateType.F90:248): the surface cools freely and freezes at
-                # step ~2, so from step 3 on the flux residual COLLAPSES to a few
-                # percent (FSH ~0.05, EFLX_LH ~0.11) — a 4-6x improvement over the
-                # seeded 0.2-0.3. What remains is an isolated STEP-1/2 over-cool
-                # (t_grnd 265 vs the reference's 269.5): the seed had been masking it
-                # by smearing it across steps 4-6. That first-step transient is the
-                # freeze-onset residual STILL OPEN (docs/LAKE_FLUX_RESIDUAL.md) — a
-                # separate first-step flux/alignment defect, deliberately NOT hidden
-                # by re-seeding. All four bounds are the MEASURED residual per window.
+                # Now (two fixes): (1) cold_start.jl restores the faithful molecular
+                # TKWAT so the surface cools freely; (2) lake_fluxes.jl re-evaluates
+                # the frozen/unfrozen SURFACE BRANCH each stability iteration against
+                # the CURRENT t_grnd (LakeFluxesMod.F90:470/558), not the fixed input.
+                # A lake that starts a step at 277 K but whose skin drops below tfrz
+                # mid-iteration now switches tksur savedtke1→tkice and z0mg Charnock→
+                # z0frzlake, exactly as Fortran. Step-1 t_grnd goes 265→270.8 K
+                # (Fortran's physically-aligned nstep=0 is 270.96), rah 358→143, and
+                # the port is frozen from step 1 like the reference.
+                #
+                # From step 3 on the flux residual is a few percent (FSH ~0.03,
+                # EFLX_LH ~0.11). The residual that REMAINS at steps 1-2 is now
+                # substantially a HARNESS ALIGNMENT offset, not a physics error: the
+                # port's step 1 physically equals Fortran nstep=0 (h0 record 1), but
+                # LAKE_REC_SHIFT=1 compares it to record 2 (nstep=1). See
+                # docs/LAKE_FLUX_RESIDUAL.md. All four bounds are the MEASURED
+                # residual per window (nsteps=24).
                 jh = rep.jv["FSH"]; fh = rep.fv["FSH"]
                 rh = abs.(jh .- fh) ./ (1 .+ abs.(fh))
-                @test maximum(rh[3:end]) < 0.08      # measured max 0.049, post-freeze bulk
-                @test maximum(rh[1:2])   < 0.70      # measured max 0.642, step-1 over-cool (open)
+                @test maximum(rh[3:end]) < 0.06      # measured max 0.033, post-freeze bulk
+                @test maximum(rh[1:2])   < 0.50      # measured max 0.460, step-1 (alignment)
                 jl = rep.jv["EFLX_LH"]; fl = rep.fv["EFLX_LH"]
                 rl = abs.(jl .- fl) ./ (1 .+ abs.(fl))
-                @test maximum(rl[3:end]) < 0.15      # measured max 0.113, post-freeze bulk
-                @test maximum(rl[1:2])   < 0.72      # measured max 0.681, step-1 over-cool (open)
+                @test maximum(rl[3:end]) < 0.15      # measured max 0.112, post-freeze bulk
+                @test maximum(rl[1:2])   < 0.35      # measured max 0.305, step-1 (alignment)
             end
         end
     end

@@ -586,6 +586,21 @@ none of which is the Monin-Obukhov *iteration* that three previous fixes chased:
   first-step flux/alignment detail — the record-1 semantics are suspect (ref record 1
   has `TG = 270.96 ≠ 277`, so it is not a raw nstep=0 dump) — and must NOT be papered
   over by re-seeding.
+- **E-followup — step-1 over-cool CLOSED (frozen-branch fix).** Fortran instrumentation
+  (`LKPROBE`/`LKIN` prints of the internal `tksur`/`z0`/`rah`/`tgbef`, none on the h0
+  tape) showed the port and reference disagree on the frozen/unfrozen SURFACE branch at
+  step 1. Fortran re-evaluates the `tksur` (LakeFluxesMod.F90:470) and `z0` (F90:558)
+  branch every stability iteration against the updating `t_grnd`, so a lake whose skin
+  drops below `tfrz` mid-iteration switches `savedtke1→tkice` and Charnock `z0→z0frzlake`.
+  The port evaluated `tksur` once (pre-loop) and gated the in-loop `z0` on the fixed
+  input `tgbef`, staying unfrozen the whole step (`tksur` 0.57, `z0mg` 3.9e-5, `rah` 358)
+  and over-cooling the skin (t_grnd 265 vs Fortran's 271). Recomputing both branches
+  per-iteration from `t_grnd_new` (`lake_fluxes.jl`) takes step-1 `t_grnd` 265→270.8 K
+  (Fortran nstep=0 = 270.96), `rah` 358→143, FSH step-1 0.64→0.46, EFLX 0.68→0.31, run
+  max 0.68→0.46; steps 3+ unchanged, byte-identical for steps 2+. What remains at steps
+  1-2 is now largely the `LAKE_REC_SHIFT=1` ALIGNMENT (port step 1 physically equals
+  Fortran nstep=0 = h0 record 1, but the harness compares it to record 2), a separate
+  harness concern — not a physics error.
 
 B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only
 over `mask_lakep`; nothing wrote `t_ref2m_patch` on a lake patch before), so
