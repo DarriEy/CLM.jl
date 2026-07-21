@@ -109,11 +109,12 @@ using Test, CLM
                 @test minimum(tgJ) < CLM.TFRZ
 
                 # --- and once frozen it tracks the reference in KELVIN ---
-                # Steps 7-16 are the frozen window (the port cold-starts from a
-                # uniform 277 K lake while the reference's first record already
-                # shows a partly-cooled 274.81 K top layer, so the port takes ~6
-                # steps to catch up; that lag is the remaining residual and is
-                # NOT tuned away here).
+                # Steps 7-16 are deep in the frozen window. With the faithful
+                # molecular-TKWAT cold start (cold_start.jl; the seeded savedtke1
+                # that used to weld the surface warm for ~5 steps is gone) the lake
+                # now freezes at step ~2 instead of 6, so 7-16 track the reference
+                # to ~0.04 K. The residual that remains is an isolated STEP-1
+                # over-cool, asserted separately in test_lake_ref2m.jl.
                 @test maximum(abs.(tgJ[7:16] .- tgF[7:16])) < 0.15
 
                 # --- the frozen ROUGHNESS branch is the one being taken --
@@ -121,7 +122,11 @@ using Test, CLM
                 # z0mg ~3.2e-5 the port was stuck on. Assert the value, not
                 # "changed": these differ by 31x.
                 @test all(z -> isapprox(z, CLM.z0frzlake; rtol=1e-12), rep.z0mgs[7:16])
-                @test all(z -> z < 1e-4, rep.z0mgs[1:5])   # unfrozen early steps
+                # Only step 1 is now unfrozen (z0mg ~3.9e-5): with the faithful TKWAT
+                # cold start the surface freezes at step 2, so z0mg is on z0frzlake
+                # from step 2 on. (Was steps 1-5 unfrozen when the seed delayed the
+                # freeze to step 6.)
+                @test rep.z0mgs[1] < 1e-4                   # step 1: still unfrozen
 
                 # --- which puts rah onto the reference -------------------
                 # rah is inverted from each model's OWN flux definition

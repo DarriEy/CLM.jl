@@ -568,11 +568,24 @@ none of which is the Monin-Obukhov *iteration* that three previous fixes chased:
   3.80e-01 -> 8.50e-02, run max|rel| 4.97e-01 -> 3.31e-01. FSH's maximum moves
   into (and grows in) the freeze-onset window while improving 20-30x elsewhere;
   see STEP 4.
-- **E (open, NEW):** the port and the reference are not aligned at step 1. The
-  port cold-starts at a uniform 277 K lake (CTSM's own cold start) while the
-  reference's first h0 record already shows `TLAKE(1) = 274.81`, one hour of
-  cooling ahead. The port reaches freezing ~6 steps late as a result, and that
-  lag is now the largest single contributor to the remaining metric.
+- **E (freeze-onset lag): ROOT-CAUSED + mostly FIXED.** The port froze ~5 steps
+  late not because of a cold-start IC mismatch — Fortran and the port BOTH cold-start
+  the lake at a uniform 277 K (`TemperatureType.F90:826,836`; the reference is a true
+  `finidat=''` cold start) — but because `cold_start.jl` SEEDED `savedtke1` to a high
+  "physical" value (`kme1·cwat` ≈ 31 for a deep lake) instead of the faithful molecular
+  `TKWAT` (0.57, `LakeStateType.F90:248`). Since `tksur = savedtke1` in the unfrozen
+  surface solve, the high seed welded the 0.1 m top layer to the 277 K deep water, so
+  the surface could not cool to freezing for ~5 steps. The seed had been tuned to stop
+  the first step "over-cooling t_grnd to 265 vs Fortran ~271" — but that 271 was the
+  **off-by-one reference value defect A later corrected to 269.5**, i.e. it was tuned
+  against the record-index bug. Restoring the faithful `TKWAT` makes the lake freeze at
+  step ~2, and the flux residual from step 3 on collapses: **FSH 0.2-0.3 → ~0.05,
+  EFLX_LH → ~0.11, `t_grnd` tracks the reference to ~0.03 K from step 2.** A separate,
+  smaller **step-1 over-cool remains open** (t_grnd 265 vs 269.5 → a one-step FSH/EFLX
+  spike ~0.65; the seed was masking it by smearing it across steps 4-6). That is a
+  first-step flux/alignment detail — the record-1 semantics are suspect (ref record 1
+  has `TG = 270.96 ≠ 277`, so it is not a raw nstep=0 dump) — and must NOT be papered
+  over by re-seeding.
 
 B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only
 over `mask_lakep`; nothing wrote `t_ref2m_patch` on a lake patch before), so
