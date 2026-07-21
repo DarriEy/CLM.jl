@@ -485,6 +485,13 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     for g in 1:ng
         a2l.forc_pco2_grc[g] = 367.0e-6 * a2l.forc_pbot_not_downscaled_grc[g]
         a2l.forc_po2_grc[g]  = 0.209    * a2l.forc_pbot_not_downscaled_grc[g]
+        # C13O2 partial pressure. CTSM lnd_import_export.F90:687 forms it as
+        #   forc_pc13o2 = co2_ppmv * c13ratio * 1e-6 * pbot = C13RATIO * forc_pco2
+        # (preindustrial atmosphere, del13C = -6 permil). Only read under use_c13
+        # (c13_c14_photosynthesis!, CanopyFluxes c13o2); harmless (unread) otherwise.
+        # Without it, forc_pc13o2_grc stays 0 → rc13_canair collapses to 0 → zero
+        # C13 discrimination in photosynthesis (fresh photosynthate carries no C13).
+        a2l.forc_pc13o2_grc[g] = C13RATIO * a2l.forc_pco2_grc[g]
     end
 
     return nothing

@@ -1433,7 +1433,13 @@ function clm_drv_core!(config::CLMDriverConfig,
                    fill(0.35, MXPFT + 1), fill(0.003, MXPFT + 1), fill(0.25, MXPFT + 1),
                    fill(2.0, MXPFT + 1), fill(8.0, MXPFT + 1),
                    config.use_cn,
-                   config.use_lch4, false, config.use_hydrstress, phs_froot_c,
+                   # use_c13 IS threaded (was hard-coded false): CTSM computes C13
+                   # fractionation (alphapsn) INSIDE CanopyFluxes, right after the
+                   # Photosynthesis solve (Fractionation, gated use_cn.and.use_c13).
+                   # With false here canopy_fluxes_core! never called fractionation! →
+                   # daytime alphapsn stayed 0 → rc13_psnsun ~ 0 → zero fresh C13
+                   # discrimination. Default (use_c13=false) is byte-identical.
+                   config.use_lch4, config.use_c13, config.use_hydrstress, phs_froot_c,
                    config.use_fates, config.use_luna,
                    # Re-state the four default-only positionals between use_luna and
                    # the FATES handle. z0param_method / forc_pc13o2_grc / leaf_mr_vcm keep

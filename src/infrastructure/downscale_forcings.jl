@@ -88,7 +88,7 @@ end
 # Step 2b: rescale CO2/O2 partial pressures from the not-downscaled surface
 # pbot to the elevation-corrected column pbot (see note below). gridcell write
 # from a column → assumes 1:1 col↔grc (parity domains are single-column).
-@kernel function _downscale_pco2_kernel!(pco2_grc, po2_grc, @Const(col_gridcell),
+@kernel function _downscale_pco2_kernel!(pco2_grc, po2_grc, pc13o2_grc, @Const(col_gridcell),
         @Const(pbot_nd), @Const(pbot_ds), lo::Int)
     i = @index(Global)
     @inbounds begin
@@ -100,6 +100,10 @@ end
         if pbot_nd_g > zero(T) && pbot_ds_c > zero(T)
             pco2_grc[g] = (pco2_grc[g] / pbot_nd_g) * pbot_ds_c
             po2_grc[g]  = (po2_grc[g]  / pbot_nd_g) * pbot_ds_c
+            # forc_pc13o2 is C13RATIO*forc_pco2 (the reader seeds it): rescale it by
+            # the same pbot ratio so rc13_canair = pc13o2/(pco2-pc13o2) stays exactly
+            # C13RATIO/(1-C13RATIO) at the elevation-corrected column pbot.
+            pc13o2_grc[g] = (pc13o2_grc[g] / pbot_nd_g) * pbot_ds_c
         end
     end
 end
@@ -227,7 +231,7 @@ function downscale_forcings!(bounds::BoundsType,
     # (Krycklan deep-soil drying → water table too deep → QDRAI -10%). forc_pco2
     # is a gridcell field; parity domains are single-column so col→grc is 1:1.
     _launch!(_downscale_pco2_kernel!, a2l.forc_pco2_grc, a2l.forc_po2_grc,
-        col.gridcell, a2l.forc_pbot_not_downscaled_grc,
+        a2l.forc_pc13o2_grc, col.gridcell, a2l.forc_pbot_not_downscaled_grc,
         a2l.forc_pbot_downscaled_col, lo; ndrange = n)
 
     # --- Step 3: Partition precipitation ---

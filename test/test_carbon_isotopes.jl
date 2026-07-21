@@ -224,4 +224,34 @@
         @test ps.c14_psnsun_patch[3] ≈ 10.0 * 0.8 atol=1e-10  # SH
     end
 
+    # -----------------------------------------------------------------------
+    # Atmospheric C13 ratio wiring (regression for the Fortran-parity finding).
+    #
+    # The c13_c14_photosynthesis! tests above PASS forc_pc13o2 explicitly (4.4e-6),
+    # so they never caught that the driver/forcing-reader NEVER populated
+    # forc_pc13o2_grc (it stayed at its 0.0 init) → rc13_canair collapsed to 0 →
+    # zero C13 discrimination. Assert the WIRING: the CTSM constant and that the
+    # forcing-reader formula forc_pc13o2 = C13RATIO*forc_pco2 reproduces the
+    # preindustrial atmosphere (del13C = -6 permil → rc13_canair = 0.0111718).
+    # -----------------------------------------------------------------------
+    @testset "atmospheric C13 ratio (forc_pc13o2 wiring)" begin
+        # CTSM clm_varcon: preind_atm_ratio = PDB*(1 - 6/1000); c13ratio = that/(1+that)
+        pdb = CLM.C13_PDB_RATIO
+        @test CLM.PREIND_ATM_DEL13C == -6.0
+        @test CLM.PREIND_ATM_RATIO ≈ pdb * (1.0 - 6.0/1000.0) atol=1e-12
+        @test CLM.C13RATIO ≈ CLM.PREIND_ATM_RATIO / (1.0 + CLM.PREIND_ATM_RATIO) atol=1e-15
+
+        # forc_pc13o2 = C13RATIO * forc_pco2 (lnd_import_export.F90:687) ⇒
+        # rc13_canair = pc13o2/(pco2-pc13o2) = C13RATIO/(1-C13RATIO) = 0.0111718,
+        # i.e. the atmosphere at del13C = -6 permil — INDEPENDENT of the pco2 value
+        # (so it survives the pbot downscaling, which rescales both equally).
+        rc13_expect = CLM.C13RATIO / (1.0 - CLM.C13RATIO)
+        @test rc13_expect ≈ CLM.PREIND_ATM_RATIO atol=1e-14
+        @test CLM.ratio_to_delta13C(CLM.C13RATIO) ≈ -6.0 atol=1e-8
+        for pco2 in (2.9e-3, 4.0e-3, 29.0)   # varied surface pbot → varied pco2
+            pc13o2 = CLM.C13RATIO * pco2
+            @test pc13o2 / (pco2 - pc13o2) ≈ rc13_expect atol=1e-14
+        end
+    end
+
 end
