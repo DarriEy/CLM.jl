@@ -128,9 +128,12 @@ mutable struct CNVegetationData{FT<:Real}
 
     # Wood/crop product pools (Fortran c_products_inst / n_products_inst). The
     # balance check needs them as a C/N sink; they are also the destination of
-    # harvest/gross-unrepresented-disturbance fluxes.
-    c_products_inst::CNProductsData
-    n_products_inst::CNProductsData
+    # harvest/gross-unrepresented-disturbance fluxes. Held as the FULL product type
+    # (CNProductsFullData) so cn_products_update! can advance prod10/prod100/cropprod1
+    # (their sum + losses is what the balance check reads via the AbstractCNProducts
+    # supertype).
+    c_products_inst::CNProductsFullData
+    n_products_inst::CNProductsFullData
 end
 
 # Keyword constructor (field-name keyword API replacing @kwdef's). State children
@@ -148,8 +151,8 @@ function CNVegetationData{FT}(;
         cnveg_nitrogenstate_inst::CNVegNitrogenStateData = CNVegNitrogenStateData{FT}(),
         cnveg_nitrogenflux_inst::CNVegNitrogenFluxData   = CNVegNitrogenFluxData{FT}(),
         cn_balance_inst::CNBalanceData                   = CNBalanceData{FT, Vector{FT}}(),
-        c_products_inst::CNProductsData                  = CNProductsData{FT}(),
-        n_products_inst::CNProductsData                  = CNProductsData{FT}()) where {FT<:Real}
+        c_products_inst::CNProductsFullData              = CNProductsFullData{FT}(),
+        n_products_inst::CNProductsFullData              = CNProductsFullData{FT}()) where {FT<:Real}
     CNVegetationData{FT}(config, driver_config, cnveg_state_inst,
         cnveg_carbonstate_inst, c13_cnveg_carbonstate_inst, c14_cnveg_carbonstate_inst,
         cnveg_carbonflux_inst, c13_cnveg_carbonflux_inst, c14_cnveg_carbonflux_inst,
@@ -276,8 +279,8 @@ function cn_vegetation_init!(veg::CNVegetationData, np::Int, nc::Int, ng::Int;
         # C/N mass-balance check state + the wood/crop product pools it needs as a
         # C/N sink. Fortran allocates all three in CNVegetationFacade::Init.
         cn_balance_init!(veg.cn_balance_inst, nc, ng)
-        cn_products_init!(veg.c_products_inst, ng)
-        cn_products_init!(veg.n_products_inst, ng)
+        cn_products_full_init!(veg.c_products_inst, ng, np)
+        cn_products_full_init!(veg.n_products_inst, ng, np)
     end
 
     # Synchronize driver config with facade config
@@ -578,6 +581,10 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         soilpsi::Union{Matrix{<:Real}, Nothing} = nothing,
         col::Union{ColumnData, Nothing} = nothing,
         grc::Union{GridcellData, Nothing} = nothing,
+        # Landunit metadata — threaded to cn_driver_no_leaching! for the CNWoodProducts
+        # p2g patch→gridcell aggregation. Optional; the product step is skipped when
+        # unset (byte-identical to the historical unwired path).
+        lun::Union{LandunitData, Nothing} = nothing,
         active_layer::Union{ActiveLayerData, Nothing} = nothing,
         dzsoi_decomp::Union{Vector{<:Real}, Nothing} = nothing,
         zsoi_vals::Union{Vector{<:Real}, Nothing} = nothing,
@@ -715,6 +722,12 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         zisoi_vals=zisoi_vals,
         patch=patch,
         pftcon_main=pftcon_main,
+        # CNWoodProducts wiring: the product pools + landunit metadata. When present
+        # the driver advances tot_woodprod_grc / cropprod1_grc from the harvest +
+        # land-conversion product-gain fluxes (the sink the balance check subtracts).
+        lun=lun,
+        c_products=veg.c_products_inst,
+        n_products=veg.n_products_inst,
         crop=crop,
         photosyns=photosyns,
         canopystate=canopystate,
