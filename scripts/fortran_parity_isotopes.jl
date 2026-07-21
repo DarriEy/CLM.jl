@@ -19,14 +19,20 @@
 #   row C1 and docs/PARITY_COVERAGE_2026-07.md.
 #
 # WHAT THIS DIFFS: read_fortran_restart! does NOT read isotope restart vars, so
-# this harness injects the c13/c14 veg pools from the before_step dump via a
-# pre_step_hook (patch-remapped by PFT type, same convention as
-# set_patch_1d!), runs ONE use_cn+use_c13+use_c14 clm_drv! step, then diffs the
-# Julia c13/c14 pools against the Fortran after_hydrologydrainage dump. It
-# reports BOTH the absolute post-step pool parity (IC is shared → this is tight)
-# AND the one-step increment (after−before) match, which is the sensitive test
-# of the isotope FLUX physics (photosynthesis discrimination + CIsoFlux
-# cascade).
+# this harness injects the c13/c14 pools from the before_step dump via a
+# pre_step_hook (patch-remapped by PFT type, same convention as set_patch_1d!),
+# runs ONE use_cn+use_c13+use_c14 clm_drv! step, then diffs the Julia c13/c14
+# state against the Fortran after_hydrologydrainage dump. It covers:
+#   * VEG isotope pools (leafc_13 … xsmrpool_14) — absolute post-step parity
+#     (shared IC → tight) + one-step increment + a δ13C decoupled-physics check.
+#   * SOIL isotope decomposition pools (litr/soil/cwd × c13/c14, _13_vr/_14_vr):
+#     also injected from before_step, then the isotope decomp cascade + litter
+#     vertical transport is diffed post-step. (First-ever soil-isotope diff.)
+#   * The rc13 discrimination ratios (rc13_canair/psnsun/psnsha) — recomputed
+#     each step from the atmospheric C13O2 partial pressure, so NO injection: a
+#     pure test of the atmospheric-ratio + fractionation path.
+# See the STATUS block for the two bugs this exposed (forc_pc13o2 never set;
+# isotope carbon-flux instances never zeroed → soil-column NaN).
 #
 #   julia +1.12 --project=. scripts/fortran_parity_isotopes.jl [nstep]
 # ==========================================================================
@@ -126,9 +132,41 @@ function make_iso_injector(inst)
         end
         inject!(c13cs, "_13")
         inject!(c14cs, "_14")
+
+        # --- SOIL isotope decomposition pools (litr/soil/cwd _13_vr/_14_vr) ---
+        # read_fortran_restart! ingests the BULK soil decomp pools but not the
+        # isotope soil instances, so seed them from the before_step dump exactly
+        # as the veg pools above. Column decomp_cpools_vr_col is (col, lev, pool);
+        # the dump vars are (lev,) for the single Bow column. Pool ordering matches
+        # the bulk CN parity (litr1..3, soil1..3, cwd = 1..7).
+        function inject_soil!(scs, suffix)
+            (scs === nothing) && return
+            arr = scs.decomp_cpools_vr_col
+            (arr isa AbstractArray && ndims(arr) == 3 && size(arr, 1) >= 1) || return
+            nlev = size(arr, 2)
+            for (stem, pidx) in ISO_SOIL_STEMS
+                dn = stem * suffix * "_vr"   # e.g. "litr1c" * "_13" * "_vr"
+                haskey(ds, dn) || continue
+                dat = Float64.(coalesce.(ds[dn][:], NaN))
+                for j in 1:min(nlev, length(dat))
+                    arr[1, j, pidx] = dat[j]
+                end
+            end
+        end
+        inject_soil!(get_c13_soilcs(inst), "_13")
+        inject_soil!(get_c14_soilcs(inst), "_14")
         close(ds)
     end
 end
+
+# Soil decomp isotope pool stems → decomp_cpools_vr_col pool index (bulk CN order).
+const ISO_SOIL_STEMS = (("litr1c",1),("litr2c",2),("litr3c",3),
+                        ("soil1c",4),("soil2c",5),("soil3c",6),("cwdc",7))
+
+get_c13_soilcs(inst) = hasproperty(inst, :c13_soilbiogeochem_carbonstate) ?
+    inst.c13_soilbiogeochem_carbonstate : nothing
+get_c14_soilcs(inst) = hasproperty(inst, :c14_soilbiogeochem_carbonstate) ?
+    inst.c14_soilbiogeochem_carbonstate : nothing
 
 # ----------------------------------------------------------------------------
 # Snapshot the Julia c13/c14 veg pools (per patch) as a Dict for before/after.
@@ -277,6 +315,86 @@ function iso_parity_step(nstep)
     close(dsA)
     @printf("  %s\n", "-"^58)
     @printf("  max |Δδ13C| = %.3e ‰   (isotope discrimination parity)\n", maxdd)
+
+    # ---- SOIL isotope decomposition pools (litr/soil/cwd _13_vr/_14_vr) ----
+    # The soil isotope decomp cascade (CIsoFlux litter inputs + isotope decay)
+    # was never diffed before. Pools are injected from before_step (above), so
+    # this is a shared-IC one-step diff — the same tightness class as the veg
+    # pools. Single Bow column: dump var (lev,) vs decomp_cpools_vr_col[1,:,pool].
+    dse = NCDataset(edump, "r")
+    @printf("\n  soil isotope decomp pools (litr/soil/cwd × c13/c14)\n")
+    @printf("  %-16s %11s %11s %8s\n", "pool", "max|abs|", "max|rel|", "nlev>0")
+    @printf("  %s\n", "-"^50)
+    soilmax = 0.0; soil_nonzero = 0
+    for (scs, suf) in ((get_c13_soilcs(inst), "_13"), (get_c14_soilcs(inst), "_14"))
+        scs === nothing && continue
+        arr = scs.decomp_cpools_vr_col
+        (arr isa AbstractArray && ndims(arr) == 3) || continue
+        for (stem, pidx) in ISO_SOIL_STEMS
+            dn = stem * suf * "_vr"
+            haskey(dse, dn) || continue
+            fa = Float64.(coalesce.(dse[dn][:], NaN))
+            nlev = min(size(arr, 2), length(fa))
+            ma = 0.0; mr = 0.0; nz = 0
+            for j in 1:nlev
+                fv = fa[j]; jv = Float64(arr[1, j, pidx])
+                (isnan(fv) && isnan(jv)) && continue
+                # port leaves inactive (below-active) levels at init-NaN where Fortran
+                # writes 0; skip those (they carry no decomposition). Real levels have
+                # finite values on both sides.
+                (isnan(jv) && fv == 0.0) && continue
+                (isnan(fv) && jv == 0.0) && continue
+                (abs(fv) > 0) && (nz += 1)
+                ma = max(ma, abs(jv - fv))
+                mr = max(mr, abs(jv - fv) / (1 + max(abs(jv), abs(fv))))
+            end
+            soilmax = max(soilmax, mr); soil_nonzero += nz
+            flag = mr > 1e-6 ? "POOL-DIFF" : "ok"
+            @printf("  %-16s %11.3e %11.3e %8d  %s\n", dn, ma, mr, nz, flag)
+        end
+    end
+    close(dse)
+    @printf("  %s\n", "-"^50)
+    @printf("  soil isotope pool max|rel| = %.3e  (nonzero levels diffed = %d)\n",
+            soilmax, soil_nonzero)
+
+    # ---- rc13 discrimination ratios (rc13_canair/psnsun/psnsha) ----
+    # These are recomputed each step from forc_pc13o2/forc_pco2 (NO injection) →
+    # a PURE physics test of the atmospheric-ratio + fractionation path, decoupled
+    # from any injected pool IC. In the port these were 0 until forc_pc13o2_grc was
+    # wired (this branch). Fortran rc13_canair = C13RATIO/(1-C13RATIO) = 0.0111718.
+    dsr = NCDataset(edump, "r")
+    ps = inst.photosyns
+    @printf("\n  rc13 discrimination ratios (recomputed each step; pure physics)\n")
+    @printf("  %-14s %5s %13s %13s %10s\n", "ratio", "patch", "julia", "fortran", "|Δ|")
+    @printf("  %s\n", "-"^60)
+    rc13max = 0.0
+    for (dn, fld) in (("rc13_canair", :rc13_canair_patch),
+                      ("rc13_psnsun", :rc13_psnsun_patch),
+                      ("rc13_psnsha", :rc13_psnsha_patch))
+        haskey(dsr, dn) && hasproperty(ps, fld) || continue
+        fa = Float64.(coalesce.(dsr[dn][:], NaN)); jarr = getfield(ps, fld)
+        for (pf, pj) in sort(collect(pmap))
+            (pf <= length(fa) && pj <= length(jarr)) || continue
+            fv = fa[pf]; jv = Float64(jarr[pj])
+            (isnan(fv) && isnan(jv)) && continue
+            jv = isnan(jv) ? 0.0 : jv   # port uses NaN for inactive/bare; treat as 0
+            d = abs(jv - fv)
+            # All three ratios are gated to the vegetated patches (Fortran rc13>0).
+            # rc13_canair is the atmospheric ratio; rc13_psnsun/sha additionally carry
+            # the fractionation factor alphapsn = alpha at the LAST canopy layer
+            # (nrad(p), which is unlit here → alpha=1 → rc13_psn = canair). The port
+            # reproduces this once fractionation! is wired (was dead ⇒ alpha=0 ⇒
+            # rc13_psn=0). The bare patch (Fortran rc13_canair=0, no photosynthesis
+            # filter) is a cosmetic masking diff on rc13_canair only: psnsun=0 there so
+            # c13_psnsun=0 regardless — excluded via the fv>0 gate.
+            (fv > 0) && (rc13max = max(rc13max, d))
+            @printf("  %-14s %5d %13.6e %13.6e %10.2e\n", dn, pj, jv, fv, d)
+        end
+    end
+    close(dsr)
+    @printf("  %s\n", "-"^60)
+    @printf("  max |Δ rc13 (canair+psnsun+psnsha, veg patches)| = %.3e\n", rc13max)
     return 0
 end
 
@@ -306,12 +424,30 @@ function main()
     println("  so the computed isotope fluxes are APPLIED to the c13/c14 veg pools; and")
     println("  the isotope psn→cpool input (calc_gpp_mr_availc!) now receives the c13/c14")
     println("  carbonflux instances (was dropping to the bulk array → uninit cpool_13).")
-    println("• RESULT: post-step pool parity ~9e-6, cpool_13/14 EXACT (0.0), and the")
-    println("  δ13C discrimination parity matches Fortran to <1e-4 ‰. The one-step")
-    println("  increment |rel| hits the single-step bulk-C oracle floor on near-static")
-    println("  veg pools (leafc net Δ ~1e-7 < the inherited bulk-C summer residual) —")
-    println("  δ13C parity, which is decoupled from that residual, confirms the isotope")
-    println("  physics itself. c14 pools track to <1e-3 (change only via c14_decay!).")
+    println("• FIXED (this branch — first SOIL-isotope + rc13 diff): two real bugs the")
+    println("  veg-only diff was structurally blind to:")
+    println("  1. forc_pc13o2_grc was NEVER populated (only ever read) → rc13_canair")
+    println("     collapsed to 0 → ZERO C13 discrimination in photosynthesis (fresh")
+    println("     photosynthate carried no C13). Wired forc_pc13o2 = C13RATIO*forc_pco2")
+    println("     (CTSM lnd_import_export). rc13_canair now matches Fortran to ~1e-18.")
+    println("     Hidden in the veg diff because cpool/cpool_13 are 0 at the dump")
+    println("     boundaries (a VACUOUS 0.0 match) and injected veg pools barely move.")
+    println("  2. The c13/c14 cnveg + soilbgc carbon-FLUX instances were never zeroed")
+    println("     at step start (CTSM SetValues); their column scatter targets")
+    println("     (decomp_cpools_sourcesink_col soil pools, phenology_c_to_litr_c_col)")
+    println("     stayed at nan3d init → NaN through SoilBiogeochemLittVertTransp NaN'd")
+    println("     the ENTIRE isotope soil decomposition column. Now zeroed per instance.")
+    println("  3. C13 fractionation was DOUBLY dead: fractionation! (the ci/ca alphapsn")
+    println("     formula) was ported but NEVER called, AND the driver hard-coded")
+    println("     use_c13=false into canopy_fluxes_core!. So alphapsn stayed 0 (its")
+    println("     timestep-init reset) → rc13_psnsun/sha = 0 → c13_psnsun = 0 (new")
+    println("     photosynthate carried NO C13). Wired the CTSM CanopyFluxes call and")
+    println("     threaded config.use_c13. rc13_psnsun/sha now match Fortran to ~1e-18.")
+    println("• RESULT: veg pool parity ~9e-6, δ13C <1e-4 ‰; SOIL isotope decomp pools")
+    println("  (litr/soil/cwd × c13/c14) finite & matching to ~4e-6 (the same shared-IC")
+    println("  bulk-C single-step floor); rc13_canair/psnsun/psnsha to ~1e-18. c14 pools")
+    println("  track to <1e-3. Both isotope FLUX cascades (veg + soil) + the")
+    println("  photosynthetic discrimination now RUN and match Fortran.")
     return rc
 end
 

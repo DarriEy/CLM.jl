@@ -337,11 +337,30 @@ function cn_driver_no_leaching!(
     # In Fortran: soilbiogeochem_carbonflux_inst%SetValues(...)
     _zero_soilbgc_cflux!(soilbgc_cf; mask=mask_bgc_soilc, bounds=bounds_col)
 
+    # CTSM calls SetValues on the c13/c14 carbon-flux instances too (CNDriverMod,
+    # both the cnveg AND soilbiogeochem carbon fluxes). Without this, the isotope
+    # fluxes' column scatter targets are never reset from the nan3d init:
+    #   * soilbgc decomp_cpools_sourcesink_col soil pools (4..6) are read-accumulated
+    #     in _csu1_col_kernel! but never assigned there;
+    #   * cnveg phenology_c_to_litr_c_col / fire_mortality_c_to_cwdc_col are written
+    #     by c_iso_flux1! via _scatter_add! (NaN + flux = NaN).
+    # Either NaN then flows through SoilBiogeochemLittVertTransp (conc = pool +
+    # sourcesink → the tridiagonal solve couples all layers) and NaNs the whole
+    # isotope soil decomposition column. _iso_active is empty unless
+    # use_c13/use_c14 → default path byte-identical.
+    for _ia in _iso_active
+        _zero_soilbgc_cflux!(_ia[5]; mask=mask_bgc_soilc, bounds=bounds_col)
+    end
+
     if num_bgc_vegp > 0
         _zero_cnveg_cflux!(cnveg_cf; mask=mask_bgc_vegp, bounds=bounds_patch,
                            mask_col=mask_bgc_soilc, bounds_col=bounds_col)
         _zero_cnveg_nflux!(cnveg_nf; mask=mask_bgc_vegp, bounds=bounds_patch,
                            mask_col=mask_bgc_soilc, bounds_col=bounds_col)
+        for _ia in _iso_active
+            _zero_cnveg_cflux!(_ia[3]; mask=mask_bgc_vegp, bounds=bounds_patch,
+                               mask_col=mask_bgc_soilc, bounds_col=bounds_col)
+        end
     end
 
     _zero_soilbgc_nflux!(soilbgc_nf; mask=mask_bgc_soilc, bounds=bounds_col)

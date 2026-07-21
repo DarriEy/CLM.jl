@@ -1936,6 +1936,26 @@ function canopy_fluxes_core!(
                 overrides=overrides)
           end  # use_hydrstress
 
+          # C13 fractionation during photosynthesis. CTSM CanopyFluxesMod calls
+          # Fractionation(phase='sun') then ='sha' right after the Photosynthesis
+          # solve (gated use_cn.and.use_c13). It sets photosyns.alphapsn{sun,sha}_patch
+          # = the ci/ca fractionation factor read by PhotosynthesisTotal's
+          # rc13_psnsun = rc13_canair/alphapsnsun. The port's fractionation! existed
+          # but was NEVER called → daytime alphapsn stayed at its spval reset →
+          # rc13_psnsun collapsed to ~0 → c13_psnsun ~ 0 (zero fresh C13
+          # discrimination in new photosynthate). Gated on use_c13 so the default
+          # and use_c14-only paths are byte-identical.
+          if use_c13
+              fractionation!(photosyns, forc_pbot_patch, forc_pco2_grc,
+                  parsun_z_patch, nrad_patch, c3psn_pft, ivt_vec,
+                  patch_data.column, patch_data.gridcell,
+                  mask_exposedvegp, bounds_patch, "sun"; use_hydrstress=use_hydrstress)
+              fractionation!(photosyns, forc_pbot_patch, forc_pco2_grc,
+                  parsha_z_patch, nrad_patch, c3psn_pft, ivt_vec,
+                  patch_data.column, patch_data.gridcell,
+                  mask_exposedvegp, bounds_patch, "sha"; use_hydrstress=use_hydrstress)
+          end
+
         end
 
         # --- FATES photosynthesis (in-loop, two-way coupling) ---

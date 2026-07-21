@@ -34,7 +34,21 @@ const C14_HALF_LIFE_YEARS = 5730.0
 """PDB standard ratio for C13/C12 (Vienna PDB)."""
 const C13_PDB_RATIO = 0.0112372
 
-"""Standard atmospheric C14/C ratio (pre-bomb, ~1950)."""
+"""Preindustrial atmospheric del13C (per mil). CTSM clm_varcon `preind_atm_del13c`."""
+const PREIND_ATM_DEL13C = -6.0
+
+"""Preindustrial atmospheric 13C/12C ratio. CTSM clm_varcon `preind_atm_ratio`."""
+const PREIND_ATM_RATIO = C13_PDB_RATIO + (PREIND_ATM_DEL13C * C13_PDB_RATIO) / 1000.0
+
+"""
+Preindustrial atmospheric 13C/(12C+13C) mass ratio used to form the C13O2
+partial pressure: `forc_pc13o2 = C13RATIO * forc_pco2`. CTSM clm_varcon
+`c13ratio = preind_atm_ratio/(1+preind_atm_ratio)`. This yields
+`rc13_canair = C13RATIO/(1-C13RATIO) = 0.0111718` (del13C_atm = -6 permil).
+"""
+const C13RATIO = PREIND_ATM_RATIO / (1.0 + PREIND_ATM_RATIO)
+
+"""Standard atmospheric C14/C ratio (pre-bomb, ~1950). CTSM clm_varcon `c14ratio`."""
 const C14_ATM_RATIO_PREBOMB = 1.0e-12
 
 # ---------------------------------------------------------------------------
