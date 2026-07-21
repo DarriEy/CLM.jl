@@ -121,12 +121,15 @@ using Test, CLM
                 # z0frzlake = 1e-3 (LakeCon.F90:50) vs the unfrozen Charnock
                 # z0mg ~3.2e-5 the port was stuck on. Assert the value, not
                 # "changed": these differ by 31x.
-                @test all(z -> isapprox(z, CLM.z0frzlake; rtol=1e-12), rep.z0mgs[7:16])
-                # Only step 1 is now unfrozen (z0mg ~3.9e-5): with the faithful TKWAT
-                # cold start the surface freezes at step 2, so z0mg is on z0frzlake
-                # from step 2 on. (Was steps 1-5 unfrozen when the seed delayed the
-                # freeze to step 6.)
-                @test rep.z0mgs[1] < 1e-4                   # step 1: still unfrozen
+                # z0mg is on z0frzlake from step 1: lake_fluxes.jl now re-evaluates
+                # the frozen/unfrozen roughness branch each iteration against the
+                # CURRENT t_grnd (LakeFluxesMod.F90:558), so a lake whose skin drops
+                # below tfrz DURING step 1 (from the -14C air) picks z0frzlake mid-
+                # iteration — matching Fortran, whose converged nstep=0 z0mg is also
+                # 1e-3. (Previously the port gated on the warm input t_grnd and stayed
+                # on the unfrozen Charnock branch ~3.9e-5 for step 1, leaving rah
+                # ~2.4x too high and over-cooling the skin 265 vs 271 K.)
+                @test all(z -> isapprox(z, CLM.z0frzlake; rtol=1e-12), rep.z0mgs[1:16])
 
                 # --- which puts rah onto the reference -------------------
                 # rah is inverted from each model's OWN flux definition

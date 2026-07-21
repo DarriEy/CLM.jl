@@ -358,6 +358,29 @@ end
         zeta_conv = zero(T)
 
         for iter in 1:niters
+            # Surface-conductivity branch, re-evaluated EACH iteration from the
+            # CURRENT ground temperature (t_grnd_new carries the previous iteration's
+            # solve, = tgbef on iteration 1). Fortran evaluates tksur inside the
+            # stability loop (LakeFluxesMod.F90:470) against the updating t_grnd(c):
+            # a lake that starts a step above freezing (cold-start 277 K) but whose
+            # skin cools below tfrz DURING the step must switch from the eddy
+            # conductivity savedtke1 to tkice mid-iteration. The port had computed
+            # tksur ONCE from the warm input t_grnd, so a freezing-in-step-1 lake kept
+            # molecular savedtke1 (0.57) instead of tkice (2.29) — welding the skin
+            # loosely to the 277 K water and over-cooling t_grnd (265 vs Fortran 271).
+            # From step 2 on the input is already < tfrz so this is unchanged.
+            if t_grnd_new > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl == 0
+                tksur = savedtke1[c]
+                tsur = t_lake[c, 1]
+            elseif snl == 0
+                tksur = T(TKICE)
+                tsur = t_lake[c, 1]
+            else
+                bw = (h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]) / dz[c, jtop]
+                tksur = T(TKAIR) + (T(7.75e-5) * bw + T(1.105e-6) * bw^2) * (T(TKICE) - T(TKAIR))
+                tsur = t_soisno[c, jtop]
+            end
+
             # Aerodynamic resistances
             zldis_u = forc_hgt_u - displa
             zldis_t = forc_hgt_t - displa
@@ -474,8 +497,13 @@ end
             # qsatg + qsatgdT*dT that dqh_new above carries for the thvstar update.
             dqh_c = forc_q[c] - qsat_water(t_grnd_new, forc_pbot[c])
 
-            # Update roughness for unfrozen lakes
-            if tgbef > T(TFRZ)
+            # Update roughness lengths from the CURRENT (just-solved) ground
+            # temperature — Fortran recomputes z0 inside the loop against t_grnd(c)
+            # (LakeFluxesMod.F90:558), NOT the fixed input tgbef. The port gated this
+            # on tgbef, so a lake freezing during step 1 stayed on the unfrozen
+            # Charnock branch (z0mg ~3.9e-5) instead of switching to z0frzlake=1e-3,
+            # leaving rah ~2.4x too high and the skin decoupled from the air.
+            if t_grnd_new > T(TFRZ) && snl == 0
                 # Fetch/depth-limited Charnock parameter (Vickers & Mahrt 1997 form,
                 # LakeFluxesMod). The previous code used the constant CUR0 (CURM=0),
                 # so cur*ustar^2/g was ~6x too small and z0mg collapsed toward the
@@ -491,6 +519,16 @@ end
                 z0mg = max(z0mg, T(1.0e-10))   # HARD: 1e-10 m underflow guard (constant). At k=50 this floor was raised to log(2)/50 = 0.0139 m — 1.4e8x — so a LAKE got the roughness of a forest canopy, wrecking ustar and hence the sensible/latent heat fluxes.
                 z0hg = max(z0hg, T(1.0e-10))
                 z0qg = max(z0qg, T(1.0e-10))
+            else
+                # Frozen surface (LakeFluxesMod.F90:585-596): snow → 0.00085 m, else
+                # z0frzlake, with the ZengWang2007 heat/vapour roughness using the
+                # ITERATION's ustar (not the carried ust_lake of the pre-loop seed).
+                z0mg = snl < 0 ? T(0.00085) : T(z0frzlake)
+                z0hg = z0mg / exp(a_coef * (ustar * z0mg / kva)^a_exp)
+                z0qg = z0hg
+                z0mg = max(z0mg, T(1.0e-10))
+                z0hg = max(max(z0hg, T(1.0e-10)), T(MINZ0LAKE))
+                z0qg = max(max(z0qg, T(1.0e-10)), T(MINZ0LAKE))
             end
         end
 
