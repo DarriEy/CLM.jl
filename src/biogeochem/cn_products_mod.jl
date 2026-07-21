@@ -34,7 +34,7 @@ the three publicly-visible gridcell-level fields.
 
 Ported from `cn_products_type` in `CNProductsMod.F90`.
 """
-Base.@kwdef mutable struct CNProductsFullData{FT<:Real, V<:AbstractVector{FT}}
+Base.@kwdef mutable struct CNProductsFullData{FT<:Real, V<:AbstractVector{FT}} <: AbstractCNProducts
     # ---- Public states (same as CNProductsData) --------------------------
     cropprod1_grc      ::V = Float64[]  # (g/m2) crop product pool, 1-year lifespan
     prod10_grc         ::V = Float64[]  # (g/m2) wood product pool, 10-year lifespan

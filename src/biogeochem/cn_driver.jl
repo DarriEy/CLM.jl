@@ -220,6 +220,20 @@ function cn_driver_no_leaching!(
         # are wired only when these are supplied.
         patch::Union{PatchData, Nothing} = nothing,
         pftcon_main::Union{Any, Nothing} = nothing,
+        # Landunit metadata — only needed by the CNWoodProducts p2g aggregation
+        # (harvest / gross-unrep patch→gridcell). Optional so non-product callers
+        # are unaffected.
+        lun::Union{LandunitData, Nothing} = nothing,
+        # Wood/crop product pools (Fortran c_products_inst / n_products_inst,
+        # CNProductsFullData). When supplied together with `lun`, the CNWoodProducts
+        # step (SetValues → UpdateProducts → ComputeProductSummary → ComputeSummary,
+        # CNDriverMod.F90:851-912) runs, advancing tot_woodprod_grc / cropprod1_grc /
+        # product_loss_grc from the harvest + land-conversion product-gain fluxes.
+        # Omitted (nothing) → the step is skipped, byte-identical to the historical
+        # unwired path. On a non-transient, no-harvest run every product-gain flux is
+        # 0, so the pools never move → still byte-identical.
+        c_products = nothing,
+        n_products = nothing,
         # Transient wood-harvest + gross-unrepresented-landcover mortality (CNHarvest /
         # CNGrossUnrep). Wired only when the corresponding state (annual rates, read by
         # the dyn_subgrid driver) + pft params are supplied and config.do_harvest /
@@ -1301,10 +1315,76 @@ function cn_driver_no_leaching!(
             use_crop=config.use_crop, use_nguardrail=config.use_nguardrail,
             use_matrixcn=config.use_matrixcn)
     end
-    # NOTE: the wood-product pools ARE ported (types/cn_products.jl +
-    # biogeochem/cn_products_mod.jl, initialized as CLMInstances.cn_products), but
-    # cn_products_update! is not CALLED from this driver — it needs the harvest
-    # fluxes threaded in. Ported, not wired.
+    # --------------------------------------------------
+    # CNWoodProducts (Fortran CNDriverMod.F90:851-912)
+    # --------------------------------------------------
+    # Calculate loss fluxes from the wood/crop product pools and update the pool
+    # state variables. Wired only when the product instances + landunit metadata
+    # (for the p2g patch→gridcell aggregation of the harvest/gross-unrep fluxes)
+    # are supplied. When omitted this whole block is skipped → byte-identical to
+    # the historical unwired path. On a non-transient, no-harvest run all the
+    # product-gain patch fluxes are 0, so the pools never move (still byte-identical);
+    # on a transient / harvest run the gains flow into tot_woodprod_grc /
+    # cropprod1_grc, closing the GRIDCELL C/N balance (the product pools are the
+    # sink the balance check subtracts).
+    _products_active = c_products !== nothing && n_products !== nothing &&
+        lun !== nothing && patch !== nothing && col !== nothing && pftcon_main !== nothing
+    if _products_active
+        # Gridcell/patch/column bounds for the product routines (single clump; the
+        # product arrays are gridcell-length).
+        ng_prod = length(c_products.tot_woodprod_grc)
+        bounds_prod = BoundsType(begg = 1, endg = ng_prod,
+                                 begc = first(bounds_col), endc = last(bounds_col),
+                                 begp = first(bounds_patch), endp = last(bounds_patch),
+                                 level = BOUNDS_LEVEL_PROC)
+
+        # SetValues(0): zero the six per-step gain arrays (Fortran SetValues).
+        cn_products_set_values!(c_products, bounds_prod, 0.0)
+        cn_products_set_values!(n_products, bounds_prod, 0.0)
+
+        # UpdateProducts — only when there are active BGC veg patches (Fortran
+        # `if_bgc_vegp2: if(num_bgc_vegp>0)`), so the gru_/hrv_ p2g aggregation has
+        # contributing patches (otherwise the grc gain arrays stay at their zeroed
+        # SetValues state).
+        if num_bgc_vegp > 0
+            filter_bgc_vegp_prod = findall(mask_bgc_vegp)
+            cn_products_update!(c_products, bounds_prod,
+                length(filter_bgc_vegp_prod), filter_bgc_vegp_prod,
+                cnveg_cf.dwt_wood_productc_gain_patch,
+                cnveg_cf.gru_wood_productc_gain_patch,
+                cnveg_cf.wood_harvestc_patch,
+                cnveg_cf.dwt_crop_productc_gain_patch,
+                cnveg_cf.crop_harvestc_to_cropprodc_patch;
+                pprod10 = pftcon_main.pprod10,
+                pprod100 = pftcon_main.pprod100,
+                pprodharv10 = pftcon_main.pprodharv10,
+                patch_gridcell = patch.gridcell,
+                patch_itype = ivt,
+                pch = patch, col = col, lun = lun)
+
+            cn_products_update!(n_products, bounds_prod,
+                length(filter_bgc_vegp_prod), filter_bgc_vegp_prod,
+                cnveg_nf.dwt_wood_productn_gain_patch,
+                cnveg_nf.gru_wood_productn_gain_patch,
+                cnveg_nf.wood_harvestn_patch,
+                cnveg_nf.dwt_crop_productn_gain_patch,
+                cnveg_nf.crop_harvestn_to_cropprodn_patch;
+                pprod10 = pftcon_main.pprod10,
+                pprod100 = pftcon_main.pprod100,
+                pprodharv10 = pftcon_main.pprodharv10,
+                patch_gridcell = patch.gridcell,
+                patch_itype = ivt,
+                pch = patch, col = col, lun = lun)
+        end
+
+        # ComputeProductSummaryVars: decay losses + advance the pool states.
+        cn_products_compute_product_summary!(c_products, bounds_prod, dt)
+        cn_products_compute_product_summary!(n_products, bounds_prod, dt)
+
+        # ComputeSummaryVars: sums across pools (tot_woodprod, product_loss, …).
+        cn_products_compute_summary!(c_products, bounds_prod)
+        cn_products_compute_summary!(n_products, bounds_prod)
+    end
 
     # --------------------------------------------------
     # Fire and Update3
@@ -1819,7 +1899,7 @@ function cn_driver_summarize_fluxes!(
         ndecomp_pools::Int = 0,
         ndecomp_cascade_transitions::Int = 0,
         # Wood/crop product pools (product_closs_grc feeds landuseflux_grc → nbp_grc).
-        c_products::Union{CNProductsData, Nothing} = nothing,
+        c_products::Union{AbstractCNProducts, Nothing} = nothing,
         dt::Real = 0.0,
         nfix_timeconst::Real = 0.0)
 
