@@ -489,6 +489,105 @@
     end
 
     # =====================================================================
+    # Test: cnfun_init! wired across MORE THAN ONE FUN period keeps the
+    # *_storage_xfer_acc accumulators BOUNDED and re-syncs all five fields at
+    # each period boundary. Drives the REAL FUN path: cnfun! accumulates every
+    # step (leafc/leafn_storage_xfer_acc += ...), cnfun_init! resets at the
+    # boundary — exactly the driver's per-step order (CNFUNInit before the FUN
+    # uptake, CNDriverMod.F90:414). Guards the dead-wiring bug: without the
+    # reset the accumulators grow without bound across years.
+    # =====================================================================
+    @testset "cnfun_init! bounds multi-period accumulation (use_fun path)" begin
+        d = make_fun_test_data()
+
+        # Small FUN period so >2 periods is cheap: dt=6h, dayspyr=1 → nstep_fun=4.
+        dt      = 21600.0
+        dayspyr = 1.0
+        nstep_fun = trunc(Int, CLM.SECSPDAY * dayspyr / dt)
+        @test nstep_fun == 4
+
+        # Configure a deciduous patch in onset+offset so cnfun! actually ACCUMULATES
+        # leafc/leafn_storage_xfer_acc (+= dt·flux each step) and sets nonzero
+        # storage_cdemand / storage_ndemand — making every reset assertion below
+        # non-vacuous (fields are strictly nonzero going into the reset).
+        d.pftcon.season_decid[1]                  = 1.0
+        d.cnveg_state.onset_flag_patch[1]         = 1.0
+        d.cnveg_state.offset_flag_patch[1]        = 1.0
+        d.cnveg_cf.leafc_storage_to_xfer_patch[1] = 0.01    # gC/m2/s
+        d.cnveg_nf.leafn_storage_to_xfer_patch[1] = 0.005   # gN/m2/s
+        leafcn  = d.pftcon.leafcn[1]
+        incr_c  = 0.01  * dt   # per-step accumulation into leafc_storage_xfer_acc
+        incr_n  = 0.005 * dt
+
+        run_cnfun!() = CLM.cnfun!(d.mask_soilp, d.mask_soilc, d.bounds_p, d.bounds_c,
+                       d.fun_params, d.pftcon, d.patch, d.waterstate, d.temperature,
+                       d.soilstate, d.cnveg_state, d.cnveg_cs, d.cnveg_cf,
+                       d.cnveg_ns, d.cnveg_nf, d.soilbgc_nf, d.soilbgc_cf,
+                       d.canopystate, d.soilbgc_ns;
+                       dt=dt, nlevdecomp=d.nlevdecomp,
+                       dzsoi_decomp_vals=d.dzsoi_decomp_vals,
+                       use_flexiblecn=false, use_matrixcn=false)
+        run_init!(nstep) = CLM.cnfun_init!(d.mask_soilp, d.bounds_p, d.fun_params,
+                       d.pftcon, d.patch, d.cnveg_state, d.cnveg_cs, d.cnveg_ns;
+                       dt=dt, nstep=nstep, dayspyr=dayspyr)
+
+        nsteps  = 2 * nstep_fun + 1     # span > 2 full FUN periods
+        max_c_acc = 0.0; max_n_acc = 0.0
+        boundaries_seen = 0; midperiod_nonzero = 0
+        for nstep in 1:nsteps
+            is_boundary = (nstep % nstep_fun == 0)
+            # Perturb leafcn_offset just before a boundary so its re-sync to leafcn
+            # is a real (non-vacuous) assertion, not a no-op on an already-equal value.
+            if is_boundary
+                d.cnveg_state.leafcn_offset_patch[1] = 999.0
+            end
+            # Driver order: CNFUNInit (reset) BEFORE the FUN uptake.
+            run_init!(nstep)
+            if is_boundary
+                # Immediately after the period-boundary reset (before the uptake),
+                # all five fields are re-synced.
+                @test d.cnveg_state.leafcn_offset_patch[1] ≈ leafcn
+                @test d.cnveg_cs.storage_cdemand_patch[1]        == 0.0
+                @test d.cnveg_ns.storage_ndemand_patch[1]        == 0.0
+                @test d.cnveg_cs.leafc_storage_xfer_acc_patch[1] == 0.0
+                @test d.cnveg_ns.leafn_storage_xfer_acc_patch[1] == 0.0
+                boundaries_seen += 1
+            end
+            run_cnfun!()
+            c_acc = d.cnveg_cs.leafc_storage_xfer_acc_patch[1]
+            n_acc = d.cnveg_ns.leafn_storage_xfer_acc_patch[1]
+            max_c_acc = max(max_c_acc, c_acc)
+            max_n_acc = max(max_n_acc, n_acc)
+            if !is_boundary
+                # NON-VACUOUS: mid-period the accumulators are strictly positive,
+                # so the boundary reset-to-zero above is a real assertion.
+                @test c_acc > 0.0
+                @test n_acc > 0.0
+                midperiod_nonzero += 1
+            end
+        end
+        @test boundaries_seen == 2        # observed more than one FUN period
+        @test midperiod_nonzero > 0
+
+        # BOUNDED: with the reset wired the accumulators never exceed ONE period's
+        # worth of accumulation (nstep_fun consecutive uptake calls between resets).
+        @test max_c_acc <= nstep_fun * incr_c + 1e-6
+        @test max_n_acc <= nstep_fun * incr_n + 1e-6
+
+        # Control — the pre-fix behaviour: WITHOUT any periodic reset the same
+        # accumulator grows linearly with the total step count and overshoots the
+        # bounded max, drifting unbounded across FUN periods (years).
+        d.cnveg_cs.leafc_storage_xfer_acc_patch[1] = 0.0
+        d.cnveg_ns.leafn_storage_xfer_acc_patch[1] = 0.0
+        for _ in 1:nsteps
+            run_cnfun!()
+        end
+        unbounded_c = d.cnveg_cs.leafc_storage_xfer_acc_patch[1]
+        @test unbounded_c ≈ nsteps * incr_c
+        @test unbounded_c > max_c_acc     # unreset growth exceeds the bounded run
+    end
+
+    # =====================================================================
     # Test: Module-level constants are correct
     # =====================================================================
     @testset "Module constants" begin

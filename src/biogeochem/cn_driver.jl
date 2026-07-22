@@ -311,6 +311,10 @@ function cn_driver_no_leaching!(
         wf2_fire_col::AbstractVector{<:Real} = Float64[],
         # Fire date/step scalars.
         fire_kmo::Int = 1, fire_kda::Int = 1, fire_mcsec::Int = 0, fire_nstep::Int = 1,
+        # Global timestep counter (get_nstep) — used by CNFUNInit's FUN-period reset
+        # gate `mod(nstep, nstep_fun)==0`. Only read on the use_fun path; the default
+        # (use_fun=false) never touches it, so nstep=1 keeps default runs identical.
+        nstep::Int = 1,
         nlevgrnd_fire::Int = 10,
         transient_landcover::Bool = false,
         # Output: fire masks (populated by fire routines)
@@ -718,6 +722,18 @@ function cn_driver_no_leaching!(
            canopystate !== nothing && h2osoi_liq !== nothing
             _pftcon_fun = pftcon_fun_from(pftcon_main)
             _fun_params = FUNParams()
+            # CNFUNInit (CNFUNMod.F90:176-182, called from CNDriverMod.F90:414 BEFORE
+            # the FUN uptake): at each FUN-period boundary `mod(nstep,nstep_fun)==0`
+            # re-sync leafcn_offset←leafcn and zero storage_cdemand, storage_ndemand,
+            # leafn_storage_xfer_acc, leafc_storage_xfer_acc. cnfun! (the uptake) reads
+            # and accumulates those five fields every step and is invoked LATER inside
+            # soil_bgc_competition!, so resetting here matches the Fortran ordering
+            # (init before uptake). Without this the *_xfer_acc accumulators grow
+            # unbounded across years and demands/offset never re-sync. Gated on use_fun
+            # (this whole block) so a default run never runs it.
+            cnfun_init!(mask_bgc_vegp, bounds_patch, _fun_params, _pftcon_fun, patch,
+                        cnveg_state, cnveg_cs, cnveg_ns;
+                        dt=dt, nstep=nstep, dayspyr=dayspyr, npcropmin=npcropmin)
             # Cold-start safety: leafcn_offset is a FUN prognostic (leaf C:N target).
             # When started from a Fortran restart it is injected; on a cold start it
             # is NaN/SPVAL — seed it with the base leaf C:N (Fortran InitCold default)
@@ -837,7 +853,8 @@ function cn_driver_no_leaching!(
     # --------------------------------------------------
     if num_bgc_vegp > 0
         # Phenology phase 1 (if use_fun) — already ported: cn_phenology!(...; phase=1)
-        # CNFUNInit — already ported: cn_fun_init!(...)
+        # CNFUNInit — WIRED above in the use_fun FUN-hook setup block (search
+        # `cnfun_init!`): runs before the cnfun! uptake, per CNDriverMod.F90:414.
         # Allocation — already ported:
         #   calc_gpp_mr_availc!(...), calc_crop_allocation_fractions!(...), calc_allometry!(...)
     end

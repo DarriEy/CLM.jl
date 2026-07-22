@@ -2375,6 +2375,7 @@ function clm_drv_core!(config::CLMDriverConfig,
             wf_fire_col        = _fire_on ? wdb.wf_col : Float64[],
             wf2_fire_col       = _fire_on ? wdb.wf2_col : Float64[],
             fire_kmo = mon, fire_kda = day, fire_mcsec = secs, fire_nstep = nstep,
+            nstep = nstep,   # CNFUNInit FUN-period reset gate (use_fun only)
             nlevgrnd_fire = varpar.nlevgrnd,
             # CTSM: `transient_landcover = run_has_transient_landcover()`, which is
             # do_transient_pfts .OR. do_transient_crops .OR. do_transient_urban —

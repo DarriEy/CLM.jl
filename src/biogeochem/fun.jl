@@ -275,7 +275,10 @@ function cnfun_init!(mask_soilp::AbstractVector{Bool}, bounds::UnitRange{Int},
                      npcropmin::Int=17)
 
     timestep_fun = SECSPDAY * FUN_PERIOD
-    nstep_fun    = round(Int, SECSPDAY * dayspyr / dt)
+    # CNFUNMod.F90:166 — nstep_fun = int(secspday*dayspyr/dt). Fortran int()
+    # truncates toward zero, so use trunc (not round) for bit-fidelity when
+    # dayspyr is a non-integer real calendar (e.g. 365.2425).
+    nstep_fun    = trunc(Int, SECSPDAY * dayspyr / dt)
 
     if nstep_fun > 0 && mod(nstep, nstep_fun) == 0
         for p in bounds

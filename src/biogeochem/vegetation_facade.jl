@@ -651,6 +651,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         wf_fire_col::AbstractVector{<:Real} = Float64[],
         wf2_fire_col::AbstractVector{<:Real} = Float64[],
         fire_kmo::Int = 1, fire_kda::Int = 1, fire_mcsec::Int = 0, fire_nstep::Int = 1,
+        nstep::Int = 1,   # CNFUNInit FUN-period reset gate (use_fun only); pass-through
         nlevgrnd_fire::Int = 10,
         transient_landcover::Bool = false,
         mask_actfirec::AbstractVector{Bool} = falses(length(bounds_col)),
@@ -778,6 +779,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         wf2_fire_col=wf2_fire_col,
         fire_kmo=fire_kmo, fire_kda=fire_kda,
         fire_mcsec=fire_mcsec, fire_nstep=fire_nstep,
+        nstep=nstep,
         nlevgrnd_fire=nlevgrnd_fire,
         transient_landcover=transient_landcover,
         mask_actfirec=mask_actfirec,
