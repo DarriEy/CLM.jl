@@ -869,6 +869,18 @@ function clm_drv_core!(config::CLMDriverConfig,
                                   pch, grc, bc_col, bc_patch,
                                   varpar.nlevsoi, round(Int, dtime))
         end
+
+        # Annual vegetation (12 months of LAI) for dry deposition — WIRED
+        # (gated on n_drydep > 0). Faithful to CTSM's readAnnualVegetation, which
+        # clm_initializeMod.F90:698-699 calls once at init when n_drydep>0 (after
+        # SatellitePhenologyInit). Populates canopystate.annlai_patch from the
+        # monthly-LAI stream (otherwise NaN). The ported depvel kernel derives its
+        # Wesely season from lat/month rather than annlai's min/max-LAI, so this is
+        # the CTSM-faithful producer wiring; no-op unless drydep is active.
+        if config.n_drydep > 0 && inst.surfdata !== nothing
+            read_annual_vegetation!(cs, pch, bc_patch;
+                monthly_lai=inst.surfdata.monthly_lai)
+        end
     end
 
     # ========================================================================
@@ -2419,7 +2431,19 @@ function clm_drv_core!(config::CLMDriverConfig,
                         fv.ram1_patch, fv.rb1_patch, fv.fv_patch,
                         cs.elai_patch,
                         a2l.forc_t_downscaled_col, a2l.forc_solar_downscaled_col,
-                        wdb.frac_sno_col, grc.lat, 1)
+                        wdb.frac_sno_col, grc.lat, mon)
+
+        # Patch -> gridcell average of the deposition velocities for the coupler.
+        # Faithful to CTSM lnd2atmMod.F90:307-311 (the n_drydep>0 p2g into
+        # ddvel_grc); the port's lnd2atm! is still a placeholder, so co-locate the
+        # export with the freshly computed velocity_patch. Result in l2a.ddvel_grc
+        # [cm/s], the field CAM's dry-deposition consumes.
+        _ng_dd = length(grc.lat)
+        if size(l2a.ddvel_grc, 1) != _ng_dd || size(l2a.ddvel_grc, 2) != config.n_drydep
+            l2a.ddvel_grc = fill(zero(eltype(l2a.ddvel_grc)), _ng_dd, config.n_drydep)
+        end
+        drydep_p2g!(inst.drydep, l2a.ddvel_grc, bc_patch, filt.nolakep,
+                    pch.gridcell, pch.wtgcell, _ng_dd)
     end
 
     if config.use_crop && config.use_cropcal_streams && is_beg_curr_year
