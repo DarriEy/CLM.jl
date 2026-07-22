@@ -184,6 +184,14 @@ function clm_initialize!(;
     # Resolve the conditional default (see the keyword's comment): FATES runs default to
     # .false. exactly as CTSM's namelist_defaults does; everything else keeps CLM5's .true.
     varctl.use_bedrock = use_bedrock === nothing ? !use_fates : use_bedrock
+    # CTSM init-consistency guard (HillslopeHydrologyMod.check_aquifer_layer, called
+    # from clm_instInit): hillslope hydrology replaces the unconfined-aquifer lower
+    # boundary with an explicit lateral catena, so use_hillslope and use_aquifer_layer
+    # are mutually exclusive. varctl.use_hillslope is false on every current init path
+    # (no clm_initialize! keyword sets it), so this is a no-op for the default run and
+    # keeps it byte-identical; it fatals early if a future caller enables both. See
+    # docs/HILLSLOPE_WIRING_STATUS.md.
+    check_aquifer_layer!(varctl.use_hillslope, use_aquifer_layer)
     varctl.all_active = all_active
     varctl.soil_layerstruct_predefined = soil_layerstruct
     # FATES manages its own patches (up to sum(fates_maxpatches_by_landuse) per site via

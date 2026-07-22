@@ -268,6 +268,20 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test v.irrigate == false                            # defaults:132 (sim_year_range=constant)
     end
 
+    @testset "check_aquifer_layer! guard is WIRED into clm_initialize! (hillslope)" begin
+        # CTSM (HillslopeHydrologyMod.check_aquifer_layer, from clm_instInit) forbids
+        # use_hillslope + use_aquifer_layer together. The port must call the guard on
+        # the live init path — not merely define it. Source-scan the init module so the
+        # wiring can't be silently dropped. See docs/HILLSLOPE_WIRING_STATUS.md.
+        init_src = read(joinpath(_SRC, "driver", "clm_initialize.jl"), String)
+        @test occursin("check_aquifer_layer!(varctl.use_hillslope, use_aquifer_layer)", init_src)
+
+        # Functional invariant the wiring enforces (guard body itself).
+        @test CLM.check_aquifer_layer!(false, false) === nothing   # default init path
+        @test CLM.check_aquifer_layer!(true, false) === nothing    # hillslope, no aquifer
+        @test_throws ErrorException CLM.check_aquifer_layer!(true, true)
+    end
+
     @testset "varctl — not namelist variables in CTSM (code fallback is authority)" begin
         v = CLM.VarCtl()
         @test v.outnc_large_files == true      # clm_varctl.F90:104
