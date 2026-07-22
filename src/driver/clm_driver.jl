@@ -2495,7 +2495,11 @@ function clm_drv_core!(config::CLMDriverConfig,
             # this they were structurally dead (see cnveg_carbon_flux_summary_col!).
             bounds_grc=bc_grc,
             decomp=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing),
-            dzsoi_decomp_vals=(_decomp_initialized(inst.decomp_cascade) ? dzsoi_decomp[] : nothing))
+            dzsoi_decomp_vals=(_decomp_initialized(inst.decomp_cascade) ? dzsoi_decomp[] : nothing),
+            # MIMICS litr_lig_c_to_n_col inputs (consumed only when decomp_method==2).
+            pftcon_main=pftcon,
+            cn_shared_params=(_decomp_initialized(inst.decomp_cascade) ? inst.cn_shared_params : nothing),
+            cascade_con=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing))
 
         # C14 radioactive decay — WIRED (gated on config.use_c14). Mirrors the
         # Fortran C14Decay call in CNDriver: after the C/N state updates, decay

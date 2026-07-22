@@ -437,6 +437,84 @@ function soil_bgc_carbon_flux_summary!(cf::SoilBiogeochemCarbonFluxData,
 end
 
 """
+    soil_bgc_carbon_flux_lignin_n_ratio!(cf, cwdc_col, cwdn_col, mask_bgc_vegp,
+        bounds_col; col, patch, lf_flig, lflitcn, fr_flig, frootcn,
+        leafc_to_litter_patch, frootc_to_litter_patch, cwd_flig, i_cwdl2)
+
+Compute the litter lignin:N ratio `litr_lig_c_to_n_col` (gC/gN) that the MIMICS
+`fmet` factor consumes. Ports the `decomp_method == mimics_decomp` block of
+`Summary` in SoilBiogeochemCarbonFluxType.F90:961-1016 (non-FATES path; FATES sets
+this field in its own interface).
+
+Per soil column c:
+
+    litr_lig_c_to_n_col[c] =
+        (ligninNratio_leaf_col + ligninNratio_froot_col + ligninNratio_cwd)
+        / max(1e-3, leafc_to_litter_col + frootc_to_litter_col + cwd_ctransfer)
+
+where the *_col terms are area-weighted patch→column (`p2c`, subgridAveMod
+p2c_1d_filter: `sum_p val[p]*wtcol[p]` over active soil patches):
+
+    ligninNratio_leaf_patch[p]  = lf_flig[ivt]*lflitcn[ivt]*leafc_to_litter_patch[p]
+    ligninNratio_froot_patch[p] = fr_flig[ivt]*frootcn[ivt]*frootc_to_litter_patch[p]
+
+and (with `cwd_ctransfer = cf.decomp_cascade_ctransfer_col[c, i_cwdl2]`):
+
+    ligninNratio_cwd = cwdn_col[c] > 0 ? cwd_flig*(cwdc_col[c]/cwdn_col[c])*cwd_ctransfer : 0
+
+MUST be called AFTER `soil_bgc_carbon_flux_summary!` (it reads the vertically
+integrated `decomp_cascade_ctransfer_col`). `mask_bgc_vegp` is the port's
+`filter_soilp` (all active patches on soil/crop landunits — the set over which the
+litterfall fluxes are defined); `ivt` is 1-based (`patch.itype[p] + 1`).
+"""
+function soil_bgc_carbon_flux_lignin_n_ratio!(cf::SoilBiogeochemCarbonFluxData,
+                                              cwdc_col::AbstractVector{<:Real},
+                                              cwdn_col::AbstractVector{<:Real},
+                                              mask_bgc_vegp::AbstractVector{Bool},
+                                              bounds_col::UnitRange{Int};
+                                              col::ColumnData,
+                                              patch::PatchData,
+                                              lf_flig::AbstractVector{<:Real},
+                                              lflitcn::AbstractVector{<:Real},
+                                              fr_flig::AbstractVector{<:Real},
+                                              frootcn::AbstractVector{<:Real},
+                                              leafc_to_litter_patch::AbstractVector{<:Real},
+                                              frootc_to_litter_patch::AbstractVector{<:Real},
+                                              cwd_flig::Real,
+                                              i_cwdl2::Int)
+    has_fates = !isempty(col.is_fates)
+    for c in bounds_col
+        # FATES columns update this field in their own interface (Fortran comment
+        # at SoilBiogeochemCarbonFluxType.F90:1010-1013) — skip them here.
+        (has_fates && col.is_fates[c]) && continue
+
+        # p2c: patch→column area-weighted sums over active soil patches (filter_soilp)
+        ligninNratio_leaf_col  = 0.0
+        ligninNratio_froot_col = 0.0
+        leafc_to_litter_col    = 0.0
+        frootc_to_litter_col   = 0.0
+        for p in col.patchi[c]:col.patchf[c]
+            mask_bgc_vegp[p] || continue
+            ivt = patch.itype[p] + 1          # 0-based Fortran → 1-based Julia
+            wt  = patch.wtcol[p]
+            ligninNratio_leaf_col  += lf_flig[ivt] * lflitcn[ivt] * leafc_to_litter_patch[p] * wt
+            ligninNratio_froot_col += fr_flig[ivt] * frootcn[ivt] * frootc_to_litter_patch[p] * wt
+            leafc_to_litter_col    += leafc_to_litter_patch[p]  * wt
+            frootc_to_litter_col   += frootc_to_litter_patch[p] * wt
+        end
+
+        cwd_ctransfer = cf.decomp_cascade_ctransfer_col[c, i_cwdl2]
+        ligninNratio_cwd = cwdn_col[c] > 0.0 ?
+            cwd_flig * (cwdc_col[c] / cwdn_col[c]) * cwd_ctransfer : 0.0
+
+        cf.litr_lig_c_to_n_col[c] =
+            (ligninNratio_leaf_col + ligninNratio_froot_col + ligninNratio_cwd) /
+            max(1.0e-3, leafc_to_litter_col + frootc_to_litter_col + cwd_ctransfer)
+    end
+    return nothing
+end
+
+"""
     soil_bgc_carbon_flux_init_history!(cf, bounds_col)
 
 Stub for history field registration (no-op in Julia port).
