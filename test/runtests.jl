@@ -193,6 +193,7 @@ using CLM
     include("test_dyn_cons_biogeophys.jl")
     include("test_dyn_cons_biogeochem.jl")
     include("test_dry_dep_velocity.jl")
+    include("test_drydep_wiring.jl")
     include("test_subgrid_build.jl")
     include("test_dyn_init_columns.jl")
     include("test_dyn_column_state_updater.jl")
