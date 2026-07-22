@@ -460,11 +460,13 @@ let cfg = CLM.CLMDriverConfig()
     @printf("  driver VOC gate on default config   = %s  (expect false => inert)\n", gate)
     (cfg.use_voc == false && empty_ok && gate == false) || (NFAIL[] += 1;
         println("  **FAIL** default config should leave VOC inert"))
-    println("  NOTE: no live initializer (instances.jl/clm_initialize.jl) calls")
-    println("        megan_config_from_nl or megan_factors_table_init! — the MEGAN")
-    println("        namelist / megan_factors_file readers exist but are not wired")
-    println("        to a live init entry point. VOC is dispatchable but never")
-    println("        ACTIVATED on the default/real run path (init-plumbing gap).")
+    println("  NOTE: activation is now WIRED (megan_config_init reads the megan")
+    println("        namelist specifier + megan_factors_file; read_efisop_from_surfdata!")
+    println("        reads EF1_* from fsurdat; clm_initialize!(use_voc=true) +")
+    println("        CLMDriverConfig(use_voc=true, megan_specifier=…, megan_factors_file=…)")
+    println("        are the live entry points). The DEFAULT run stays VOC-off / inert")
+    println("        (this assertion), byte-identical. See the end-to-end activated-path")
+    println("        proof in scripts/validate_voc_megan_activation.jl.")
 end
 
 # C2. Ported namelist path => populated descriptors => SAME kernel emits nonzero,
@@ -521,8 +523,10 @@ if NFAIL[] == 0
     println("RESULT: VOC/MEGAN — all VALUE-parity + wiring assertions PASS.")
     println("  Kernel physics = faithful to VOCEmissionMod.F90 (helpers + assembled")
     println("  driver, to <1e-11). Kernel is live-dispatchable & correctly gated in")
-    println("  clm_driver.jl, but ACTIVATION is not wired: no live initializer flips")
-    println("  use_voc or populates config.megan, so VOC is inert on the real run path.")
+    println("  clm_driver.jl, and ACTIVATION is now wired: megan_config_init +")
+    println("  read_efisop_from_surfdata! populate config.megan / efisop from the")
+    println("  megan_factors_file + surfdata when use_voc is set (default stays off /")
+    println("  inert). End-to-end activated-path proof: validate_voc_megan_activation.jl.")
     exit(0)
 else
     println("RESULT: $(NFAIL[]) divergence(s) — see **FAIL** lines above.")

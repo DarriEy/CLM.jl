@@ -144,6 +144,13 @@ function clm_initialize!(;
     cnfire_method::Symbol = :nofire,
     flnfm::String = "",
     fhdm::String = "",
+    # MEGAN biogenic-VOC emissions. Default `false` ⇒ the gridded isoprene EF map
+    # (efisop_grc) is NOT read and stays NaN, exactly as before (byte-identical).
+    # When `true`, VOCEmission::iniTimeConst's read of EF1_BTR/FET/FDT/SHR/GRS/CRP
+    # from `fsurdat` into inst.vocemis.efisop_grc is performed. The MEGAN factors
+    # table + compound descriptors live on CLMDriverConfig.megan (built by the
+    # caller via CLMDriverConfig(use_voc=true, megan_specifier=…, megan_factors_file=…)).
+    use_voc::Bool = false,
     int_snow_max::Real = 2000.0)
 
     # ---- Step 1: Set control flags ----
@@ -363,6 +370,18 @@ function clm_initialize!(;
     # Re-derive them here, after the param read, so a single fresh init is correct.
     if use_cndv && !isempty(pftcon.pftpar20)
         dgv_ecophyscon_init!(inst.dgv_ecophyscon, pftcon)
+    end
+
+    # ---- MEGAN VOC: gridded isoprene emission factors (efisop) ----
+    # CTSM VOCEmission::iniTimeConst opens fsurdat itself and reads
+    # EF1_BTR/FET/FDT/SHR/GRS/CRP into vocemis%efisop_grc(1:6, begg:endg). This is
+    # the ONLY live populator of efisop; without it efisop_grc stays NaN and the
+    # mapped-EF isoprene path reads garbage. No-op unless use_voc (default false ⇒
+    # efisop untouched ⇒ byte-identical). Model gridcell g → flattened surfdata cell
+    # is the identity for single-/lumped-gridcell and row-major full-grid runs.
+    if use_voc && !isempty(inst.vocemis.efisop_grc)
+        ng_voc = size(inst.vocemis.efisop_grc, 2)
+        read_efisop_from_surfdata!(inst.vocemis, fsurdat, collect(1:ng_voc))
     end
 
     # Wire per-instance friction-velocity roughness params from the param file.

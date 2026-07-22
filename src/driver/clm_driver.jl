@@ -209,6 +209,14 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           use_luna::Union{Bool,Nothing}=nothing,
                           use_voc::Bool=false, use_ozone::Bool=false,
                           megan::Union{MEGANConfig,Nothing}=nothing,
+                          # Live MEGAN activation inputs (&megan_emis_nl). When
+                          # `megan` is not supplied but VOC is on and a specifier +
+                          # factors file are given, the config is built through the
+                          # real reader path (megan_config_init). Default (all unset)
+                          # ⇒ empty MEGANConfig ⇒ VOC inert ⇒ byte-identical.
+                          megan_specifier=nothing,
+                          megan_factors_file::AbstractString="",
+                          megan_mapped_emisfctrs::Bool=false,
                           dust::Union{DustEmisConfig,Nothing}=nothing,
                           dyn_subgrid=nothing,
                           decomp_method::Int=1, no_soil_decomp::Int=0,
@@ -231,8 +239,19 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
         mode = SPMode()
     end
     if megan === nothing
-        megan = MEGANConfig()
-        megan_factors_init!(megan.megan_factors, 20)
+        # Live activation path: with VOC on and a namelist specifier + factors file,
+        # read them through the real MEGAN readers (shr_megan_readnl + megan_factors_init
+        # analogue). Otherwise keep the historical empty/all-ones default (VOC inert).
+        if use_voc && megan_specifier !== nothing && !isempty(megan_specifier) &&
+           !isempty(megan_factors_file)
+            megan = megan_config_init(; use_voc,
+                                      megan_specifier,
+                                      megan_factors_file,
+                                      mapped_emisfctrs = megan_mapped_emisfctrs)
+        else
+            megan = MEGANConfig()
+            megan_factors_init!(megan.megan_factors, 20)
+        end
     end
     if dust === nothing
         dust = DustEmisConfig()
@@ -1707,7 +1726,11 @@ function clm_drv_core!(config::CLMDriverConfig,
             cs.elai_patch, cs.elai240_patch,
             ps.cisun_z_patch, ps.cisha_z_patch,
             temp.t_veg_patch, temp.t_veg24_patch, temp.t_veg240_patch,
-            ef.btran_patch)
+            ef.btran_patch;
+            # CTSM &megan_emis_nl `megan_mapped_emisfctrs` default is .FALSE.
+            # (table-EF isoprene); the kernel keyword defaults `true`, so thread the
+            # config value here to reproduce the Fortran default on the live path.
+            use_mapped_emisfctrs = config.megan.mapped_emisfctrs)
     end
 
     # ========================================================================
