@@ -135,6 +135,7 @@ using CLM
     include("test_cnfire_wiring.jl")
     include("test_methane.jl")
     include("test_voc_emission.jl")
+    include("test_voc_activation.jl")
     include("test_dust_emission.jl")
     include("test_satellite_phenology.jl")
     include("test_c_iso_flux.jl")

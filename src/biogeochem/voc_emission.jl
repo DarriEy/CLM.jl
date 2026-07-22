@@ -106,6 +106,12 @@ Base.@kwdef mutable struct MEGANConfig
     megan_factors ::MEGANFactors{Float64, Vector{Float64}} = MEGANFactors{Float64}()
     meg_compounds ::Vector{MEGANCompound{Float64}}         = MEGANCompound{Float64}[]
     mech_comps    ::Vector{MEGANMechComp}                  = MEGANMechComp[]
+    # &megan_emis_nl `megan_mapped_emisfctrs`. CTSM's namelist default is .FALSE.
+    # (namelist_definition_drv_flds.xml) — isoprene EF is taken from the factors
+    # TABLE, not the gridded surfdata map. `voc_emission!`'s kernel keyword
+    # `use_mapped_emisfctrs` defaults `true`, so this config field (threaded to the
+    # driver call site) is what reproduces the Fortran default on the live path.
+    mapped_emisfctrs ::Bool = false
 end
 
 # ---------------------------------------------------------------------------
@@ -553,6 +559,7 @@ table's `npfts`).
 function megan_config_from_nl(specifier,
                               tbl::MEGANFactorsTable{FT};
                               megan_factors::Union{MEGANFactors,Nothing} = nothing,
+                              mapped_emisfctrs::Bool = false,
                               maxveg::Int = tbl.npfts) where {FT}
     items = megan_exp_parse(specifier)
 
@@ -597,7 +604,173 @@ function megan_config_from_nl(specifier,
 
     return MEGANConfig(megan_factors = mf,
                        meg_compounds = meg_compounds,
-                       mech_comps    = mech_comps)
+                       mech_comps    = mech_comps,
+                       mapped_emisfctrs = mapped_emisfctrs)
+end
+
+# ---------------------------------------------------------------------------
+# LIVE ACTIVATION INITIALIZERS — the call sites that connect the (already
+# unit-tested) MEGAN readers to a real run. Mirrors the Fortran init chain:
+#   shr_megan_readnl        (drv_flds_in &megan_emis_nl: megan_specifier /
+#                            megan_factors_file / megan_mapped_emisfctrs)
+#   megan_factors_init      (MEGANFactorsMod, reads megan_factors_file) — called
+#                            from VOCEmission::InitAllocate
+#   VOCEmission::iniTimeConst (reads the gridded EF1_* isoprene EFs from fsurdat)
+# ---------------------------------------------------------------------------
+
+# Clean a NetCDF fixed-length char field: drop NUL padding then trailing blanks.
+_megan_clean_name(s::AbstractString) = String(rstrip(first(split(String(s), '\0'))))
+
+# Convert a NetCDF `Comp_Name` variable (a `char(Comp_Num, char)` field, read by
+# NCDatasets as a `char × ncomp` matrix — or, under CF string decoding, a
+# Vector{String}) to a Vector{String} of cleaned compound names.
+function _megan_names_from_nc(namevar)
+    data = namevar[:, :]
+    if ndims(data) == 2
+        nchar, ncomp = size(data)
+        return String[_megan_clean_name(String(Char.(@view data[:, j]))) for j in 1:ncomp]
+    else
+        return String[_megan_clean_name(String(x)) for x in data]
+    end
+end
+
+"""
+    megan_factors_file_init!(mf, tbl, filename)
+
+Read the MEGAN2.1 emission-factors NetCDF (`megan_factors_file`) into the
+compound hash `tbl::MEGANFactorsTable` AND the per-class coefficient set
+`mf::MEGANFactors`. Faithful live port of `megan_factors_init(filename)` in
+`MEGANFactorsMod.F90` (the file read that `VOCEmission::InitAllocate` performs).
+
+Reads `Comp_Name`/`Comp_MW`/`Class_Num`/`Comp_EF`/`Class_EF` → hash table (the
+stored per-PFT factor is `Comp_EF*Class_EF`, done by `megan_factors_table_init!`)
+and the per-class `LDF`/`Agro`/`Amat`/`Anew`/`Aold`/`betaT`/`ct1`/`ct2`/`Ceo`
+arrays → `mf`. Unlike `megan_factors_init!` (all-ones/constant defaults), these
+come from the FILE, exactly as Fortran does.
+"""
+function megan_factors_file_init!(mf::MEGANFactors, tbl::MEGANFactorsTable,
+                                  filename::AbstractString)
+    isfile(filename) ||
+        error("megan_factors_file_init!: megan_factors_file not found: $(filename)")
+    NCDataset(filename, "r") do ds
+        n_comps   = ds.dim["Comp_Num"]
+        n_classes = ds.dim["Class_Num"]
+        n_patchs  = ds.dim["PFT_Num"]
+
+        comp_names = _megan_names_from_nc(ds["Comp_Name"])
+        comp_mw    = Float64.(ds["Comp_MW"][:])
+        class_nums = Int.(ds["Class_Num"][:])
+        # NCDatasets returns column-major arrays: Comp_EF(PFT_Num,Comp_Num) in the
+        # CDL header ⇒ size (Comp_Num, PFT_Num); likewise Class_EF ⇒ (Class_Num,PFT_Num).
+        # That matches megan_factors_table_init!'s (n_comps × npfts)/(n_classes × npfts).
+        comp_EF  = Float64.(ds["Comp_EF"][:, :])
+        class_EF = Float64.(ds["Class_EF"][:, :])
+        if size(comp_EF) != (n_comps, n_patchs)
+            size(comp_EF) == (n_patchs, n_comps) && (comp_EF = permutedims(comp_EF))
+        end
+        if size(class_EF) != (n_classes, n_patchs)
+            size(class_EF) == (n_patchs, n_classes) && (class_EF = permutedims(class_EF))
+        end
+
+        megan_factors_table_init!(tbl, comp_names, comp_EF, class_EF, class_nums, comp_mw)
+
+        # Per-class coefficients (megan_factors_init reads these from the same file).
+        mf.n_classes = n_classes
+        mf.LDF   = Float64.(ds["LDF"][:])
+        mf.Agro  = Float64.(ds["Agro"][:])
+        mf.Amat  = Float64.(ds["Amat"][:])
+        mf.Anew  = Float64.(ds["Anew"][:])
+        mf.Aold  = Float64.(ds["Aold"][:])
+        mf.betaT = Float64.(ds["betaT"][:])
+        mf.ct1   = Float64.(ds["ct1"][:])
+        mf.ct2   = Float64.(ds["ct2"][:])
+        mf.Ceo   = Float64.(ds["Ceo"][:])
+    end
+    return nothing
+end
+
+"""
+    megan_config_init(; use_voc, megan_specifier, megan_factors_file,
+                        mapped_emisfctrs=false, maxveg=nothing) -> MEGANConfig
+
+Top-level MEGAN activation initializer — the live analogue of `shr_megan_readnl`
+(the `&megan_emis_nl` group: `megan_specifier` + `megan_factors_file` +
+`megan_mapped_emisfctrs`) followed by `megan_factors_init` at `InitAllocate`.
+
+Returns a POPULATED `MEGANConfig` (compound/mechanism descriptors + per-PFT
+emission factors + per-class coefficients read from `megan_factors_file`) when
+`use_voc` is true AND a non-empty `megan_specifier`/`megan_factors_file` is
+supplied. Otherwise returns an EMPTY `MEGANConfig` (VOC inert / the driver gate
+short-circuits), keeping the default run byte-identical — faithful to CTSM, where
+no `&megan_emis_nl` namelist ⇒ `shr_megan_mechcomps_n = 0` ⇒ `VOCEmission`
+returns immediately.
+"""
+function megan_config_init(; use_voc::Bool,
+                           megan_specifier = nothing,
+                           megan_factors_file::AbstractString = "",
+                           mapped_emisfctrs::Bool = false,
+                           maxveg::Union{Int,Nothing} = nothing)
+    active = use_voc && megan_specifier !== nothing &&
+             !isempty(megan_specifier) && !isempty(megan_factors_file)
+    active || return MEGANConfig()   # inert (byte-identical default)
+
+    tbl = MEGANFactorsTable{Float64}()
+    mf  = MEGANFactors{Float64}()
+    megan_factors_file_init!(mf, tbl, megan_factors_file)
+    mv = maxveg === nothing ? tbl.npfts : maxveg
+    return megan_config_from_nl(megan_specifier, tbl;
+                                megan_factors = mf,
+                                mapped_emisfctrs = mapped_emisfctrs,
+                                maxveg = mv)
+end
+
+# Gridded isoprene emission-factor variables on the surface dataset, in the exact
+# order VOCEmission::iniTimeConst reads them into efisop_grc(1:6, :).
+const _EFISOP_SURF_VARS = ("EF1_BTR", "EF1_FET", "EF1_FDT", "EF1_SHR", "EF1_GRS", "EF1_CRP")
+
+"""
+    read_efisop_from_surfdata!(voc, fsurdat, gridcell_of; default=0.0) -> Bool
+
+Populate `voc.efisop_grc` (6 × ngrc gridded isoprene emission factors, ug m-2 h-1)
+from the surface dataset `fsurdat`. Live port of `VOCEmission::iniTimeConst`,
+which opens `fsurdat` itself and reads `EF1_BTR/FET/FDT/SHR/GRS/CRP` into
+`efisop_grc(1:6, begg:endg)`.
+
+`gridcell_of` maps a model gridcell index `g ∈ 1:ngrc` to the linear index into
+the (flattened) surfdata grid. For the common single-/lumped-gridcell and
+row-major full-grid cases this is the identity `g -> g`.
+
+Returns `true` if the EF1_* variables were present and read, `false` if the
+surface file lacks them — in which case `efisop_grc` is filled with `default`
+(0 ⇒ get_map_EF yields 0, a no-op for the mapped-EF path) and a warning is
+emitted (there is no scalar CTSM default; efisop is a purely gridded field, so
+`fsurdat` without EF1_* means no isoprene map, not a fabricated value).
+"""
+function read_efisop_from_surfdata!(voc::VOCEmisData, fsurdat::AbstractString,
+                                    gridcell_of::AbstractVector{<:Integer};
+                                    default::Real = 0.0)
+    ng = size(voc.efisop_grc, 2)
+    ng == 0 && return false
+    isfile(fsurdat) || (fill!(voc.efisop_grc, default); return false)
+
+    have_all = false
+    NCDataset(fsurdat, "r") do ds
+        have_all = all(v -> haskey(ds, v), _EFISOP_SURF_VARS)
+        if !have_all
+            @warn "read_efisop_from_surfdata!: $(fsurdat) has no EF1_* isoprene EF maps; \
+                   efisop_grc filled with default=$(default) (no isoprene map)"
+            fill!(voc.efisop_grc, default)
+            return
+        end
+        for (k, vname) in enumerate(_EFISOP_SURF_VARS)
+            flat = vec(Float64.(ds[vname][:, :]))   # flatten (lsmlon,lsmlat) grid
+            for g in 1:ng
+                si = gridcell_of[g]
+                voc.efisop_grc[k, g] = (1 <= si <= length(flat)) ? flat[si] : default
+            end
+        end
+    end
+    return have_all
 end
 
 # ---------------------------------------------------------------------------
