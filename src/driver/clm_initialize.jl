@@ -73,6 +73,12 @@ function clm_initialize!(;
     start_date::DateTime = DateTime(2000, 1, 1),
     dtime::Int = 1800,
     use_cn::Bool = false,
+    # Soil decomposition method (CTSM `soil_decomp_method`): 1 = CENTURY
+    # (Koven 2013, the CLM5 default), 2 = MIMICS (Wieder 2015, microbial-explicit).
+    # MIMICS is opt-in and requires use_cn; decomp_method==2 sizes the soil-BGC
+    # instances at 8 pools / 15 transitions and runs init_decompcascade_mimics!.
+    # Default (1) leaves the CENTURY init + 7/10 layout byte-identical.
+    decomp_method::Int = 1,
     use_crop::Bool = false,
     # CTSM's use_luna default is CONDITIONAL (namelist_defaults_ctsm.xml:578-580):
     # .true. generally, .false. under use_fates and under phys=clm4_5. For clm5_0
@@ -256,6 +262,9 @@ function clm_initialize!(;
     # caller's flags → default (non-isotope) path is byte-identical.
     inst.bgc_vegetation.config.use_c13 = use_c13
     inst.bgc_vegetation.config.use_c14 = use_c14
+    # Propagate the soil decomposition method so the facade's CN driver config
+    # (synced by _sync_driver_config!) dispatches decomp_rates_mimics! under MIMICS.
+    inst.bgc_vegetation.config.decomp_method = decomp_method
     # clm5_0 BGC defaults to nitrification/denitrification ON (use_nitrif_denitrif);
     # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
     inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
@@ -267,9 +276,15 @@ function clm_initialize!(;
     # (FUN reads availc/canopy which are NaN before the canopy spins up). Callers
     # with a finite (warm) state set inst.bgc_vegetation.config.use_fun = true.
     nlevdecomp_full = varpar.nlevdecomp_full
-    ndecomp_cascade_transitions = use_cn ? 10 : 5
+    # MIMICS (decomp_method==2) needs 8 pools / 15 transitions; CENTURY keeps 7/10
+    # (use_cn) or the SP fallback 7/5. Sizing the soil-BGC state arrays here is the
+    # only place the pool count is baked; downstream everything reads config.ndecomp_*.
+    _mimics = use_cn && decomp_method == 2
+    ndecomp_pools = _mimics ? 8 : 7
+    ndecomp_cascade_transitions = _mimics ? 15 : (use_cn ? 10 : 5)
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                   nlevdecomp_full=nlevdecomp_full,
+                  ndecomp_pools=ndecomp_pools,
                   ndecomp_cascade_transitions=ndecomp_cascade_transitions,
                   nlevurb=nlevurb,
                   use_luna=_use_luna,
@@ -513,17 +528,40 @@ function clm_initialize!(;
                 cellsand[c, j] = inst.soilstate.cellsand_col[c, j]
             end
         end
-        init_decomp_cascade_bgc!(inst.decomp_bgc_state,
-                                  inst.decomp_cascade,
-                                  inst.decomp_bgc_params,
-                                  inst.cn_shared_params;
-                                  cellsand=cellsand,
-                                  bounds=1:nc,
-                                  nlevdecomp=nlevdecomp_val,
-                                  ndecomp_pools_max=7,
-                                  ndecomp_cascade_transitions_max=10,
-                                  spinup_state=0,
-                                  use_fates=false)
+        if decomp_method == 2
+            # ---- MIMICS (Wieder 2015) cascade init ----
+            # Read MIMICS params (CTSM paramfile / namelist defaults) into the
+            # instance, then stand up the 8-pool / 15-transition microbial cascade.
+            # init_decompcascade_mimics! returns the N-use-efficiency vector, which
+            # (unlike CENTURY) must be stored on the soil-BGC state for the potential
+            # kernel's messy-eating N branch.
+            mimics_default_read_params!(inst.decomp_mimics_params)
+            cellclay = inst.soilstate.cellclay_col[:, 1:nlevdecomp_val]
+            nue = init_decompcascade_mimics!(inst.decomp_mimics_state,
+                                             inst.decomp_cascade,
+                                             inst.decomp_mimics_params,
+                                             inst.cn_shared_params;
+                                             cellclay=cellclay,
+                                             bounds=1:nc,
+                                             nlevdecomp=nlevdecomp_val,
+                                             ndecomp_pools_max=8,
+                                             ndecomp_cascade_transitions_max=15,
+                                             spinup_state=0,
+                                             use_fates=false)
+            inst.soilbiogeochem_state.nue_decomp_cascade_col = nue
+        else
+            init_decomp_cascade_bgc!(inst.decomp_bgc_state,
+                                      inst.decomp_cascade,
+                                      inst.decomp_bgc_params,
+                                      inst.cn_shared_params;
+                                      cellsand=cellsand,
+                                      bounds=1:nc,
+                                      nlevdecomp=nlevdecomp_val,
+                                      ndecomp_pools_max=7,
+                                      ndecomp_cascade_transitions_max=10,
+                                      spinup_state=0,
+                                      use_fates=false)
+        end
 
         # Initialize competition state
         soil_bgc_competition_init!(inst.competition_state,
@@ -552,7 +590,7 @@ function clm_initialize!(;
     init_cold_biogeochem!(inst, bounds;
                           nlevdecomp = varpar.nlevdecomp,
                           nlevdecomp_full = nlevdecomp_full,
-                          ndecomp_pools = 7)
+                          ndecomp_pools = (use_cn && decomp_method == 2) ? 8 : 7)
 
     # ---- Step 15h: InitAccBuffer / InitAccVars -------------------------------
     # Fortran's accumulator setup phase (clm_instMod.F90 `init_accflds`, then

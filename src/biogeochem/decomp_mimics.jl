@@ -350,6 +350,59 @@ function decomp_mimics_read_params!(params::DecompMIMICSParams;
     return nothing
 end
 
+"""
+    mimics_default_read_params!(params)
+
+Populate `DecompMIMICSParams` with the CTSM `clm5_params` (paramfile) MIMICS
+values. These are the exact values `readParams` reads on the Fortran MIMICS
+(`soil_decomp_method='MIMICSWieder2015'`) path, so the activated port and a
+Fortran MIMICS reference (or an independent scalar oracle built from the same
+numbers) compare apples-to-apples. Called from `clm_initialize!` when
+`decomp_method == 2`.
+
+Ported from the `mimics_*` variables of `clm50_params.nc` /
+`SoilBiogeochemDecompCascadeMIMICSMod.F90 readParams`.
+"""
+function mimics_default_read_params!(params::DecompMIMICSParams)
+    # Values from clm50_params.c260305.nc (the CLM50 paramfile the CN cases
+    # reference, mimics block identical to c241017). v*/k* order per transition =
+    # [L1M1, L2M1, S1M1, L1M2, L2M2, S1M2] (indices 1..6). tau_mod_min==tau_mod_max
+    # ⇒ tau_mod pinned to 1.5 regardless of annsum_npp; densdep=1.2.
+    decomp_mimics_read_params!(params;
+        mimics_vmod   = [1.25e-07, 2.5e-08, 1.25e-07, 3.75e-08, 3.75e-08, 2.5e-08],
+        mimics_vint   = [6.6, 6.6, 6.6, 6.6, 6.6, 6.6],
+        mimics_vslope = [0.0756, 0.0756, 0.0756, 0.0756, 0.0756, 0.0756],
+        mimics_kmod   = [0.001953125, 0.0078125, 0.00390625, 0.0078125, 0.00390625, 0.002604167],
+        mimics_kint   = [3.19, 3.19, 3.19, 3.19, 3.19, 3.19],
+        mimics_kslope = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02],
+        mimics_mge    = [0.5, 0.25, 0.5, 0.7, 0.35, 0.7],
+        mimics_desorp = [5.25e-06, -2.0],
+        mimics_fmet   = [0.75, 0.85, 0.013, 40.0],
+        mimics_fchem_r = [0.3, -3.0],
+        mimics_fchem_k = [0.9, -3.0],
+        mimics_fphys_r = [0.03, 1.3],
+        mimics_fphys_k = [0.02, 0.8],
+        mimics_p_scalar = [0.8, -3.0],
+        mimics_tau_r  = [0.00052, 0.3],
+        mimics_tau_k  = [0.00024, 0.1],
+        mimics_nue_into_mic   = 0.85,
+        mimics_tau_mod_factor = 0.01,
+        mimics_tau_mod_min    = 1.5,
+        mimics_tau_mod_max    = 1.5,
+        mimics_ko_r  = 4.0,
+        mimics_ko_k  = 4.0,
+        mimics_densdep    = 1.2,
+        mimics_desorpQ10  = 1.0,
+        mimics_t_soi_ref  = 25.0,
+        mimics_cn_mod_num = 0.4,
+        mimics_cn_r = 6.0,
+        mimics_cn_k = 10.0,
+        # 8 pools: L1(met) L2(str) S1(avl) S2(chem) S3(phys) M1(cop) M2(oli) CWD
+        mimics_initial_Cstocks = [1.0, 1.0, 200.0, 200.0, 200.0, 1.0, 1.0, 1.0],
+        mimics_initial_Cstocks_depth = 1.5)
+    return nothing
+end
+
 # ---------------------------------------------------------------------------
 # init_decompcascade_mimics! — Initialize cascade pathways and coefficients
 # Ported from init_decompcascade_mimics in

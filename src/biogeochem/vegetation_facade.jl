@@ -68,6 +68,10 @@ Base.@kwdef mutable struct CNVegetationConfig
     use_nitrif_denitrif::Bool = false
     use_matrixcn::Bool = false
     use_soil_matrixcn::Bool = false
+    # Soil decomposition method: 1 = CENTURY (Koven 2013, default), 2 = MIMICS
+    # (Wieder 2015). Synced onto the CN driver config by _sync_driver_config!;
+    # dispatches decomp_rates_mimics! + the use_mimics N branches in cn_driver.
+    decomp_method::Int = 1
     reseed_dead_plants::Bool = false
     dribble_crophrv_xsmrpool_2atm::Bool = false
     skip_steps::Int = 0
@@ -572,6 +576,10 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
         decomp_bgc_state::Union{DecompBGCState, Nothing} = nothing,
         decomp_bgc_params::Union{DecompBGCParams, Nothing} = nothing,
+        # MIMICS decomposition state/params (only consumed when driver_config
+        # decomp_method==2; otherwise nothing → CENTURY path unchanged).
+        mimics_state::Union{DecompMIMICSState, Nothing} = nothing,
+        mimics_params::Union{DecompMIMICSParams, Nothing} = nothing,
         cn_shared_params::Union{CNSharedParamsData, Nothing} = nothing,
         decomp_params::Union{DecompParams, Nothing} = nothing,
         competition_state::Union{SoilBGCCompetitionState, Nothing} = nothing,
@@ -707,6 +715,8 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         cascade_con=cascade_con,
         decomp_bgc_state=decomp_bgc_state,
         decomp_bgc_params=decomp_bgc_params,
+        mimics_state=mimics_state,
+        mimics_params=mimics_params,
         cn_shared_params=cn_shared_params,
         decomp_params=decomp_params,
         competition_state=competition_state,
@@ -1263,6 +1273,7 @@ function _sync_driver_config!(veg::CNVegetationData)
     dc.use_fates_bgc = fc.use_fates_bgc
     dc.use_matrixcn = fc.use_matrixcn
     dc.use_soil_matrixcn = fc.use_soil_matrixcn
+    dc.decomp_method = fc.decomp_method
     dc.dribble_crophrv_xsmrpool_2atm = fc.dribble_crophrv_xsmrpool_2atm
     # Fire method + CNDV (the fire mortality decrements DGVS nind only when use_cndv,
     # exactly as in CNFireBaseMod's `if (use_cndv)` block). Both default-off, so the

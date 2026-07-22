@@ -160,6 +160,13 @@ Base.@kwdef mutable struct CLMInstances
     # --- BGC decomposition state and params ---
     decomp_bgc_state::DecompBGCState = DecompBGCState()
     decomp_bgc_params::DecompBGCParams = DecompBGCParams()
+    # --- MIMICS decomposition state and params (opt-in; decomp_method==2) ---
+    # Empty by default => the CENTURY (decomp_method==1) path never touches them and
+    # is byte-identical. Populated by init_decompcascade_mimics! only under MIMICS.
+    # The FT-constructor / AD dual-copy safely no-op on DecompMIMICSState:
+    # DecompMIMICSState{Float64} fails the `M<:AbstractMatrix` bound (try/catch).
+    decomp_mimics_state::DecompMIMICSState = DecompMIMICSState()
+    decomp_mimics_params::DecompMIMICSParams = DecompMIMICSParams()
     cn_shared_params::CNSharedParamsData = CNSharedParamsData()
     decomp_params::DecompParams = DecompParams()
     competition_state::SoilBGCCompetitionState = SoilBGCCompetitionState()

@@ -225,6 +225,19 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           npcropmin::Int=17, nrepr::Int=1,
                           cnfire_method::Symbol=:nofire,
                           use_threaded_clumps::Bool=false)
+    # MIMICS (decomp_method==2) fixes the pool/transition layout: 8 pools
+    # (met_lit, str_lit, avl/chem/phys SOM, cop_mic, oli_mic, cwd) and 15
+    # transitions in the non-FATES configuration, with i_litr_max=2 (met+str, no
+    # separate lignin litter pool) and i_cwd=8. See init_decompcascade_mimics! /
+    # SoilBiogeochemDecompCascadeMIMICSMod.F90. CENTURY (decomp_method==1, default)
+    # keeps its 7/10 & i_litr_max=3/i_cwd=7 layout untouched → byte-identical.
+    if decomp_method == 2
+        ndecomp_pools = 8
+        ndecomp_cascade_transitions = 15
+        i_litr_min = 1
+        i_litr_max = 2
+        i_cwd = 8
+    end
     if use_fates
         mode = FATESMode(; use_fates_sp, use_fates_bgc,
                           fates_spitfire_mode, fates_seeddisp_cadence)
@@ -2287,6 +2300,10 @@ function clm_drv_core!(config::CLMDriverConfig,
             cascade_con=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_cascade : nothing),
             decomp_bgc_state=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_bgc_state : nothing),
             decomp_bgc_params=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_bgc_params : nothing),
+            # MIMICS state/params — only meaningful when config.decomp_method==2, but
+            # passing them unconditionally is harmless (cn_driver gates on decomp_method).
+            mimics_state=(config.decomp_method == 2 && _decomp_initialized(inst.decomp_cascade) ? inst.decomp_mimics_state : nothing),
+            mimics_params=(config.decomp_method == 2 && _decomp_initialized(inst.decomp_cascade) ? inst.decomp_mimics_params : nothing),
             cn_shared_params=(_decomp_initialized(inst.decomp_cascade) ? inst.cn_shared_params : nothing),
             decomp_params=(_decomp_initialized(inst.decomp_cascade) ? inst.decomp_params : nothing),
             competition_state=(_decomp_initialized(inst.decomp_cascade) ? inst.competition_state : nothing),
