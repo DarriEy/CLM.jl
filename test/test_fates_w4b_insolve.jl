@@ -85,6 +85,16 @@ const _Cw = CLM
         col.patchi[1] = 1; col.patchf[1] = 2; col.npatches[1] = 2
         col.nbedrock[1] = _Cw.varpar.nlevsoi
         col.is_fates[1] = true
+        # A real active FATES soil column has col%active = .true.; clm_initialize
+        # sets it via is_active_c. The driver now reads it — `fates_apply_deferred_
+        # activation!` mirrors is_active_p (subgridWeightsMod.F90:468),
+        # `patch%active = col%active(c) .and. patch%wtcol(p) > 0`, and
+        # `set_filters_one_group!` gates every mask on `col.active[c]`. Without this
+        # the synthetic column defaults inactive (column.jl:124) and the veg patch is
+        # dropped from every flux filter, so the in-solve FATES photosynthesis pack
+        # never runs. This is harness input a real column always carries, not a
+        # relaxation of the coupling contract asserted below.
+        col.active[1] = true
 
         lun = inst.landunit
         lun.itype[1] = _Cw.ISTSOIL; lun.urbpoi[1] = false

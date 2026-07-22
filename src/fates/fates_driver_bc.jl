@@ -168,7 +168,7 @@ hooks index patches directly via `fates_veg_patches`, and `p2c_1d!` reads
 `active`/`wtcol`, so the weights are the load-bearing quantity. Gated by the caller
 behind `config.use_fates`.
 """
-function fates_set_filters!(inst::CLMInstances; c::Int, s::Int)
+function fates_set_filters!(inst::CLMInstances; c::Int, s::Int, set_active::Bool=true)
     fates = inst.fates
     fates === nothing && return inst
     col = inst.column
@@ -209,7 +209,7 @@ function fates_set_filters!(inst::CLMInstances; c::Int, s::Int)
         if !isempty(pch.is_veg); pch.is_veg[p] = true; end
         if !isempty(pch.wt_ed);  pch.wt_ed[p] = wt;    end
         pch.wtcol[p] = wt
-        pch.active[p] = true
+        set_active && (pch.active[p] = true)
     end
 
     # Reserved-but-unused vegetated slots (a fuse/merge can leave fewer live
@@ -217,9 +217,43 @@ function fates_set_filters!(inst::CLMInstances; c::Int, s::Int)
     # averaging skips them.
     for p in (pi + npatch + 1):pf
         pch.wtcol[p] = 0.0
-        pch.active[p] = false
+        set_active && (pch.active[p] = false)
     end
 
+    return inst
+end
+
+"""
+    fates_apply_deferred_activation!(inst) -> inst
+
+Bring `patch.active` up to date with the patch weights FATES wrote at the end of
+the previous timestep, for every `col.is_fates` column.
+
+Mirrors CTSM's `is_active_p` (subgridWeightsMod.F90:468):
+
+```fortran
+if (col%active(c) .and. patch%wtcol(p) > 0._r8) is_active_p = .true.
+```
+
+Called at the TOP of `clm_drv!`, before any flux solve, so that within a single
+timestep the ACTIVE set, the flux FILTERS and the patches actually computed are
+one and the same set. See the `set_active=false` note in
+`fates_daily_dynamics_step!` for why the activation cannot be applied at the
+moment FATES creates the patch.
+"""
+function fates_apply_deferred_activation!(inst::CLMInstances)
+    fates = inst.fates
+    fates === nothing && return inst
+    col = inst.column; pch = inst.patch
+    isempty(col.is_fates) && return inst
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        pi = col.patchi[c]; pf = col.patchf[c]
+        (1 <= pi && pi <= pf && pf <= length(pch.active)) || continue
+        for p in pi:pf
+            pch.active[p] = col.active[c] && pch.wtcol[p] > 0.0
+        end
+    end
     return inst
 end
 
@@ -733,7 +767,20 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         for (ifp, p) in fates_veg_patches(fates.sites[s], c, col)
             fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p, ifp=ifp)
         end
-        fates_set_filters!(inst; c=c, s=s)
+        # `set_active=false`: the ACTIVE-set change is DEFERRED to the top of the
+        # next timestep (`fates_apply_deferred_activation!`). Flipping it here would
+        # mark a brand-new FATES patch active in the middle of a step whose surface
+        # fluxes were solved before the patch existed — and `balance_check!` audits
+        # every ACTIVE patch (`errlon = eflx_lwrad_out - eflx_lwrad_net - forc_lwrad`,
+        # BalanceCheckMod.F90:921, an unfiltered begp:endp + `patch%active` loop, which
+        # the port mirrors exactly). The patch would be audited on a step in which it
+        # was never computed, giving errlon = -forc_lwrad, a 300-400 W/m2 FATAL error.
+        # Fortran does not hit this because `wrap_update_hlmfates_dyn` never assigns
+        # `patch%active` at all (only `patch%wt_ed`/`wtcol`); CTSM's active set is
+        # static across the FATES daily step. Deferring by one step reproduces that
+        # invariant -- the audited set and the computed set are the same set -- while
+        # still letting the new patch enter the physics on the very next step.
+        fates_set_filters!(inst; c=c, s=s, set_active=false)
     end
 
     # 7. fill the daily ("dynamics") history buffers from the freshly-advanced
