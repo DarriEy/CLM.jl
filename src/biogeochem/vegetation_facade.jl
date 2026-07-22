@@ -866,7 +866,13 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         # the product pools. Omitted => those summaries are skipped.
         bounds_grc::UnitRange{Int} = 1:0,
         decomp = nothing,
-        dzsoi_decomp_vals::Union{AbstractVector{<:Real}, Nothing} = nothing)
+        dzsoi_decomp_vals::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        # MIMICS litr_lig_c_to_n_col (fmet input) inputs — consumed by the flux
+        # summary only when driver_config.decomp_method==MIMICS_DECOMP; all nothing
+        # (the default) leaves the CENTURY path byte-identical.
+        pftcon_main::Union{Any, Nothing} = nothing,
+        cn_shared_params::Union{Any, Nothing} = nothing,
+        cascade_con::Union{Any, Nothing} = nothing)
 
     # CNDriverLeaching — already ported
     cn_driver_leaching!(veg.driver_config;
@@ -934,7 +940,13 @@ function cn_vegetation_ecosystem_post_drainage!(veg::CNVegetationData;
         ndecomp_cascade_transitions=ndecomp_cascade_transitions,
         c_products=veg.c_products_inst,
         dt=dt,
-        nfix_timeconst=nfix_timeconst)
+        nfix_timeconst=nfix_timeconst,
+        # MIMICS litr_lig_c_to_n_col inputs (consumed only when decomp_method==2).
+        pftcon_main=pftcon_main,
+        cn_shared_params=cn_shared_params,
+        soilbgc_cwdc_col=soilbgc_cs.cwdc_col,
+        soilbgc_cwdn_col=soilbgc_ns.cwdn_col,
+        cascade_con=cascade_con)
 
     # CNVegStructUpdate — ported (cn_veg_struct_update!); the live path runs it
     # from clm_drv! (clm_driver.jl:2078), not here.

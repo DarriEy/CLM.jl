@@ -1942,7 +1942,16 @@ function cn_driver_summarize_fluxes!(
         # Wood/crop product pools (product_closs_grc feeds landuseflux_grc → nbp_grc).
         c_products::Union{AbstractCNProducts, Nothing} = nothing,
         dt::Real = 0.0,
-        nfix_timeconst::Real = 0.0)
+        nfix_timeconst::Real = 0.0,
+        # MIMICS lignin:N ratio inputs (only consumed when decomp_method==MIMICS_DECOMP;
+        # all nothing ⇒ the litr_lig_c_to_n_col computation is skipped and the CENTURY
+        # default path is byte-identical). Ported from the mimics_decomp block of
+        # SoilBiogeochemCarbonFluxType.F90::Summary.
+        pftcon_main::Union{Any, Nothing} = nothing,
+        cn_shared_params::Union{Any, Nothing} = nothing,
+        soilbgc_cwdc_col::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        soilbgc_cwdn_col::Union{AbstractVector{<:Real}, Nothing} = nothing,
+        cascade_con::Union{Any, Nothing} = nothing)
 
     num_bgc_vegp = count(mask_bgc_vegp)
     have_decomp = decomp !== nothing && dzsoi_decomp_vals !== nothing &&
@@ -1962,6 +1971,32 @@ function cn_driver_summarize_fluxes!(
             cascade_donor_pool=decomp.cascade_donor_pool,
             is_soil=decomp.is_soil, is_litter=decomp.is_litter,
             is_cwd=decomp.is_cwd, is_microbe=falses(ndecomp_pools))
+
+        # ---- 1b. litter lignin:N ratio (litr_lig_c_to_n_col) — MIMICS only ----
+        # Fortran: the mimics_decomp block at the END of SoilBiogeochemCarbonFluxType
+        # ::Summary (F90:961-1016). Gated on MIMICS so CENTURY (default) is byte-
+        # identical (CENTURY never reads litr_lig_c_to_n_col). Runs AFTER the summary
+        # above so decomp_cascade_ctransfer_col is vertically integrated. The value is
+        # consumed by decomp_rates_mimics! on the NEXT step (Fortran DecompRate runs
+        # early, ~CNDriverMod:348, this Summary late, ~CNDriverMod:1265 — a faithful
+        # one-step lag; litr_lig_c_to_n_col starts at 0 ⇒ step-1 fmet = fmet_p1*fmet_p2).
+        if config.decomp_method == MIMICS_DECOMP && pftcon_main !== nothing &&
+           cn_shared_params !== nothing && cascade_con !== nothing &&
+           soilbgc_cwdc_col !== nothing && soilbgc_cwdn_col !== nothing &&
+           col !== nothing && patch !== nothing
+            i_cwdl2 = findfirst(==("CWDL2"), cascade_con.cascade_step_name)
+            if i_cwdl2 !== nothing
+                soil_bgc_carbon_flux_lignin_n_ratio!(soilbgc_cf,
+                    soilbgc_cwdc_col, soilbgc_cwdn_col,
+                    mask_bgc_vegp, bounds_col;
+                    col=col, patch=patch,
+                    lf_flig=pftcon_main.lf_flig, lflitcn=pftcon_main.lflitcn,
+                    fr_flig=pftcon_main.fr_flig, frootcn=pftcon_main.frootcn,
+                    leafc_to_litter_patch=cnveg_cf.leafc_to_litter_patch,
+                    frootc_to_litter_patch=cnveg_cf.frootc_to_litter_patch,
+                    cwd_flig=cn_shared_params.cwd_flig, i_cwdl2=i_cwdl2)
+            end
+        end
 
         # ---- 2. soilbiogeochem_nitrogenflux_inst%Summary ----
         soil_bgc_nitrogen_flux_summary!(soilbgc_nf, BitVector(mask_bgc_soilc), bounds_col;

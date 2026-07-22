@@ -154,4 +154,90 @@
         CLM._sync_driver_config!(veg)
         @test veg.driver_config.decomp_method == 2
     end
+
+    @testset "(c) litr_lig_c_to_n_col (fmet input) vs scalar oracle" begin
+        # Ports SoilBiogeochemCarbonFluxType.F90:961-1016 (mimics_decomp block).
+        # Fixture: 4 columns / 5 patches covering all branches —
+        #   col1: full case (litterfall + cwdn>0 + cwd_ctransfer>0)
+        #   col2: cwdn==0 branch (cwd term forced to 0)
+        #   col3: FATES column (skipped; litr_lig_c_to_n_col left untouched)
+        #   col4: floor case (zero litterfall + zero cwd_ctransfer ⇒ max(1e-3,·) denom)
+        ncol = 4; ntrans = 15; i_cwdl2 = 15
+        cwd_flig = 0.24
+
+        # pftcon vectors, indexed by ivt = itype + 1 (1-based)
+        lf_flig = [0.10, 0.20, 0.25]
+        lflitcn = [50.0, 60.0, 70.0]
+        fr_flig = [0.15, 0.30, 0.35]
+        frootcn = [40.0, 45.0, 42.0]
+
+        # patches: 1,2 → col1 ; 3 → col2 ; 4 → col3(FATES) ; 5 → col4
+        itype   = [1, 2, 1, 0, 2]          # ivt = itype+1
+        wtcol   = [0.6, 0.4, 1.0, 1.0, 1.0]
+        leafc_to_litter_patch  = [0.03, 0.05, 0.02, 0.99, 0.0]
+        frootc_to_litter_patch = [0.02, 0.01, 0.04, 0.88, 0.0]
+        mask_vegp = Bool[true, true, true, false, true]   # patch4 inactive
+
+        cwdc_col = [3.0, 2.0, 9.9, 1.0]
+        cwdn_col = [0.1, 0.0, 9.9, 0.05]                  # col2 → 0 branch
+        cwd_ctransfer_by_col = [0.008, 0.004, 9.9, 0.0]   # col4 → floor branch
+
+        col = CLM.ColumnData()
+        col.patchi   = [1, 3, 4, 5]
+        col.patchf   = [2, 3, 4, 5]
+        col.is_fates = [false, false, true, false]
+
+        patch = CLM.PatchData()
+        patch.itype = itype
+        patch.wtcol = wtcol
+
+        cf = CLM.SoilBiogeochemCarbonFluxData()
+        cf.litr_lig_c_to_n_col = fill(-999.0, ncol)       # sentinel (col3 must survive)
+        cf.decomp_cascade_ctransfer_col = zeros(ncol, ntrans)
+        for c in 1:ncol
+            cf.decomp_cascade_ctransfer_col[c, i_cwdl2] = cwd_ctransfer_by_col[c]
+        end
+
+        CLM.soil_bgc_carbon_flux_lignin_n_ratio!(cf, cwdc_col, cwdn_col,
+            mask_vegp, 1:ncol; col=col, patch=patch,
+            lf_flig=lf_flig, lflitcn=lflitcn, fr_flig=fr_flig, frootcn=frootcn,
+            leafc_to_litter_patch=leafc_to_litter_patch,
+            frootc_to_litter_patch=frootc_to_litter_patch,
+            cwd_flig=cwd_flig, i_cwdl2=i_cwdl2)
+
+        # --- independent plain-scalar oracle ---
+        function oracle(patches)
+            lnl = 0.0; lnf = 0.0; lc = 0.0; fc = 0.0
+            for p in patches
+                mask_vegp[p] || continue
+                ivt = itype[p] + 1; wt = wtcol[p]
+                lnl += lf_flig[ivt] * lflitcn[ivt] * leafc_to_litter_patch[p] * wt
+                lnf += fr_flig[ivt] * frootcn[ivt] * frootc_to_litter_patch[p] * wt
+                lc  += leafc_to_litter_patch[p] * wt
+                fc  += frootc_to_litter_patch[p] * wt
+            end
+            (lnl, lnf, lc, fc)
+        end
+        function ratio(patches, c)
+            lnl, lnf, lc, fc = oracle(patches)
+            ct = cwd_ctransfer_by_col[c]
+            lncwd = cwdn_col[c] > 0.0 ? cwd_flig * (cwdc_col[c] / cwdn_col[c]) * ct : 0.0
+            (lnl + lnf + lncwd) / max(1.0e-3, lc + fc + ct)
+        end
+
+        @test cf.litr_lig_c_to_n_col[1] ≈ ratio(1:2, 1) rtol=1e-12
+        @test cf.litr_lig_c_to_n_col[2] ≈ ratio(3:3, 2) rtol=1e-12
+        @test cf.litr_lig_c_to_n_col[3] == -999.0            # FATES column untouched
+        @test cf.litr_lig_c_to_n_col[4] ≈ ratio(5:5, 4) rtol=1e-12
+
+        # Non-vacuous: col1 is a real nonzero ratio; col4 exercises the 1e-3 floor
+        # (numerator 0, denom would be 0 without the floor).
+        @test cf.litr_lig_c_to_n_col[1] > 0.0
+        @test cf.litr_lig_c_to_n_col[2] > 0.0
+        @test cf.litr_lig_c_to_n_col[4] == 0.0
+        # cwdn==0 branch: col2 ratio must NOT include a cwd term
+        lnl2, lnf2, lc2, fc2 = oracle(3:3)
+        @test cf.litr_lig_c_to_n_col[2] ≈ (lnl2 + lnf2) /
+            max(1.0e-3, lc2 + fc2 + cwd_ctransfer_by_col[2]) rtol=1e-12
+    end
 end

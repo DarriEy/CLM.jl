@@ -31,17 +31,19 @@
 # not tractable this session. So this scalar oracle IS the value-level ground truth
 # (the fallback the task sanctions), with the EXACT clm50_params mimics_* values.
 #
-# ⚠ KNOWN LIVE-PATH LIMITATION (documented, not hidden): the fmet input
-# `litr_lig_c_to_n_col` (ligninNratioAvg) is a SoilBiogeochemCarbonFlux field that
-# the port only ZEROES and never computes on the live path (a pre-existing
-# dead-port gap; Fortran recomputes it each step in the CN carbon-flux summary,
-# SoilBiogeochemCarbonFluxType.F90:961-1014, gated decomp_method==mimics). An
-# ACTIVATED MIMICS run therefore currently sees ligninNratioAvg=0 ⇒ a CONSTANT
-# fmet = fmet_p1*fmet_p2 = 0.6375. decomp_rates_mimics! ITSELF is correct (this
-# harness proves it across a RANGE of ligninNratioAvg, so it is NOT a vacuous 0.0
-# test), but full end-to-end live fidelity additionally needs that lignin:N
-# summary wired. A green result here must NOT be read as full live fidelity
-# ([[conservation-is-not-accuracy]]).
+# ✔ LIVE-PATH GAP NOW CLOSED: the fmet input `litr_lig_c_to_n_col`
+# (ligninNratioAvg) is computed every step on the live path by
+# `soil_bgc_carbon_flux_lignin_n_ratio!` (src/types/soil_bgc_carbon_flux.jl),
+# called from cn_driver_summarize_fluxes! gated on decomp_method==MIMICS_DECOMP —
+# a faithful port of the mimics_decomp block of
+# SoilBiogeochemCarbonFluxType.F90::Summary (F90:961-1016). An activated MIMICS run
+# now sees the REAL lignin:N ratio, not the former constant fmet=0.6375. That
+# computation is oracle-checked in test/test_mimics_wiring.jl. This harness still
+# exercises decomp_rates_mimics! itself across a RANGE of ligninNratioAvg (so it is
+# NOT a vacuous 0.0 test). A fresh MIMICSWieder2015 Fortran build for a full
+# value-level parity of the summary itself is still not tractable this session;
+# the scalar oracle in test_mimics_wiring.jl is the sanctioned value-level ground
+# truth for that piece ([[conservation-is-not-accuracy]]).
 # ==========================================================================
 
 using CLM
@@ -321,11 +323,12 @@ end
 ok1 = run_oracle_parity()
 ok2 = run_activation_wiring()
 println()
-println("⚠ LIVE-PATH CAVEAT: litr_lig_c_to_n_col (ligninNratioAvg) is not computed")
-println("  on the live path (dead-port field, only zeroed) ⇒ an activated MIMICS run")
-println("  currently uses constant fmet=0.6375. decomp_rates_mimics! is correct (proved")
-println("  above across varied ligninNratioAvg); the lignin:N summary still needs wiring")
-println("  for full end-to-end fidelity. See header note.")
+println("✔ LIVE-PATH GAP CLOSED: litr_lig_c_to_n_col (ligninNratioAvg) is now computed")
+println("  every step on the live path (soil_bgc_carbon_flux_lignin_n_ratio!, gated on")
+println("  decomp_method==MIMICS) ⇒ an activated MIMICS run uses the REAL lignin:N ratio,")
+println("  no longer the constant fmet=0.6375. That computation is oracle-checked in")
+println("  test/test_mimics_wiring.jl; decomp_rates_mimics! itself is proved above across")
+println("  varied ligninNratioAvg. See header note.")
 println()
 if ok1 && ok2
     println("ALL MIMICS PARITY + WIRING CHECKS PASSED")
