@@ -28,7 +28,11 @@
 #
 # The COLUMN-level C and N balances CLOSE to machine precision through the
 # transient step, and the dwt conversion flux survives to the end-of-step check
-# (it is a REAL term, not wiped).
+# (it is a REAL term, not wiped). BOTH steps now run with the FATAL thresholds
+# armed — including STEP 1: an earlier ~0.086 gN STEP-1 column-N residual proved to
+# be a FIXTURE inconsistency (sminn_vr seeded while its NH4/NO3 source pools were
+# left at zero, which the N-state update then discarded), not a port gap; the CN
+# pool seeding below now seeds NH4/NO3 consistently so step 1 conserves N exactly.
 #
 # The GRIDCELL balance ALSO closes now that the wood/crop PRODUCT POOLS are wired
 # end-to-end (PR #292: cn_products_update! runs on the live cn_driver_no_leaching!
@@ -112,6 +116,19 @@ include(joinpath(@__DIR__, "testdata.jl"))
             soilbgc_ns.decomp_npools_vr_col[c, j, p] = 0.5
         end
         soilbgc_ns.sminn_vr_col[c, 1:nlevdecomp] .= 0.01
+        # sminn_vr is a DERIVED diagnostic under use_nitrif_denitrif (the default):
+        # every SoilBiogeochem N-state update OVERWRITES it with smin_nh4_vr +
+        # smin_no3_vr (nitrif_denitrif.jl:628 == SoilBiogeochemNStateUpdate1Mod.F90),
+        # and totn_col sums sminn (soil_bgc_nitrogen_state.jl:559). Seeding sminn_vr
+        # WITHOUT seeding the NH4/NO3 pools it is derived from is an inconsistency the
+        # real cold start never produces (SoilBiogeochemNitrogenStateType.F90:InitCold
+        # sets sminn_vr = smin_nh4_vr = smin_no3_vr = 0). Left unfixed, the seeded
+        # mineral N is silently discarded on the first N-state update — ~0.086 gN/m2 of
+        # column mineral N vanishing with no matching output flux — so the STEP-1 column
+        # (and gridcell) N balance could not close. Seed NH4/NO3 consistently so the
+        # first step conserves N exactly.
+        soilbgc_ns.smin_nh4_vr_col[c, 1:nlevdecomp] .= 0.01
+        soilbgc_ns.smin_no3_vr_col[c, 1:nlevdecomp] .= 0.0
     end
 
     # --- transient PCT_NAT_PFT dataset (natveg itypes [0,1,12] -> cols 1,2,13) ---
@@ -151,16 +168,19 @@ include(joinpath(@__DIR__, "testdata.jl"))
         wt_before = copy(pch.wtcol[natveg])
         @test pch.wtcol[natveg] ≈ [0.05, 0.6, 0.35]
 
-        # Turn the balance check ON. For STEP 1 (the ordinary first step) keep the
-        # thresholds at Inf: this cold-started fixture's first-step CN allocation
-        # path carries a separate, pre-existing column-N residual (~0.086 gN) that is
-        # a first-step artifact unrelated to the product / gridcell wiring under test
-        # here (this test is about the transient year-boundary landuse step, not
-        # first-step allocation parity). We restore Fortran's REAL, FATAL thresholds
-        # just before STEP 2 (the year boundary) so the fatal C/N check actively
-        # guards the transient step itself.
+        # Turn the balance check ON with Fortran's REAL, FATAL thresholds armed for
+        # STEP 1 too. The ~0.086 gN STEP-1 column-N residual this test used to scope
+        # away (thresholds = Inf) was NOT a first-step-allocation port gap: it was a
+        # FIXTURE inconsistency in this very test. Under use_nitrif_denitrif (the
+        # default) sminn_vr is a DERIVED diagnostic — the N-state update overwrites it
+        # with smin_nh4_vr + smin_no3_vr, and totn_col sums sminn — so seeding sminn_vr
+        # while leaving NH4/NO3 at zero silently discarded ~0.086 gN/m2 of mineral N on
+        # the first step (the real InitCold keeps all three = 0). The CN pool seeding
+        # above now seeds NH4/NO3 consistently, so the first-step column AND gridcell
+        # C/N balances close to machine precision; the fatal check must PASS here.
         CLM.cn_balance_check_enabled!(true)
-        bal.cerror = Inf; bal.nerror = Inf; bal.cwarning = Inf; bal.nwarning = Inf
+        bal.cerror = 1.0e-7; bal.nerror = 1.0e-3
+        bal.cwarning = 1.0e-8; bal.nwarning = 1.0e-7
 
         # Step 1: ordinary first step — hook does NOT fire (is_first_step).
         CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
@@ -171,7 +191,21 @@ include(joinpath(@__DIR__, "testdata.jl"))
             photosyns=inst.photosyns)
         @test pch.wtcol[natveg] ≈ wt_before
 
-        # Restore Fortran's REAL, FATAL C/N balance thresholds for the year-boundary
+        # STEP-1 column C AND N balances close to machine precision — assert the FATAL
+        # column-N threshold (nerror = 1e-3) and the tighter nwarning (1e-7), exactly
+        # as done for the year-boundary step below. This is the assertion that proves
+        # the first-step column-N accounting is CLOSED (previously ~0.086 gN, hidden by
+        # the Inf scoping). Note clm_drv! above already ran this check FATALLY, so a
+        # regression aborts before reaching these lines.
+        soil_s1 = [c for c in bounds.begc:bounds.endc if filt.bgc_soilc[c]]
+        errnb_col_s1 = maximum(abs, bal.errnb_col[soil_s1])
+        errcb_col_s1 = maximum(abs, bal.errcb_col[soil_s1])
+        @test errnb_col_s1 < 1e-3      # << nerror (fatal); here ~6e-15
+        @test errnb_col_s1 < 1e-7      # even clears the (tighter) nwarning
+        @test errcb_col_s1 < 1e-7      # << cerror; here ~1e-13
+        println("    STEP 1 errcb_col=", errcb_col_s1, "  errnb_col=", errnb_col_s1)
+
+        # Keep Fortran's REAL, FATAL C/N balance thresholds for the year-boundary
         # step. With the wood/crop PRODUCT POOLS wired end-to-end (PR #292:
         # cn_products_update! runs on the live cn_driver_no_leaching! path, advancing
         # tot_woodprod_grc from the year-boundary product-gain fluxes — the sink the
