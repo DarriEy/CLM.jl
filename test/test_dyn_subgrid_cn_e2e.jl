@@ -26,13 +26,21 @@
 #      step start instead — otherwise a non-boundary step would carry a stale
 #      conversion flux into its balance.
 #
-# The COLUMN-level C and N balances now CLOSE to machine precision through the
+# The COLUMN-level C and N balances CLOSE to machine precision through the
 # transient step, and the dwt conversion flux survives to the end-of-step check
-# (it is a REAL term, not wiped). NB: the GRIDCELL balance still carries a known,
-# separate residual from the not-yet-wired product pools (cn_products_update! is
-# ported but unwired — see clm_driver.jl:cn_vegetation_balance_check!), so this
-# test measures the balances (nerror/cerror = Inf) rather than tripping the fatal
-# gridcell check.
+# (it is a REAL term, not wiped).
+#
+# The GRIDCELL balance ALSO closes now that the wood/crop PRODUCT POOLS are wired
+# end-to-end (PR #292: cn_products_update! runs on the live cn_driver_no_leaching!
+# path, so tot_woodprod_grc / cropprod1_grc advance from the year-boundary
+# product-gain fluxes — the sink the gridcell check subtracts). This test therefore
+# runs the REAL, FATAL C/N balance check at Fortran's default thresholds (cerror
+# 1e-7, nerror 1e-3): it must pass inside clm_drv!, and afterwards we assert
+# errcb_grc / errnb_grc < 1e-8 AND that the wood product pool actually advanced
+# (~60 gC into prod10/prod100) — proving the closure is NON-VACUOUS (product mass
+# really moved), not a trivial pass on zero flux. Were products still unwired the
+# driver would throw on the harvest/conversion residual (the ~37 gC / ~0.085 gN
+# class guarded directly by test_cn_products_gridcell_balance.jl).
 # ==========================================================================
 
 using Test
@@ -143,7 +151,14 @@ include(joinpath(@__DIR__, "testdata.jl"))
         wt_before = copy(pch.wtcol[natveg])
         @test pch.wtcol[natveg] ≈ [0.05, 0.6, 0.35]
 
-        # MEASURE (don't trip the fatal gridcell product-pool residual).
+        # Turn the balance check ON. For STEP 1 (the ordinary first step) keep the
+        # thresholds at Inf: this cold-started fixture's first-step CN allocation
+        # path carries a separate, pre-existing column-N residual (~0.086 gN) that is
+        # a first-step artifact unrelated to the product / gridcell wiring under test
+        # here (this test is about the transient year-boundary landuse step, not
+        # first-step allocation parity). We restore Fortran's REAL, FATAL thresholds
+        # just before STEP 2 (the year boundary) so the fatal C/N check actively
+        # guards the transient step itself.
         CLM.cn_balance_check_enabled!(true)
         bal.cerror = Inf; bal.nerror = Inf; bal.cwarning = Inf; bal.nwarning = Inf
 
@@ -155,6 +170,16 @@ include(joinpath(@__DIR__, "testdata.jl"))
             dtime=dtime, mon=6, day=21, year=2000, is_beg_curr_year=false,
             photosyns=inst.photosyns)
         @test pch.wtcol[natveg] ≈ wt_before
+
+        # Restore Fortran's REAL, FATAL C/N balance thresholds for the year-boundary
+        # step. With the wood/crop PRODUCT POOLS wired end-to-end (PR #292:
+        # cn_products_update! runs on the live cn_driver_no_leaching! path, advancing
+        # tot_woodprod_grc from the year-boundary product-gain fluxes — the sink the
+        # GRIDCELL check subtracts), both the column AND gridcell C/N balances close,
+        # so the fatal check must PASS inside the step below. Were products still
+        # unwired the driver would THROW here on the harvest/conversion residual.
+        bal.cerror = 1.0e-7; bal.nerror = 1.0e-3
+        bal.cwarning = 1.0e-8; bal.nwarning = 1.0e-7
 
         # Step 2: YEAR BOUNDARY — dynSubgrid_driver! fires, computing dwt fluxes.
         # Before the fixes this CRASHED (BoundsError in dyn_cnbal_col!); with the
@@ -186,10 +211,36 @@ include(joinpath(@__DIR__, "testdata.jl"))
         @test nf.dwt_conv_nflux_grc[1] > 0.0
         @test cf.dwt_conv_cflux_grc[1] > 0.0
 
+        # (4) The GRIDCELL C and N balances ALSO close to machine precision through
+        # the transient step — the product-pool advance is the sink that absorbs the
+        # year-boundary product-gain fluxes (without it the gridcell store would lose
+        # that mass and errcb_grc/errnb_grc would carry the harvest/conversion
+        # residual). These clear even the tighter cwarning (1e-8) / nwarning (1e-7);
+        # the fatal gridcell check (enabled above) already passed inside clm_drv!.
+        grc = bounds.begg:bounds.endg
+        errcb_grc = maximum(abs, bal.errcb_grc[grc])
+        errnb_grc = maximum(abs, bal.errnb_grc[grc])
+        @test errcb_grc < 1e-8      # << cerror (1e-7); here ~1e-13
+        @test errnb_grc < 1e-8      # << nerror (1e-3); here ~1e-16
+
+        # NON-VACUOUS proof: the wood PRODUCT POOL actually advanced this step — the
+        # transient PFT contraction fed deadstem/livestem C & N into prod10/prod100
+        # (partitioned by pprod10/pprod100). A gridcell balance that "closed" on a
+        # zero product gain would be trivially vacuous; assert real mass moved.
+        cprod = inst.bgc_vegetation.c_products_inst
+        nprod = inst.bgc_vegetation.n_products_inst
+        @test cprod.tot_woodprod_grc[1] > 1.0                          # ~60 gC moved into wood products
+        @test nprod.tot_woodprod_grc[1] > 0.0                          # N wood product gain (nonzero)
+        @test cprod.tot_woodprod_grc[1] ≈ cprod.prod10_grc[1] + cprod.prod100_grc[1]  # sum == pools
+
         println("  dyn_subgrid CN e2e: weights ", wt_before, " -> ", pch.wtcol[natveg])
         println("    errcb_col=", errcb_col, "  errnb_col=", errnb_col)
+        println("    errcb_grc=", errcb_grc, "  errnb_grc=", errnb_grc)
         println("    dwt_conv_nflux_grc*dt=", nf.dwt_conv_nflux_grc[1] * dtime,
                 "  dwt_conv_cflux_grc*dt=", cf.dwt_conv_cflux_grc[1] * dtime)
+        println("    tot_woodprod_grc: C=", cprod.tot_woodprod_grc[1],
+                " (prod10=", cprod.prod10_grc[1], " prod100=", cprod.prod100_grc[1], ")",
+                "  N=", nprod.tot_woodprod_grc[1])
     end
 
     CLM.cn_balance_check_enabled!(saved_enabled)
