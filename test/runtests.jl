@@ -106,6 +106,7 @@ using CLM
     include("test_dwt_matrix_input.jl")
     include("test_decomp_bgc.jl")
     include("test_decomp_mimics.jl")
+    include("test_mimics_wiring.jl")  # MIMICS live-path wiring (decomp_method==2) regression guard
     include("test_soil_biogeochem_decomp.jl")
     include("test_decomp_competition.jl")
     include("test_decomp_vertical_profile.jl")
