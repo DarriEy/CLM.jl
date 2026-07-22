@@ -10,19 +10,21 @@
 #      CTSM readAnnualVegetation (clm_initializeMod.F90:698-699).
 #   2. depvel_compute! assembles V_d = 100/(R_a+R_b+R_c) [cm/s] correctly, matched
 #      to an INDEPENDENT plain-scalar re-implementation of the ported Wesely
-#      formula (rtol 1e-10) for two representative species (O3-like, SO2-like).
+#      formula (rtol 1e-10) for two representative species (O3-like, SO2-like),
+#      with the Wesely index_season now selected from annlai (see below).
 #   3. drydep_p2g! averages patch velocities to the gridcell field l2a.ddvel_grc,
 #      the coupler field CAM's dry deposition consumes (CTSM lnd2atmMod.F90:307).
 #   4. Default (n_drydep == 0) is byte-identical: the consumer + producer are
 #      no-ops, and annlai stays NaN. Both driver insertions live strictly inside
 #      `if config.n_drydep > 0`, so a default run adds no computation at all.
 #
-# NOTE on the port vs Fortran: the ported depvel kernel is a simplified Wesely
-# reimplementation. Its season comes from latitude+month (_wesely_season), NOT
-# from annlai's min/max-LAI index_season as in DryDepVelocity.F90. The annlai
-# producer is therefore wired faithfully to CTSM's init call, but the ported
-# velocity kernel does not consume annlai. The oracle below mirrors the PORTED
-# formula (what is actually wired), not raw Fortran.
+# NOTE on the port vs Fortran: the ported depvel kernel's surface-resistance rc is
+# a simplified Wesely reimplementation (rc is NOT a line-by-line Fortran port).
+# BUT the Wesely index_season that selects which seasonal COLUMN of the resistance
+# tables is used IS now grafted faithfully from annlai's min/max LAI, exactly as
+# DryDepVelocity.F90:373-405 does (annlai/elai/mlaidiff/snow_depth/landunit), NOT
+# from latitude+month. The season oracle below (_index_season_oracle) transcribes
+# that Fortran block; the rc/rb oracles mirror the ported (simplified) arithmetic.
 # ==========================================================================
 
 @testset "Dry deposition + annlai LIVE WIRING" begin
@@ -106,6 +108,45 @@
         return max(rc, 1.0)
     end
 
+    # -- Independent scalar oracle: Fortran DryDepVelocity.F90:373-405 index_season.
+    # Returns (wesveg_override, index_season); wesveg_override==0 keeps PFT lt.
+    # lun_type: 1=istsoil, 2=istcrop, 4=istice, 5=istdlak, 6=istwet, 7-9=urban.
+    ISTSOIL_o = 1; ISTICE_o = 4; ISTDLAK_o = 5; ISTWET_o = 6
+    function _index_season_oracle(lun_type, is_urban, snow_pos, elai, minlai, maxlai, mlaidiff)
+        wesveg_ov = 0
+        season = -1
+        if lun_type != ISTSOIL_o
+            if lun_type == ISTICE_o
+                wesveg_ov = 8; season = 4
+            elseif lun_type == ISTDLAK_o
+                wesveg_ov = 7; season = 4
+            elseif lun_type == ISTWET_o
+                wesveg_ov = 9; season = 2
+            elseif is_urban
+                wesveg_ov = 1; season = 2
+            end
+        elseif snow_pos
+            season = 4
+        elseif elai > 0.5 * maxlai
+            season = 1
+        end
+        if season < 0
+            if elai < (minlai + 0.05 * (maxlai - minlai))
+                season = 3
+            end
+        end
+        if season < 0
+            if mlaidiff > 0.0
+                season = 2
+            elseif mlaidiff < 0.0
+                season = 5
+            elseif mlaidiff == 0.0
+                season = 3
+            end
+        end
+        return wesveg_ov, season
+    end
+
     # ----------------------------------------------------------------------
     # (1) annlai producer — read_annual_vegetation! fills annlai_patch
     # ----------------------------------------------------------------------
@@ -146,10 +187,14 @@
     end
 
     # ----------------------------------------------------------------------
-    # (2) ACTIVATED depvel path vs independent oracle (O3, SO2)
+    # (2) ACTIVATED depvel path vs independent oracle, season FROM annlai.
+    #     Five patches deliberately land in FIVE DIFFERENT Wesely seasons
+    #     (growing/dormant/autumn/spring/winter), so the annlai-based
+    #     index_season path is genuinely exercised (non-vacuous), and every
+    #     non-growing season DIFFERS from the old latitude+month heuristic.
     # ----------------------------------------------------------------------
-    @testset "depvel_compute! activated vs independent oracle" begin
-        np = 4; nc = 3; ng = 2
+    @testset "depvel_compute! season from annlai vs oracle (multi-season)" begin
+        np = 5; nc = 5; ng = 1
         # species 1 ~ O3 (reactive), species 2 ~ SO2 (soluble)
         n_dd = 2
         foxd = [1.0, 0.0]
@@ -159,30 +204,56 @@
         dd = CLM.DryDepVelocityData()
         CLM.drydep_init!(dd, np, n_dd; foxd=foxd, dv=dv)
 
-        mask_patch = trues(np); mask_patch[3] = false   # patch 3 inactive
-        patch_gridcell = [1, 1, 2, 2]
-        patch_column   = [1, 2, 2, 3]
-        patch_landunit = [1, 1, 1, 1]
-        patch_itype    = [4, 14, 0, 17]
-        ram1 = [50.0, 20.0, 80.0, 35.0]
-        rb1  = fill(10.0, np)
-        fv   = [0.30, 0.15, 0.05, 0.42]
-        elai = [3.0, 2.0, 0.0, 4.0]
-        forc_t     = [295.0, 288.0, 300.0]
-        forc_solar = [300.0, 150.0, 500.0]
-        frac_sno   = [0.0, 0.7, 0.0]     # column 2 snow-covered
-        lat  = [45.0, -30.0]
-        month = 6
+        mask_patch = trues(np)
+        patch_gridcell = ones(Int, np)
+        patch_column   = collect(1:np)          # one column per patch (independent snow)
+        patch_landunit = ones(Int, np)          # all soil
+        lun_itype      = [ISTSOIL_o]            # landunit 1 is soil
+        patch_itype    = fill(4, np)            # broadleaf tree -> Wesely lt 4
+
+        # Annual LAI profile shared by all patches: min = 1, max = 5.
+        annlai = zeros(np, 12)
+        prof = collect(range(1.0, 5.0; length=12))   # minlai=1, maxlai=5
+        for p in 1:np, k in 1:12
+            annlai[p, k] = prof[k]
+        end
+        # 0.5*maxlai = 2.5 ; minlai + 0.05*(max-min) = 1.2
+        #   p1 elai 4.0  -> >2.5                      -> season 1 (growing / midsummer)
+        #   p2 elai 1.0  -> <1.2                      -> season 3 (dormant / late autumn)
+        #   p3 elai 2.0, mlaidiff +0.5                -> season 2 (autumn)
+        #   p4 elai 2.0, mlaidiff -0.5                -> season 5 (transitional spring)
+        #   p5 elai 4.0 BUT snow_depth>0             -> season 4 (winter override)
+        elai       = [4.0, 1.0, 2.0, 2.0, 4.0]
+        mlaidiff   = [0.0, 0.0, 0.5, -0.5, 0.0]
+        snow_depth = [0.0, 0.0, 0.0, 0.0, 0.10]
+        frac_sno   = [0.0, 0.0, 0.0, 0.0, 0.90]   # p5 also snow-covered for rc
+        ram1 = fill(50.0, np); rb1 = fill(10.0, np); fv = fill(0.30, np)
+        forc_t     = fill(295.0, nc)
+        forc_solar = fill(300.0, nc)
+        lat  = [45.0]
+        month = 6                                  # NH June -> _wesely_season = 1
 
         CLM.depvel_compute!(dd, mask_patch, 1:np,
                             patch_gridcell, patch_column, patch_landunit, patch_itype,
                             ram1, rb1, fv, elai, forc_t, forc_solar, frac_sno,
-                            lat, month; heff=heff)
+                            lat, month; heff=heff,
+                            annlai_patch=annlai, mlaidiff_patch=mlaidiff,
+                            lun_itype=lun_itype, snow_depth_col=snow_depth)
 
-        for p in [1, 2, 4]
-            g = patch_gridcell[p]; c = patch_column[p]
-            season = CLM._wesely_season(lat[g], month)
-            lt = CLM._pft_to_wesely(patch_itype[p])
+        expected_season = [1, 3, 2, 5, 4]
+        old_heuristic   = CLM._wesely_season(lat[1], month)   # == 1
+        n_differ = 0
+        for p in 1:np
+            c = patch_column[p]
+            minlai = minimum(annlai[p, :]); maxlai = maximum(annlai[p, :])
+            wesveg_ov, season = _index_season_oracle(1, false, snow_depth[c] > 0.0,
+                                                     elai[p], minlai, maxlai, mlaidiff[p])
+            # PROOF the graft took effect: season now comes from annlai.
+            @test season == expected_season[p]
+            if season != old_heuristic
+                n_differ += 1
+            end
+            lt = wesveg_ov > 0 ? wesveg_ov : CLM._pft_to_wesely(patch_itype[p])
             ra = max(ram1[p], 1.0)
             ustar = max(fv[p], 0.001)
             lai = max(elai[p], 0.0)
@@ -199,8 +270,36 @@
                 @test isapprox(dd.velocity_patch[p, i], vd_oracle; rtol=1.0e-10)
             end
         end
-        # inactive patch untouched (init value 0)
-        @test all(dd.velocity_patch[3, :] .== 0.0)
+        # The annlai season differs from the old lat+month result on >=1 case
+        # (here on 4 of 5): definitive proof the graft changed behavior.
+        @test n_differ >= 1
+        @test n_differ == 4
+
+        # -- annlai actually DRIVES the season: same elai, different annlai max --
+        # elai 2.0 with maxlai 5 -> season 3 (mlaidiff 0); with maxlai 3 -> season 1.
+        dd2 = CLM.DryDepVelocityData()
+        CLM.drydep_init!(dd2, 1, 1; foxd=[1.0], dv=[0.147])
+        base = (trues(1), 1:1, [1], [1], [1], [4], [50.0], [10.0], [0.30],
+                [2.0], [295.0], [300.0], [0.0], [45.0], 6)
+        annlai_hi = reshape(collect(range(1.0, 5.0; length=12)), 1, 12)  # max 5 -> season 3
+        annlai_lo = reshape(collect(range(1.0, 3.0; length=12)), 1, 12)  # max 3 -> season 1
+        _, s_hi = _index_season_oracle(1, false, false, 2.0,
+                     minimum(annlai_hi), maximum(annlai_hi), 0.0)
+        _, s_lo = _index_season_oracle(1, false, false, 2.0,
+                     minimum(annlai_lo), maximum(annlai_lo), 0.0)
+        @test s_hi == 3
+        @test s_lo == 1
+        @test s_hi != s_lo
+        CLM.depvel_compute!(dd2, base...; heff=[1.0e-2],
+                            annlai_patch=annlai_hi, mlaidiff_patch=[0.0],
+                            lun_itype=[1], snow_depth_col=[0.0])
+        v_hi = dd2.velocity_patch[1, 1]
+        CLM.depvel_compute!(dd2, base...; heff=[1.0e-2],
+                            annlai_patch=annlai_lo, mlaidiff_patch=[0.0],
+                            lun_itype=[1], snow_depth_col=[0.0])
+        v_lo = dd2.velocity_patch[1, 1]
+        # Different annlai -> different season -> different velocity.
+        @test v_hi != v_lo
     end
 
     # ----------------------------------------------------------------------

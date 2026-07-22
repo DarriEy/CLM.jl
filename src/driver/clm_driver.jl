@@ -2431,7 +2431,15 @@ function clm_drv_core!(config::CLMDriverConfig,
                         fv.ram1_patch, fv.rb1_patch, fv.fv_patch,
                         cs.elai_patch,
                         a2l.forc_t_downscaled_col, a2l.forc_solar_downscaled_col,
-                        wdb.frac_sno_col, grc.lat, mon)
+                        wdb.frac_sno_col, grc.lat, mon;
+                        # Fortran DryDepVelocity.F90:373-405 picks the Wesely
+                        # index_season from the patch's annual min/max LAI (annlai),
+                        # current elai, month-to-month LAI difference (mlaidiff),
+                        # snow depth, and landunit type — not latitude+month.
+                        annlai_patch=cs.annlai_patch,
+                        mlaidiff_patch=cs.mlaidiff_patch,
+                        lun_itype=lun.itype,
+                        snow_depth_col=wdb.snow_depth_col)
 
         # Patch -> gridcell average of the deposition velocities for the coupler.
         # Faithful to CTSM lnd2atmMod.F90:307-311 (the n_drydep>0 p2g into
