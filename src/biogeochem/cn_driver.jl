@@ -200,6 +200,10 @@ function cn_driver_no_leaching!(
         cascade_con::Union{DecompCascadeConData, Nothing} = nothing,
         decomp_bgc_state::Union{DecompBGCState, Nothing} = nothing,
         decomp_bgc_params::Union{DecompBGCParams, Nothing} = nothing,
+        # MIMICS decomposition state/params. Consumed by decomp_rates_mimics! only
+        # when config.decomp_method == MIMICS_DECOMP; nothing keeps the CENTURY path.
+        mimics_state::Union{DecompMIMICSState, Nothing} = nothing,
+        mimics_params::Union{DecompMIMICSParams, Nothing} = nothing,
         cn_shared_params::Union{CNSharedParamsData, Nothing} = nothing,
         decomp_params::Union{DecompParams, Nothing} = nothing,
         competition_state::Union{SoilBGCCompetitionState, Nothing} = nothing,
@@ -608,24 +612,57 @@ function cn_driver_no_leaching!(
         fill!(similar(soilbgc_cs.decomp_cpools_vr_col, _FT, nc, ndecomp_pools * nlevdecomp), zero(_FT)) :
         nothing
 
+    # MIMICS is active only when the config selects it AND the MIMICS state/params
+    # were stood up (init_decompcascade_mimics!). Otherwise the CENTURY path runs,
+    # byte-identical to the historical default. i_cop_mic/i_oli_mic (the two
+    # microbial pools) drive the messy-eating/DIN N branches in the potential +
+    # decomp kernels; they are only read when _use_mimics.
+    _use_mimics = (config.decomp_method == MIMICS_DECOMP) &&
+                  (mimics_state !== nothing) && (mimics_params !== nothing)
+    _i_cop_mic = _use_mimics ? mimics_state.i_cop_mic : 0
+    _i_oli_mic = _use_mimics ? mimics_state.i_oli_mic : 0
+
     if _has_decomp
+        # Materialize the soil-layer slice as a CONTIGUOUS array (not a @view) so it
+        # is a valid device kernel arg; the empty fallback is device-resident.
+        _col_dz = (col !== nothing ? col.dz[:, (varpar.nlevsno+1):end] :
+                   similar(soilbgc_cs.decomp_cpools_vr_col, _FT, length(bounds_col), 0))
+
         # 1. Decomposition rate constants (T/moisture-dependent)
-        decomp_rate_constants_bgc!(soilbgc_cf,
-            decomp_bgc_state, decomp_bgc_params, cn_shared_params, cascade_con;
-            mask_bgc_soilc=mask_bgc_soilc,
-            bounds=bounds_col,
-            nlevdecomp=nlevdecomp,
-            t_soisno=t_soisno,
-            soilpsi=soilpsi,
-            days_per_year=365.0,
-            dt=dt,
-            zsoi_vals=zsoi_vals,
-            # Materialize the soil-layer slice as a CONTIGUOUS array (not a @view)
-            # so it is a valid device kernel arg; the empty fallback is device-resident
-            # (similar()) rather than a host Matrix{Float64} (the single-level decomp
-            # path, nlevdecomp==1, indexes col_dz on the device).
-            col_dz=(col !== nothing ? col.dz[:, (varpar.nlevsno+1):end] :
-                    similar(soilbgc_cs.decomp_cpools_vr_col, _FT, length(bounds_col), 0)))
+        if _use_mimics
+            # MIMICS microbial-explicit rates (SoilBiogeochemDecompCascadeMIMICSMod
+            # decomp_rates_mimics). Writes decomp_k/rf/pathfrac/w_scalar/o_scalar/cn
+            # into soilbgc_cf, consumed by the shared potential + decomp machinery.
+            decomp_rates_mimics!(soilbgc_cf,
+                mimics_state, mimics_params, cn_shared_params, cascade_con;
+                mask_bgc_soilc=mask_bgc_soilc,
+                bounds=bounds_col,
+                nlevdecomp=nlevdecomp,
+                t_soisno=t_soisno,
+                soilpsi=soilpsi,
+                decomp_cpools_vr=soilbgc_cs.decomp_cpools_vr_col,
+                col_dz=_col_dz,
+                ligninNratioAvg=soilbgc_cf.litr_lig_c_to_n_col,
+                annsum_npp_col=cnveg_cf.annsum_npp_col,
+                days_per_year=365.0,
+                dt=dt,
+                spinup_state=0,
+                use_lch4=config.use_lch4,
+                anoxia=config.use_lch4,
+                use_fates=config.use_fates)
+        else
+            decomp_rate_constants_bgc!(soilbgc_cf,
+                decomp_bgc_state, decomp_bgc_params, cn_shared_params, cascade_con;
+                mask_bgc_soilc=mask_bgc_soilc,
+                bounds=bounds_col,
+                nlevdecomp=nlevdecomp,
+                t_soisno=t_soisno,
+                soilpsi=soilpsi,
+                days_per_year=365.0,
+                dt=dt,
+                zsoi_vals=zsoi_vals,
+                col_dz=_col_dz)
+        end
 
         # 2. Potential decomposition and mineral N flux
         soil_bgc_potential!(soilbgc_cf, soilbgc_cs, soilbgc_nf, soilbgc_ns,
@@ -639,7 +676,10 @@ function cn_driver_no_leaching!(
             p_decomp_cpool_loss=p_decomp_cpool_loss,
             p_decomp_cn_gain=p_decomp_cn_gain,
             pmnf_decomp_cascade=pmnf_decomp_cascade,
-            p_decomp_npool_to_din=p_decomp_npool_to_din)
+            p_decomp_npool_to_din=p_decomp_npool_to_din,
+            use_mimics=_use_mimics,
+            i_cop_mic=_i_cop_mic,
+            i_oli_mic=_i_oli_mic)
 
         # 2b. Nitrification / denitrification (SoilBiogeochemNitrifDenitrif) — WIRED.
         # Produces f_nit/f_denit/pot_f_nit (+ NO3/NH4 immob/uptake demand) consumed
@@ -787,6 +827,7 @@ function cn_driver_no_leaching!(
                 p_decomp_npool_to_din=p_decomp_npool_to_din,
                 dzsoi_decomp=dzsoi_decomp,
                 use_nitrif_denitrif=config.use_nitrif_denitrif,
+                use_mimics=_use_mimics,
                 use_soil_matrixcn=config.use_soil_matrixcn, Ksoil_DM=Ksoil_mat)
         end
     end
