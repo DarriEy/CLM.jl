@@ -33,6 +33,7 @@ Base.@kwdef mutable struct WaterBalanceData{FT<:Real,
     ice2_grc                             ::V = Float64[]  # grc post land cover change total ice content
     begwb_grc                            ::V = Float64[]  # grc water mass beginning of time step
     endwb_grc                            ::V = Float64[]  # grc water mass end of time step
+    errh2o_grc                           ::V = Float64[]  # grc water conservation error (mm H2O) [diagnostic]
 end
 
 WaterBalanceData{FT}(; kwargs...) where {FT<:Real} =
@@ -69,6 +70,7 @@ function waterbalance_init!(wb::WaterBalanceData{FT}, nc::Int, np::Int, ng::Int)
     wb.ice2_grc                          = fill(FT(NaN), ng)
     wb.begwb_grc                         = fill(FT(NaN), ng)
     wb.endwb_grc                         = fill(FT(NaN), ng)
+    wb.errh2o_grc                        = fill(FT(NaN), ng)
 
     # --- InitCold ---
     wb.wa_reset_nonconservation_gain_col .= 0.0
@@ -102,6 +104,7 @@ function waterbalance_clean!(wb::WaterBalanceData{FT}) where {FT}
     wb.ice2_grc                          = FT[]
     wb.begwb_grc                         = FT[]
     wb.endwb_grc                         = FT[]
+    wb.errh2o_grc                        = FT[]
 
     return nothing
 end

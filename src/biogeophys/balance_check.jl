@@ -1179,6 +1179,12 @@ function balance_check!(
             first(bounds_g), last(bounds_g); ndrange = length(errh2o_grc))
     end
 
+    # Persist the gridcell water-balance error for diagnostics/tests (does not
+    # alter the check itself). Only when the destination is allocated to match.
+    if !isempty(waterbalance.errh2o_grc) && length(waterbalance.errh2o_grc) == length(errh2o_grc)
+        copyto!(waterbalance.errh2o_grc, errh2o_grc)
+    end
+
     # BUG(rgk, 2021-04-13, ESCOMP/CTSM#1314) Temporarily bypassing gridcell-level check
     # with use_fates_planthydro. Host-only warn/error scan.
     if errh2o_grc isa Array

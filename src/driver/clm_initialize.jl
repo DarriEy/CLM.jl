@@ -124,6 +124,10 @@ function clm_initialize!(;
     all_active::Bool = false,
     lat::Real = NaN,
     lon::Real = NaN,
+    # Gridcell area in km² (CTSM sources it from the ESMF mesh). Default 1.0 keeps
+    # the historical single-point behaviour; supply the real area to match CTSM's
+    # absolute hillslope stream_water_volume. NaN ⇒ 1.0.
+    gridcell_area_km2::Real = 1.0,
     soil_layerstruct::String = "20SL_8.5m",
     # CTSM's namelist default is h2osfcflag = 1 (SoilHydrologyType.F90:
     # `h2osfcflag = 1` in clm_soilhydrology_inparm), i.e. the surface-water
@@ -157,6 +161,21 @@ function clm_initialize!(;
     # table + compound descriptors live on CLMDriverConfig.megan (built by the
     # caller via CLMDriverConfig(use_voc=true, megan_specifier=…, megan_factors_file=…)).
     use_voc::Bool = false,
+    # Hillslope hydrology (CTSM use_hillslope / use_hillslope_routing). Default
+    # `false` ⇒ the multi-column catena builder and the stream-routing driver
+    # hooks are all no-ops and the run is byte-identical. When `use_hillslope` is
+    # true, `hillslope_file` (a CTSM InitHillslope-conformant NetCDF carrying
+    # nhillcolumns/column_index/downhill_column_index/hillslope_* and, under
+    # routing, hillslope_stream_*) is read into the SurfaceInputData hillslope
+    # fields BEFORE the subgrid is counted, so each ISTSOIL landunit is built as a
+    # catena of `nhillcolumns` connected soil columns. `use_hillslope_routing`
+    # additionally reads the stream-channel geometry and turns on the per-landunit
+    # stream discharge + the streamflow water-balance term. An empty
+    # `hillslope_file` with `use_hillslope=true` falls back to reading the
+    # hillslope variables from `fsurdat` itself (CTSM's single-file layout).
+    use_hillslope::Bool = false,
+    use_hillslope_routing::Bool = false,
+    hillslope_file::String = "",
     int_snow_max::Real = 2000.0)
 
     # ---- Step 1: Set control flags ----
@@ -184,13 +203,18 @@ function clm_initialize!(;
     # Resolve the conditional default (see the keyword's comment): FATES runs default to
     # .false. exactly as CTSM's namelist_defaults does; everything else keeps CLM5's .true.
     varctl.use_bedrock = use_bedrock === nothing ? !use_fates : use_bedrock
+    # Hillslope hydrology flags (CTSM use_hillslope / use_hillslope_routing).
+    # Setting them here — before the subgrid counting/build in Steps 6/9/10b —
+    # lets count_subgrid_elements and initGridCells! build the multi-column catena.
+    # Both default `false`, so the default run keeps varctl unchanged (byte-identical).
+    varctl.use_hillslope = use_hillslope
+    varctl.use_hillslope_routing = use_hillslope_routing
     # CTSM init-consistency guard (HillslopeHydrologyMod.check_aquifer_layer, called
     # from clm_instInit): hillslope hydrology replaces the unconfined-aquifer lower
     # boundary with an explicit lateral catena, so use_hillslope and use_aquifer_layer
-    # are mutually exclusive. varctl.use_hillslope is false on every current init path
-    # (no clm_initialize! keyword sets it), so this is a no-op for the default run and
-    # keeps it byte-identical; it fatals early if a future caller enables both. See
-    # docs/HILLSLOPE_WIRING_STATUS.md.
+    # are mutually exclusive. Default use_hillslope=false ⇒ no-op & byte-identical;
+    # it fatals early if a caller enables hillslope together with the aquifer layer.
+    # See docs/HILLSLOPE_WIRING_STATUS.md.
     check_aquifer_layer!(varctl.use_hillslope, use_aquifer_layer)
     varctl.all_active = all_active
     varctl.soil_layerstruct_predefined = soil_layerstruct
@@ -240,6 +264,22 @@ function clm_initialize!(;
         ng = max(1, ncopies)
         surfrd_get_data!(surf, 1, 1, fsurdat)
         _tile_surface_data!(surf, ng)
+    end
+
+    # ---- Step 5b: Hillslope geometry read (CTSM InitHillslope surfdata) ----
+    # When use_hillslope, populate surf's hillslope fields (nhillcolumns,
+    # column/downhill indices, per-column geometry, stream_* under routing) so the
+    # subgrid counting in Step 6 and the catena builder in Steps 9/10b see the
+    # catena. Prefer a dedicated `hillslope_file` (CTSM ships hillslope geometry on
+    # its own fsurdat variant / a single-point file); fall back to `fsurdat` when no
+    # separate file is given (CTSM's single-file layout). surfrd_hillslope! is a
+    # no-op if the file lacks the nhillcolumns variable, and the whole block is
+    # skipped for the default (use_hillslope=false) run ⇒ byte-identical.
+    if varctl.use_hillslope
+        _hillsrc = isempty(hillslope_file) ? fsurdat : hillslope_file
+        NCDataset(_hillsrc, "r") do ds_hill
+            surfrd_hillslope!(surf, ds_hill, ng)
+        end
     end
 
     # ---- Step 6: Count subgrid elements ----
@@ -309,9 +349,16 @@ function clm_initialize!(;
     actual_lat = isnan(lat) ? _read_latlon(fsurdat, "LATIXY", 0.0) : lat
     actual_lon = isnan(lon) ? _read_latlon(fsurdat, "LONGXY", 0.0) : lon
 
+    # Gridcell area (km²). CTSM sources this from the ESMF mesh; the single-point
+    # port has no mesh, so it defaults to 1.0 (unchanged) unless the caller passes
+    # the real area. Only the ABSOLUTE hillslope stream_water_volume (m³) scales
+    # with it — the per-unit-area column physics (H2OSOI/ZWT/T) is area-invariant,
+    # and the water balance uses grc.area consistently, so a non-default area stays
+    # conservative. Kept 1.0 by default ⇒ byte-identical.
+    actual_area = isnan(gridcell_area_km2) ? 1.0 : Float64(gridcell_area_km2)
     initGridCells!(bounds, surf,
                    inst.gridcell, inst.landunit, inst.column, inst.patch;
-                   lat=actual_lat, lon=actual_lon)
+                   lat=actual_lat, lon=actual_lon, area=actual_area)
 
     # ---- CNDV: initialize fpcgrid from the assigned patch weights ----
     # Mirrors CNVegetationFacade::Init2 → dynCNDV_init (post-subgrid-weight init);
