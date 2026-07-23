@@ -97,6 +97,12 @@ mutable struct CLMDriverConfig{M <: AbstractBGCMode}
     irrigate::Bool
     use_noio::Bool
     use_aquifer_layer::Bool
+    # Hillslope stream routing (CTSM use_hillslope_routing). When true, the
+    # `use_aquifer_layer=false` drainage path routes hillslope-column drainage/
+    # surface runoff into a per-landunit stream channel (HillslopeStreamOutflow +
+    # HillslopeUpdateStreamWater) and the balance check accounts the streamflow as
+    # the gridcell water sink. Default false ⇒ byte-identical (no stream routing).
+    use_hillslope_routing::Bool
     use_soil_moisture_streams::Bool
     use_lai_streams::Bool
     n_drydep::Int
@@ -199,6 +205,8 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
                           irrigate::Bool=false, use_noio::Bool=false,
                           # CTSM-derived default: .false. for clm5_0 (see clm_initialize!).
                           use_aquifer_layer::Bool=false,
+                          # Hillslope stream routing. Default false ⇒ byte-identical.
+                          use_hillslope_routing::Bool=false,
                           use_soil_moisture_streams::Bool=false, use_lai_streams::Bool=false,
                           n_drydep::Int=0,
                           # CTSM-conditional default: .false. under FATES, .true.
@@ -275,7 +283,7 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
     # Same conditional for PHS: control.jl:102 endruns on PHS+FATES, so the CLM5
     # .true. default applies to the non-FATES configuration only.
     _use_hydrstress = use_hydrstress === nothing ? !use_fates : use_hydrstress
-    CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer,
+    CLMDriverConfig(mode, irrigate, use_noio, use_aquifer_layer, use_hillslope_routing,
                     use_soil_moisture_streams, use_lai_streams, n_drydep, _use_hydrstress, _use_luna,
                     use_voc, use_ozone, megan, nothing, dust, dyn_subgrid, use_threaded_clumps)
 end
@@ -991,7 +999,8 @@ function clm_drv_core!(config::CLMDriverConfig,
     # Begin water balance — WIRED
     water_gridcell_balance!(inst.water, ls, col, lun, grc,
                             filt.nolakec, filt.lakec,
-                            bc_col, bc_lun, bc_grc, "begwb")
+                            bc_col, bc_lun, bc_grc, "begwb";
+                            use_hillslope_routing=config.use_hillslope_routing)
     # Canopy water belongs in begwb_grc, evaluated HERE with the BEGIN-of-step
     # canopy state (Fortran ComputeWaterMassNonLake p2c's canopy into the column
     # total that WaterGridcellBalance then c2g's; the Julia storage fn stubs it to
@@ -2470,7 +2479,9 @@ function clm_drv_core!(config::CLMDriverConfig,
                         dtime,
                         varpar.nlevsno, varpar.nlevsoi,
                         varpar.nlevgrnd, varpar.nlevurb;
-                        use_aquifer_layer=config.use_aquifer_layer)
+                        use_aquifer_layer=config.use_aquifer_layer,
+                        use_hillslope_routing=config.use_hillslope_routing,
+                        grc=grc, bounds_l=bc_lun)
 
     # Bedrock clipping (post-drainage): prevent ZWT from exceeding bedrock
     clamp_zwt_to_bedrock!(sh.zwt_col, filt.hydrologyc, col.nbedrock, col.zi, varpar.nlevsno)
@@ -2900,7 +2911,8 @@ function clm_drv_core!(config::CLMDriverConfig,
     # End water balance — WIRED
     water_gridcell_balance!(inst.water, ls, col, lun, grc,
                             filt.nolakec, filt.lakec,
-                            bc_col, bc_lun, bc_grc, "endwb")
+                            bc_col, bc_lun, bc_grc, "endwb";
+                            use_hillslope_routing=config.use_hillslope_routing)
     # Column-level end water balance: the port never set endwb_col (it stayed NaN,
     # so the errh2o_col check silently passed on NaN). Mirror begin (non-lake +
     # lake stores) and add p2c canopy water, consistent with begwb above.
@@ -2942,11 +2954,34 @@ function clm_drv_core!(config::CLMDriverConfig,
     # GROUND area. With unity the urban gridcell could not close even when every
     # column closed to 1e-13. Identical to c2g_unity! with no urban landunit.
     c2g_urbanf!(_g_evap_tot,    wfb.wf.qflx_evap_tot_col,      col, lun, bc_col, bc_grc)
-    c2g_urbanf!(_g_surf,        wfb.wf.qflx_surf_col,          col, lun, bc_col, bc_grc)
     c2g_urbanf!(_g_qrgwl,       wfb.wf.qflx_qrgwl_col,         col, lun, bc_col, bc_grc)
-    c2g_urbanf!(_g_drain,       wfb.wf.qflx_drain_col,         col, lun, bc_col, bc_grc)
-    c2g_urbanf!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col, lun, bc_col, bc_grc)
     c2g_urbanf!(_g_sfc_irrig,   wfb.wf.qflx_sfc_irrig_col,     col, lun, bc_col, bc_grc)
+    # Surface runoff + (perched) drainage → gridcell rof. Under hillslope routing
+    # these three fluxes are sent to the stream channel (accounted in
+    # qflx_streamflow_grc) rather than directly to rof, so the hillslope columns
+    # must be EXCLUDED from the gridcell average to avoid double-counting — exactly
+    # CTSM lnd2atmMod.F90:356-379. Masked column copies (hillslope cols zeroed) are
+    # aggregated; on the default (non-routing) path the mask is all-false ⇒ the
+    # copies equal the originals ⇒ byte-identical.
+    _streamflow_grc = _zlike(length(grc.lat))
+    if config.use_hillslope_routing
+        _nothill = (!).(col.is_hillslope_column)
+        _surf_to_rof  = wfb.wf.qflx_surf_col          .* _nothill
+        _drain_to_rof = wfb.wf.qflx_drain_col         .* _nothill
+        _perch_to_rof = wfb.wf.qflx_drain_perched_col .* _nothill
+        c2g_urbanf!(_g_surf,        _surf_to_rof,  col, lun, bc_col, bc_grc)
+        c2g_urbanf!(_g_drain,       _drain_to_rof, col, lun, bc_col, bc_grc)
+        c2g_urbanf!(_g_drain_perch, _perch_to_rof, col, lun, bc_col, bc_grc)
+        # qflx_streamflow_grc[g] = Σ_l volumetric_streamflow_lun[l] (m3/s) over the
+        # gridcell's active landunits, converted to mm/s via 1e3/(area_km2*1e6).
+        # Volume/time is summed (NOT weighted) over landunits (lnd2atmMod.F90:345-354).
+        hillslope_streamflow_to_grc!(_streamflow_grc, wfb.wf.volumetric_streamflow_lun,
+                                     lun, grc, bc_lun, bc_grc)
+    else
+        c2g_urbanf!(_g_surf,        wfb.wf.qflx_surf_col,          col, lun, bc_col, bc_grc)
+        c2g_urbanf!(_g_drain,       wfb.wf.qflx_drain_col,         col, lun, bc_col, bc_grc)
+        c2g_urbanf!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col, lun, bc_col, bc_grc)
+    end
     # qflx_rofice_grc = c2g(qflx_ice_runoff_col) (lnd2atmMod.F90:459). The dynbal
     # correction Fortran subtracts there is zero in the port (no dynamic landunits
     # coupling), so the plain aggregate is the whole term.
@@ -2980,7 +3015,8 @@ function clm_drv_core!(config::CLMDriverConfig,
                    qflx_drain_perched_grc=_g_drain_perch,
                    qflx_ice_runoff_grc=_g_ice_runoff,
                    qflx_sfc_irrig_grc=_g_sfc_irrig,
-                   qflx_streamflow_grc=_zlike(length(grc.lat)),
+                   qflx_streamflow_grc=_streamflow_grc,
+                   use_hillslope_routing=config.use_hillslope_routing,
                    # FATES trips the (now live) check on its own real coupling gaps
                    # — fsa/fsr unset on FATES patches, ~142 W/m2 solar residual. The
                    # errors are still computed and warned; only the abort is held

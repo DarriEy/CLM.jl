@@ -231,7 +231,13 @@ function hydrology_drainage!(
     nlevurb::Int;
     use_vichydro::Bool = false,
     use_aquifer_layer::Bool = true,
-    use_hillslope_routing::Bool = false
+    use_hillslope_routing::Bool = false,
+    # Hillslope stream routing needs the gridcell geometry (grc.area) + the
+    # landunit bounds to run HillslopeStreamOutflow/UpdateStreamWater. Left
+    # `nothing`/empty on the default (non-hillslope) path ⇒ the routing block is
+    # skipped and this is byte-identical.
+    grc::Union{GridcellData,Nothing} = nothing,
+    bounds_l::UnitRange{Int} = 1:0
 )
     wf = waterfluxbulk.wf
 
@@ -290,11 +296,33 @@ function hydrology_drainage!(
             nlevsoi, dtime;
             use_hillslope_routing=use_hillslope_routing)
 
-        # Hillslope routing (stub: not yet ported)
-        # if use_hillslope_routing
-        #     hillslope_stream_outflow!(...)
-        #     hillslope_update_stream_water!(...)
-        # end
+        # Hillslope stream routing (CTSM HydrologyDrainageMod.F90:150-158). The
+        # lateral-flow calls above already routed water column→column down the
+        # catena and set qflx_drain/qflx_drain_perched/qflx_surf on each hillslope
+        # column. Now (a) discharge the stream channel via Manning (from the
+        # CURRENT stream volume) and (b) accumulate this step's column drainage/
+        # surface runoff into the channel and subtract the discharge. Order matches
+        # CTSM: StreamOutflow before UpdateStreamWater. Gated on
+        # use_hillslope_routing AND the grid geometry being supplied; a no-op
+        # (byte-identical) otherwise.
+        if use_hillslope_routing && grc !== nothing && !isempty(bounds_l)
+            ws = waterstatebulk.ws
+            hillslope_stream_outflow!(
+                ws.stream_water_volume_lun,
+                wf.volumetric_streamflow_lun,
+                lun, bounds_l, dtime;
+                streamflow_method=STREAMFLOW_MANNING)
+
+            hillslope_update_stream_water!(
+                ws.stream_water_volume_lun,
+                wf.volumetric_streamflow_lun,
+                waterdiagbulk.stream_water_depth_lun,
+                wf.qflx_drain_col,
+                wf.qflx_drain_perched_col,
+                wf.qflx_surf_col,
+                col, lun, grc,
+                bounds_l, dtime)
+        end
     end
 
     # --- Update volumetric soil water ---

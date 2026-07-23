@@ -121,6 +121,17 @@ function clm_run!(;
     # BASEFLOW_SCALAR and docs/DRIVER_DEFAULTS_AUDIT.md "M2 CLOSED".
     baseflow_scalar::Real = 0.001,
     int_snow_max::Real = 2000.0,
+    # Hillslope hydrology. Default off ⇒ byte-identical. `use_hillslope` builds the
+    # multi-column catena from `hillslope_file` (a CTSM InitHillslope-conformant
+    # NetCDF; falls back to reading hillslope vars from `fsurdat` when empty).
+    # `use_hillslope_routing` additionally runs the per-landunit stream discharge +
+    # the streamflow water-balance term. See docs/HILLSLOPE_WIRING_STATUS.md.
+    use_hillslope::Bool = false,
+    use_hillslope_routing::Bool = false,
+    hillslope_file::String = "",
+    # Gridcell area (km²). Default 1.0 (byte-identical); pass the real mesh area to
+    # match CTSM's absolute hillslope stream_water_volume.
+    gridcell_area_km2::Real = 1.0,
     interp_forcing::Bool = false,
     forcing_phase_shift_s::Int = 0,
     overrides::Union{CalibrationOverrides, Nothing} = nothing,
@@ -139,6 +150,10 @@ function clm_run!(;
         use_luna=use_luna,
         use_hydrstress=use_hydrstress,
         h2osfcflag=h2osfcflag,
+        use_hillslope=use_hillslope,
+        use_hillslope_routing=use_hillslope_routing,
+        hillslope_file=hillslope_file,
+        gridcell_area_km2=gridcell_area_km2,
         fsnowoptics=fsnowoptics, fsnowaging=fsnowaging,
         int_snow_max=int_snow_max)
 
@@ -155,6 +170,7 @@ function clm_run!(;
     inst.photosyns.light_inhibit = true
 
     config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer,
+                             use_hillslope_routing=use_hillslope_routing,
                              use_luna=use_luna, use_hydrstress=use_hydrstress)
 
     # Configure atm2lnd downscaling to match Fortran lnd_in defaults

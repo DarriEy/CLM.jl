@@ -81,6 +81,10 @@ using CLM
     include("test_lake_hydrology.jl")
     include("test_hillslope_hydrology.jl")
     include("test_hillslope_e2e.jl")
+    # NOTE: test_hillslope_driver_e2e.jl runs a full clm_run! (populates the global
+    # pftcon / sat_excess_runoff_params via readParameters!), so it lives in the
+    # clm_initialize!-using integration block below (after test_clm_run.jl), NOT
+    # here in the fresh-global unit block — see the note at test_driver_reverse.jl.
     include("test_photosynthesis.jl")
     include("test_photosynthesis_ad_pft_params.jl")
     include("test_canopy_fluxes.jl")
@@ -212,6 +216,10 @@ using CLM
     include("test_backend.jl")  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)
     include("test_validation_harness.jl")  # validation-matrix schema (runner exercised locally vs domain data)
     include("test_clm_run.jl")
+    # Full clm_run! multi-column hillslope timestep (see the note at its unit-block
+    # sibling test_hillslope_e2e.jl) — placed here because it runs clm_run! and so
+    # must not precede the fresh-global unit tests.
+    include("test_hillslope_driver_e2e.jl")
     include("test_ad_smoke.jl")
     include("test_ad_e2e.jl")
     # test_ad_robustness.jl runs below in an isolated subprocess (flakes in-process

@@ -1,5 +1,41 @@
 # Hillslope Hydrology (`use_hillslope`) — Wiring Status
 
+## UPDATE — full-driver end-to-end RUNS + Fortran parity (this branch)
+
+The deferred full-driver timestep is now **wired and validated end-to-end**
+against a CTSM Fortran hillslope dump (Aripuanã SP + hillslope + routing, 48
+steps @ 30-min dt, cold start):
+
+- **`clm_run!` / `clm_initialize!` gained `use_hillslope`, `use_hillslope_routing`,
+  `hillslope_file`, and `gridcell_area_km2` keywords.** `use_hillslope` reads the
+  CTSM InitHillslope geometry from `hillslope_file` (falls back to `fsurdat`)
+  into `surf` *before* the subgrid count, so the multi-column catena is built at
+  init. All default `false`/`1.0` ⇒ **byte-identical** (proven: the water-balance
+  trajectory over a 24-step default Aripuanã SP run is bit-for-bit identical to
+  `origin/main`).
+- **Runtime stream routing wired** (replacing the `hydrology_drainage.jl` stub):
+  `hillslope_stream_outflow!` + `hillslope_update_stream_water!` run under
+  `use_hillslope_routing`, and `hillslope_streamflow_to_grc!` (new; ports the
+  `lnd2atmMod.F90:343-354` block) produces `qflx_streamflow_grc`. The driver now
+  **excludes hillslope columns from the `qflx_{surf,drain,drain_perched}_grc`
+  aggregates** (CTSM lnd2atm double-counting fix) and threads
+  `use_hillslope_routing` + `qflx_streamflow_grc` through `CLMDriverConfig` →
+  `balance_check!` and the begwb/endwb stream-water store.
+- **Result on the 4-column Aripuanã catena:** all 48 steps finite; catena
+  topology matches the Fortran dump exactly (`cold=-9999,1,2,3`,
+  `colu=2,3,4,-9999`); **water conservation `|errh2o_grc|` ≤ 3.2e-7 mm at the
+  cold-start step, ~1e-13 mm thereafter**; **H2OSOI vs Fortran max |Δ| = 8.1e-3,
+  mean 3.5e-4 vol frac**; **ZWT vs Fortran max |Δ| = 4.3e-7 m**; stream water
+  volume tracks the Fortran trajectory (e.g. step 24: 8.836e5 vs 8.835e5 m³).
+- Suite test: `test/test_hillslope_driver_e2e.jl` (in `runtests.jl`) — in-memory
+  stream-budget conservation (always) + a full `clm_run!` multi-column timestep
+  on the Bow base surfdata + synthetic catena (asset-gated), under `--check-bounds=yes`.
+
+The remaining note below ("full *driver* run … deferred") is superseded by this
+update. The original text is retained for history.
+
+---
+
 Status as of this branch. Scope: what it would take to run CTSM's hillslope
 hydrology (`use_hillslope=.true.`) end-to-end in CLM.jl, what is already ported,
 and the concrete blockers that make a *real* end-to-end run infeasible today.

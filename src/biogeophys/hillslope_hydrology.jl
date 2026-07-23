@@ -738,3 +738,40 @@ function hillslope_update_stream_water!(
 
     return nothing
 end
+
+# =========================================================================
+# hillslope_streamflow_to_grc!
+# =========================================================================
+
+"""
+    hillslope_streamflow_to_grc!(qflx_streamflow_grc, volumetric_streamflow_lun,
+                                 lun, grc, bounds_l, bounds_g)
+
+Aggregate the per-landunit stream discharge (`volumetric_streamflow_lun`, m3/s)
+to the gridcell-level streamflow flux (`qflx_streamflow_grc`, mm H2O/s) that the
+water balance check accounts as the gridcell sink and that lnd2atm hands to the
+river model. Because streamflow is a volume/time it is SUMMED (not area-weighted)
+over the gridcell's active landunits and converted to mm/s with
+`1e3 / (grc.area[g]*1e6)` (`grc.area` in km2).
+
+Ported from the `use_hillslope_routing` block of `lnd2atmMod.F90:343-354`.
+"""
+function hillslope_streamflow_to_grc!(
+    qflx_streamflow_grc::AbstractVector{<:Real},
+    volumetric_streamflow_lun::AbstractVector{<:Real},
+    lun::LandunitData,
+    grc::GridcellData,
+    bounds_l::UnitRange{Int},
+    bounds_g::UnitRange{Int}
+)
+    for g in bounds_g
+        qflx_streamflow_grc[g] = 0.0
+    end
+    for l in bounds_l
+        lun.active[l] || continue
+        g = lun.gridcell[l]
+        qflx_streamflow_grc[g] += volumetric_streamflow_lun[l] *
+            1.0e3 / (grc.area[g] * 1.0e6)
+    end
+    return nothing
+end
