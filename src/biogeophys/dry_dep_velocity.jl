@@ -272,6 +272,85 @@ function _wesely_season(lat::Real, month::Int)
     end
 end
 
+"""
+    _wesely_index_season(lun_type, is_urban, has_snow, elai, minlai, maxlai, mlaidiff)
+        -> (wesveg_override::Int, index_season::Int)
+
+Select the Wesely seasonal category (1-5) exactly as CTSM
+`DryDepVelocity.F90:373-405` does — from the patch's annual min/max LAI
+(`annlai`), the current exposed LAI, the month-to-month LAI difference
+(`mlaidiff`), snow presence (`snow_depth(c) > 0`), and the landunit type — rather
+than from latitude+month.
+
+Returns `(wesveg_override, index_season)`. `wesveg_override == 0` means keep the
+PFT-derived Wesely land type; a positive value is the landunit-type override CTSM
+sets jointly with the season in the same block (ice→8, deep-lake→7, wetland→9,
+urban→1). `index_season < 1` signals an indeterminate season (only reachable with
+NaN inputs, e.g. `annlai`/`mlaidiff` never populated); the caller then falls back
+to the latitude+month heuristic instead of aborting (Fortran `endrun`s).
+
+Faithful transcription of the Fortran (soil landunit is the common case):
+
+    minlai = minval(annlai(:,p)); maxlai = maxval(annlai(:,p)); index_season = -1
+    if lun%itype /= istsoil:
+        istice   -> wesveg=8, index_season=4
+        istdlak  -> wesveg=7, index_season=4
+        istwet   -> wesveg=9, index_season=2
+        urbpoi   -> wesveg=1, index_season=2
+        (else e.g. crop: leave index_season = -1)
+    else if snow_depth(c) > 0:            index_season = 4
+    else if elai > 0.5*maxlai:            index_season = 1
+    if index_season<0 and elai < minlai+0.05*(maxlai-minlai): index_season = 3
+    if index_season<0: mlaidiff>0 -> 2, <0 -> 5, ==0 -> 3
+"""
+@inline function _wesely_index_season(lun_type::Integer, is_urban::Bool, has_snow::Bool,
+                                      elai::T, minlai::T, maxlai::T,
+                                      mlaidiff::T) where {T<:Real}
+    wesveg_ov = 0
+    season = -1
+
+    # Fortran: `if ( lun%itype(l) /= istsoil )` — NOTE only soil (not crop) skips
+    # this branch, so a crop landunit falls through with index_season still -1.
+    if lun_type != ISTSOIL
+        if lun_type == ISTICE
+            wesveg_ov = 8
+            season = WINTER_SNOW_ICE
+        elseif lun_type == ISTDLAK
+            wesveg_ov = 7
+            season = WINTER_SNOW_ICE
+        elseif lun_type == ISTWET
+            wesveg_ov = 9
+            season = AUTUMN_UNHARVESTED
+        elseif is_urban
+            wesveg_ov = 1
+            season = AUTUMN_UNHARVESTED
+        end
+        # any other non-soil landunit (e.g. crop): leave season = -1
+    elseif has_snow
+        season = WINTER_SNOW_ICE
+    elseif elai > T(0.5) * maxlai
+        season = MIDSUMMER_LUSH_VEG
+    end
+
+    if season < 0
+        if elai < (minlai + T(0.05) * (maxlai - minlai))
+            season = LATE_AUTUMN_LEAFLESS
+        end
+    end
+
+    if season < 0
+        if mlaidiff > zero(T)
+            season = AUTUMN_UNHARVESTED
+        elseif mlaidiff < zero(T)
+            season = TRANSITIONAL_SPRING
+        elseif mlaidiff == zero(T)
+            season = LATE_AUTUMN_LEAFLESS
+        end
+    end
+
+    return wesveg_ov, season
+end
+
 # =========================================================================
 # Wesely land type mapping from CLM PFT
 # =========================================================================
@@ -550,22 +629,35 @@ Arguments:
 - `forc_solar_col`: incident solar radiation [W/m^2] (column-level)
 - `frac_sno`: fraction of ground covered by snow (column-level)
 - `lat_grc`: latitude [degrees] (gridcell-level)
-- `month`: current month (1-12)
+- `month`: current month (1-12) — only used for the degenerate season fallback
 - `heff`: effective Henry's law constant [M/atm] for each species (optional)
+
+Keyword inputs for the Fortran-faithful Wesely `index_season` selection
+(`DryDepVelocity.F90:373-405`). When `annlai_patch` is non-empty the season is
+picked per-patch from the annual min/max LAI rather than latitude+month; when
+omitted the kernel keeps the latitude+month heuristic (legacy behavior):
+- `annlai_patch`: 12 months of monthly LAI per patch (np x 12) — min/max drive the season
+- `mlaidiff_patch`: month-to-month LAI difference per patch (transitional-season sign)
+- `lun_itype`: landunit-level type (ISTSOIL/ISTICE/ISTDLAK/ISTWET/urban) per landunit
+- `snow_depth_col`: snow depth [m] (column-level); `> 0` forces the winter season
 
 Ported from `DryDepVelocity` subroutine in `DryDepVelocity.F90`.
 """
 # --- Kernel: one thread per patch; inner loop over species. Every write is to the
 # patch's own (p, i) slot (distinct per species -> race-free, no fixed-index +=).
-# The Wesely season is precomputed for both hemispheres on the host and passed as two
-# Int scalars, so the kernel branches on lat sign only (no Vector/tuple index on-device).
+# When `use_annlai` is true the Wesely season is picked per-patch from the annual
+# min/max LAI (`_wesely_index_season`, matching DryDepVelocity.F90:373-405); the
+# lat+month heuristic (precomputed for both hemispheres as two Int scalars) is kept
+# only as the degenerate fallback (NaN inputs) and for legacy callers that supply
+# no annual-LAI phenology.
 @kernel function _depvel_kernel!(velocity_patch, @Const(mask_patch),
         @Const(patch_gridcell), @Const(patch_column), @Const(patch_itype),
         @Const(ram1_patch), @Const(fv_patch), @Const(elai_patch),
         @Const(forc_t_col), @Const(forc_solar_col), @Const(frac_sno), @Const(lat_grc),
         @Const(dv), @Const(foxd), @Const(heff_vals),
         @Const(ri_tab), @Const(rlu_tab), @Const(rac_tab), @Const(rgs_so2_tab), @Const(rgs_o3_tab),
-        lo::Int, hi::Int, n_drydep::Int, season_nh::Int, season_sh::Int)
+        @Const(annlai), @Const(mlaidiff), @Const(snow_depth), @Const(patch_lun_type),
+        lo::Int, hi::Int, n_drydep::Int, season_nh::Int, season_sh::Int, use_annlai::Bool)
     p = @index(Global)
     @inbounds if lo <= p <= hi && mask_patch[p]
         T = eltype(velocity_patch)
@@ -578,8 +670,32 @@ Ported from `DryDepVelocity` subroutine in `DryDepVelocity.F90`.
         lat = lat_grc[g]
         lai = max(elai_patch[p], zero(T))
 
-        season = lat >= zero(T) ? season_nh : season_sh   # == _wesely_season(lat, month)
-        lt = _pft_to_wesely(patch_itype[p])
+        if use_annlai
+            # Fortran-faithful index_season from the patch's annual min/max LAI.
+            lun_type = patch_lun_type[p]
+            is_urb = (ISTURB_MIN <= lun_type) & (lun_type <= ISTURB_MAX)
+            snow_s = snow_depth[c] > zero(T)
+            minlai = annlai[p, 1]
+            maxlai = annlai[p, 1]
+            for k in 2:12
+                v = annlai[p, k]
+                minlai = min(minlai, v)
+                maxlai = max(maxlai, v)
+            end
+            wesveg_ov, season0 = _wesely_index_season(lun_type, is_urb, snow_s,
+                                                      lai, minlai, maxlai, mlaidiff[p])
+            if season0 < 1
+                # indeterminate (NaN inputs) -> lat+month fallback
+                season = lat >= zero(T) ? season_nh : season_sh
+                lt = _pft_to_wesely(patch_itype[p])
+            else
+                season = season0
+                lt = wesveg_ov > 0 ? wesveg_ov : _pft_to_wesely(patch_itype[p])
+            end
+        else
+            season = lat >= zero(T) ? season_nh : season_sh   # == _wesely_season(lat, month)
+            lt = _pft_to_wesely(patch_itype[p])
+        end
 
         ra = max(ram1_patch[p], one(T))
         ustar = max(fv_patch[p], T(0.001))
@@ -612,7 +728,11 @@ function depvel_compute!(dd::DryDepVelocityData,
                          frac_sno::AbstractVector{<:Real},
                          lat_grc::AbstractVector{<:Real},
                          month::Int;
-                         heff::AbstractVector{<:Real} = Float64[])
+                         heff::AbstractVector{<:Real} = Float64[],
+                         annlai_patch::AbstractMatrix{<:Real} = Matrix{Float64}(undef, 0, 0),
+                         mlaidiff_patch::AbstractVector{<:Real} = Float64[],
+                         lun_itype::AbstractVector{<:Integer} = Int[],
+                         snow_depth_col::AbstractVector{<:Real} = Float64[])
     n_drydep = dd.n_drydep
     if n_drydep == 0
         return nothing
@@ -620,13 +740,38 @@ function depvel_compute!(dd::DryDepVelocityData,
     isempty(bounds_patch) && return nothing
 
     FT = eltype(dd.velocity_patch)
+    np = size(dd.velocity_patch, 1)
     # Default effective Henry's law constants (small default), on host.
     heff_vals_h = isempty(heff) ? fill(FT(1.0e-2), n_drydep) : heff
 
-    # Wesely season is a function of lat SIGN and the global `month`; precompute both
-    # hemispheres on the host so the kernel needs no seasonal lookup array.
+    # Wesely season fallback: a function of lat SIGN and the global `month`;
+    # precompute both hemispheres on the host. Used for the degenerate
+    # (indeterminate-season) case and for legacy callers that pass no annual LAI.
     season_nh = _wesely_season(1.0, month)   # lat >= 0
     season_sh = _wesely_season(-1.0, month)  # lat < 0
+
+    # Fortran-faithful annlai-based index_season when the annual-LAI phenology is
+    # supplied (the live driver passes annlai/mlaidiff/lun_itype/snow_depth);
+    # otherwise the kernel keeps the latitude+month heuristic.
+    use_annlai = !isempty(annlai_patch)
+    if use_annlai
+        # Gather the landunit TYPE per patch: lun_itype is landunit-level, and
+        # patch_landunit is the 1-based landunit index of each patch.
+        patch_lun_type_h = Vector{Int}(undef, np)
+        @inbounds for pp in 1:np
+            li = Int(patch_landunit[pp])
+            patch_lun_type_h[pp] = (1 <= li <= length(lun_itype)) ? Int(lun_itype[li]) : ISTSOIL
+        end
+        annlai_h   = annlai_patch
+        mlaidiff_h = mlaidiff_patch
+        snowdep_h  = snow_depth_col
+    else
+        # Unused when use_annlai=false, but must be valid device arrays.
+        patch_lun_type_h = fill(ISTSOIL, np)
+        annlai_h   = zeros(FT, np, 12)
+        mlaidiff_h = zeros(FT, np)
+        snowdep_h  = frac_sno
+    end
 
     # Move host constants (resistance tables + species params) and any host-resident
     # forcing/index arrays onto the state's backend + precision. All no-ops when
@@ -649,12 +794,17 @@ function depvel_compute!(dd::DryDepVelocityData,
     fsno    = _to_backend_like(p, FT, frac_sno)
     lat     = _to_backend_like(p, FT, lat_grc)
     maskd   = _to_backend_like(p, FT, mask_patch)  # Bool -> integer overload keeps Bool
+    annlai_b   = _to_backend_like(p, FT, annlai_h)
+    mlaidiff_b = _to_backend_like(p, FT, mlaidiff_h)
+    snowdep_b  = _to_backend_like(p, FT, snowdep_h)
+    plun_b     = _to_backend_like(p, FT, patch_lun_type_h)  # Int -> integer overload keeps Int
 
     _launch!(_depvel_kernel!, dd.velocity_patch, maskd,
         pgrid, pcol, pitype, ram1, fv, elai, ft_col, fsol, fsno, lat,
         dd.dv, dd.foxd, heff_v,
         ri_tab, rlu_tab, rac_tab, rgs_so2, rgs_o3,
-        first(bounds_patch), last(bounds_patch), n_drydep, season_nh, season_sh;
+        annlai_b, mlaidiff_b, snowdep_b, plun_b,
+        first(bounds_patch), last(bounds_patch), n_drydep, season_nh, season_sh, use_annlai;
         ndrange = size(dd.velocity_patch, 1))
 
     return nothing
