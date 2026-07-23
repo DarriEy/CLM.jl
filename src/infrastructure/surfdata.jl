@@ -70,6 +70,33 @@ Base.@kwdef mutable struct SurfaceInputData
     # Source-grid extents (full file dims), so the g→(i,j) map can be inverted.
     nlon::Int                      = 0
     nlat::Int                      = 0
+
+    # ---- Hillslope hydrology geometry (OPTIONAL) ----
+    # Read from the surface dataset ONLY when `varctl.use_hillslope` is true AND
+    # the file carries the `nhillcolumns` variable + `nhillslope`/`nmaxhillcol`
+    # dims (CTSM HillslopeHydrologyMod.InitHillslope). All fields are gridcell-
+    # indexed [ng, ...]. Empty on the default (non-hillslope) path, so
+    # count_subgrid_elements / initGridCells! stay byte-identical. NOTE: the only
+    # hillslope surfdata available in this repo is a clearly-labeled SYNTHETIC
+    # test fixture (test/); no CTSM-produced hillslope fsurdat exists here.
+    nhillslope_dim::Int            = 0     # number of representative hillslopes
+    nmaxhillcol_dim::Int           = 0     # max columns per hillslope landunit
+    nhillcolumns::Vector{Int}      = Int[]                        # [ng]
+    pct_hillslope::Matrix{Float64}         = Matrix{Float64}(undef, 0, 0)  # [ng, nhillslope]
+    hillslope_index::Matrix{Int}           = Matrix{Int}(undef, 0, 0)      # [ng, nmaxhillcol]
+    column_index::Matrix{Int}              = Matrix{Int}(undef, 0, 0)      # [ng, nmaxhillcol]
+    downhill_column_index::Matrix{Int}     = Matrix{Int}(undef, 0, 0)      # [ng, nmaxhillcol]
+    hillslope_slope::Matrix{Float64}       = Matrix{Float64}(undef, 0, 0)  # [ng, nmaxhillcol] m/m
+    hillslope_aspect::Matrix{Float64}      = Matrix{Float64}(undef, 0, 0)  # radians
+    hillslope_area::Matrix{Float64}        = Matrix{Float64}(undef, 0, 0)  # m2
+    hillslope_distance::Matrix{Float64}    = Matrix{Float64}(undef, 0, 0)  # m
+    hillslope_width::Matrix{Float64}       = Matrix{Float64}(undef, 0, 0)  # m
+    hillslope_elevation::Matrix{Float64}   = Matrix{Float64}(undef, 0, 0)  # m
+    hillslope_pftndx::Matrix{Int}          = Matrix{Int}(undef, 0, 0)      # optional
+    # Stream channel geometry (only read under use_hillslope_routing), [ng]
+    hillslope_stream_depth::Vector{Float64} = Float64[]
+    hillslope_stream_width::Vector{Float64} = Float64[]
+    hillslope_stream_slope::Vector{Float64} = Float64[]
 end
 
 # --------------------------------------------------------------------------
@@ -318,6 +345,13 @@ function surfrd_get_data!(surf::SurfaceInputData, begg::Int, endg::Int, fsurdat:
 
         # Read the Li-family fire inputs (gdp / peatf / abm)
         surfrd_fire!(surf, ds, ng)
+
+        # Hillslope hydrology geometry — GATED on use_hillslope so the default
+        # (non-hillslope) read is byte-identical, and additionally a no-op when
+        # the file has no hillslope variables.
+        if varctl.use_hillslope
+            surfrd_hillslope!(surf, ds, ng)
+        end
 
     finally
         close(ds)
@@ -574,6 +608,77 @@ function surfrd_fire!(surf::SurfaceInputData, ds::NCDataset, ng::Int)
 end
 
 """
+    _read_int_layered(ds, varname, ng, nlev; default=0) -> Matrix{Int}
+
+Integer-valued sibling of `_read_spatial_layered`: read a layered variable and
+round to `Int`. Missing variable → `fill(default, ng, nlev)`. Used for the
+hillslope index arrays (`hillslope_index`, `column_index`,
+`downhill_column_index`, `hillslope_pftndx`), where the file stores integer
+column/hillslope indices (and CTSM's -999 sentinel for "no downhill column").
+"""
+function _read_int_layered(ds::NCDataset, varname::String, ng::Int, nlev::Int;
+                           default::Int = 0)
+    if !haskey(ds, varname)
+        return fill(default, ng, nlev)
+    end
+    f = _read_spatial_layered(ds, varname, ng, nlev)
+    out = Matrix{Int}(undef, size(f, 1), size(f, 2))
+    for i in eachindex(f)
+        out[i] = Int(round(f[i]))
+    end
+    return out
+end
+
+"""
+    surfrd_hillslope!(surf, ds, ng)
+
+Read hillslope-hydrology geometry from the surface dataset, mirroring the
+variables CTSM reads in `HillslopeHydrologyMod.InitHillslope`: `nhillcolumns`,
+`pct_hillslope`, `hillslope_index`, `column_index`, `downhill_column_index`,
+`hillslope_slope/aspect/area/distance/width/elevation`, `hillslope_pftndx`, and
+(under routing) `hillslope_stream_depth/width/slope`.
+
+Guarded: does nothing unless the file actually carries the `nhillcolumns`
+variable together with the `nhillslope` and `nmaxhillcol` dimensions, so a
+normal surfdata (or a caller that flipped `use_hillslope` without hillslope
+geometry) is unaffected. Called only when `varctl.use_hillslope` is true.
+"""
+function surfrd_hillslope!(surf::SurfaceInputData, ds::NCDataset, ng::Int)
+    (haskey(ds, "nhillcolumns") &&
+     haskey(ds.dim, "nhillslope") &&
+     haskey(ds.dim, "nmaxhillcol")) || return nothing
+
+    nhill = Int(ds.dim["nhillslope"])
+    nmax  = Int(ds.dim["nmaxhillcol"])
+    surf.nhillslope_dim  = nhill
+    surf.nmaxhillcol_dim = nmax
+
+    ncol_f = _read_spatial_scalar(ds, "nhillcolumns", ng, 0.0)
+    surf.nhillcolumns = [Int(round(x)) for x in ncol_f]
+
+    surf.pct_hillslope       = _read_spatial_layered(ds, "pct_hillslope", ng, nhill)
+    surf.hillslope_index          = _read_int_layered(ds, "hillslope_index", ng, nmax)
+    surf.column_index             = _read_int_layered(ds, "column_index", ng, nmax)
+    surf.downhill_column_index    = _read_int_layered(ds, "downhill_column_index", ng, nmax; default = -999)
+    surf.hillslope_slope     = _read_spatial_layered(ds, "hillslope_slope", ng, nmax)
+    surf.hillslope_aspect    = _read_spatial_layered(ds, "hillslope_aspect", ng, nmax)
+    surf.hillslope_area      = _read_spatial_layered(ds, "hillslope_area", ng, nmax)
+    surf.hillslope_distance  = _read_spatial_layered(ds, "hillslope_distance", ng, nmax)
+    surf.hillslope_width     = _read_spatial_layered(ds, "hillslope_width", ng, nmax)
+    surf.hillslope_elevation = _read_spatial_layered(ds, "hillslope_elevation", ng, nmax)
+    surf.hillslope_pftndx    = haskey(ds, "hillslope_pftndx") ?
+        _read_int_layered(ds, "hillslope_pftndx", ng, nmax) : Matrix{Int}(undef, 0, 0)
+
+    if varctl.use_hillslope_routing
+        surf.hillslope_stream_depth = _read_spatial_scalar(ds, "hillslope_stream_depth", ng, 0.0)
+        surf.hillslope_stream_width = _read_spatial_scalar(ds, "hillslope_stream_width", ng, 0.0)
+        surf.hillslope_stream_slope = _read_spatial_scalar(ds, "hillslope_stream_slope", ng, 0.0)
+    end
+
+    return nothing
+end
+
+"""
     surfrd_topo!(surf, ds, ng)
 
 Read topographic data from surface dataset.
@@ -720,7 +825,17 @@ function count_subgrid_elements(surf::SurfaceInputData, ng::Int)
         # Natural vegetation landunit (ISTSOIL)
         if surf.wt_lunit[g, ISTSOIL] > 0.0 || true  # always create soil landunit
             nl += 1
-            nc += 1  # one column for natural veg
+            # Number of columns: 1 for the default, or the hillslope catena count
+            # when use_hillslope AND the gridcell has hillslope geometry. Mirrors
+            # CTSM subgrid_get_info_natveg: ncols = max(ncolumns_hillslope(gi), 1).
+            # Gated so the default (use_hillslope=false / no hillslope data) stays
+            # nc += 1 exactly, byte-identical.
+            ncols_hill = 1
+            if varctl.use_hillslope && !isempty(surf.nhillcolumns) &&
+               g <= length(surf.nhillcolumns)
+                ncols_hill = max(surf.nhillcolumns[g], 1)
+            end
+            nc += ncols_hill
             # Count natural PFTs with non-zero weight (the baseline patch count)
             n_nat = 0
             for m in 1:natpft_size
@@ -732,9 +847,11 @@ function count_subgrid_elements(surf::SurfaceInputData, ng::Int)
             if varctl.use_fates && varctl.fates_maxpatch > 0
                 # FATES columns are PADDED to fates_maxpatch + 1 patches so disturbance
                 # patches have HLM slots (must match the build in set_landunit_veg_compete!).
-                np += max(n_nat, varctl.fates_maxpatch + 1)
+                np += ncols_hill * max(n_nat, varctl.fates_maxpatch + 1)
             else
-                np += n_nat
+                # Each hillslope column carries the same PFT breakdown (CTSM
+                # initGridCellsMod: npatches = ncols*npatches).
+                np += ncols_hill * n_nat
             end
         end
 
