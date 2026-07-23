@@ -329,6 +329,16 @@ function clm_initialize!(;
     check_weights!(bounds, inst.gridcell, inst.landunit, inst.column, inst.patch;
                    active_only=false)
 
+    # ---- Step 10b: Hillslope catena geometry (CTSM InitHillslope) ----
+    # Populate col.cold/colu/hill_*/is_hillslope_column (and, under routing, the
+    # landunit stream_channel_* geometry) from the surfdata hillslope arrays, then
+    # re-derive the higher-order column/patch weights from the per-column hillslope
+    # areas. Strictly gated inside init_hillslope_columns! on varctl.use_hillslope
+    # AND the presence of hillslope geometry in `surf`, so the default (Bow /
+    # non-hillslope) run is a no-op and byte-identical.
+    init_hillslope_columns!(bounds, surf, inst.gridcell, inst.landunit,
+                            inst.column, inst.patch)
+
     # ---- Step 11: Build filters ----
     alloc_all_filters!(nc, np, nl)
     set_filters!(bounds, inst.column, inst.landunit, inst.patch, inst.gridcell)

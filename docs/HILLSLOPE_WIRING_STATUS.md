@@ -4,16 +4,38 @@ Status as of this branch. Scope: what it would take to run CTSM's hillslope
 hydrology (`use_hillslope=.true.`) end-to-end in CLM.jl, what is already ported,
 and the concrete blockers that make a *real* end-to-end run infeasible today.
 
-**Bottom line: BLOCKED end-to-end.** The physics core (the lateral saturated
-subsurface flow *and* the stream routing math) is ported. The blockers are two
-pieces of *plumbing*, not physics: (1) there is no hillslope-enabled `fsurdat`
-anywhere in the local inputdata tree and the surfdata reader has no hillslope
-variables, and (2) the subgrid builder gives the natural-vegetation landunit a
-**single** column, whereas hillslope needs a multi-column catena per landunit.
-Because of this the only safe, faithful wire added on this branch is the CTSM
-init-consistency **guard** (`check_aquifer_layer!`); everything else is left
-correctly un-wired with `use_hillslope` default `false`, so the default run is
-byte-identical.
+**Bottom line (updated): the reader + multi-column subgrid builder + init wire
+are now DONE and validated on a SYNTHETIC catena; a full CTSM-parity run is
+still blocked only by the absence of a real hillslope `fsurdat`.** The physics
+core (lateral saturated subsurface flow *and* stream routing math) was already
+ported. This branch closes the two *plumbing* blockers that were open:
+1. **Surfdata reader** — `surfrd_hillslope!` (`src/infrastructure/surfdata.jl`)
+   now reads the CTSM `InitHillslope` variables (`nhillcolumns`, `pct_hillslope`,
+   `hillslope_index`/`column_index`/`downhill_column_index`,
+   `hillslope_slope/aspect/area/distance/width/elevation`, `hillslope_pftndx`,
+   and routing `hillslope_stream_*`) into new `SurfaceInputData` fields — GATED
+   on `varctl.use_hillslope` and the file actually carrying the variables.
+2. **Multi-column subgrid builder** — `count_subgrid_elements` and
+   `set_landunit_veg_compete!` build `max(nhillcolumns,1)` columns per ISTSOIL
+   landunit (CTSM `subgrid_get_info_natveg`), and `init_hillslope_columns!`
+   (`init_gridcells.jl`) wires the `cold`/`colu` catena + per-column geometry
+   via the already-ported `init_hillslope!`. Wired into `clm_initialize.jl`
+   Step 10b.
+
+All three changes are **strictly gated** on `varctl.use_hillslope` (default
+`false`): when off, the natveg build is a single column of weight 1.0 on the
+identical code path, so the default run is **byte-identical** (proven by the
+full suite + `test/test_hillslope_e2e.jl`'s single-column assertion). The
+init-consistency **guard** (`check_aquifer_layer!`) remains wired.
+
+**Still open (honest):** no CTSM-produced hillslope `fsurdat` exists locally, so
+there is no Fortran hillslope run to compare against — validation is
+port-self-consistency (conservation) + an independent scalar oracle on a
+clearly-labeled SYNTHETIC catena, NOT CTSM parity. The full *driver* run on a
+multi-column catena (vertical/soil/canopy init per column through `clm_run!`,
+plus threading `use_hillslope_routing` + a real `qflx_streamflow_grc` through
+`CLMDriverConfig`/`hydrology_drainage.jl:293-297`/`balance_check!`) is not yet
+exercised end-to-end and is deferred.
 
 ---
 

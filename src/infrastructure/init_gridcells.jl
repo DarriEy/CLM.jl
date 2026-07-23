@@ -95,6 +95,99 @@ function initGridCells!(bounds::BoundsType, surf::SurfaceInputData,
     nothing
 end
 
+"""
+    init_hillslope_columns!(bounds, surf, grc, lun, col, pch)
+
+Populate the hillslope catena geometry on the subgrid hierarchy AFTER
+`initGridCells!` has built the multi-column natural-veg landunits. Bridges the
+gridcell-indexed hillslope arrays read into `SurfaceInputData` (§`surfrd_hillslope!`)
+to the landunit-indexed arrays `init_hillslope!` expects, then calls
+`init_hillslope!` (sets `col.cold`/`col.colu`/`col.hill_*`/`is_hillslope_column`
+and — under routing — the landunit `stream_channel_*`) and
+`set_hillslope_soil_thickness!`. Finally recomputes higher-order weights so
+`col.wtgcell`/patch weights reflect the per-column hillslope areas that
+`init_hillslope!` wrote into `col.wtlunit`.
+
+Mirrors CTSM's `clm_instInit` → `InitHillslope` call. Strictly gated: a no-op
+unless `varctl.use_hillslope` is set AND `surf` carries hillslope geometry, so
+the default (single-column) path is untouched.
+"""
+function init_hillslope_columns!(bounds::BoundsType, surf::SurfaceInputData,
+                                 grc::GridcellData, lun::LandunitData,
+                                 col::ColumnData, pch::PatchData)
+    varctl.use_hillslope || return nothing
+    isempty(surf.nhillcolumns) && return nothing
+
+    nhill = surf.nhillslope_dim
+    nmax  = surf.nmaxhillcol_dim
+    (nhill > 0 && nmax > 0) || return nothing
+
+    nl = bounds.endl
+    ncolumns_hillslope = zeros(Int, nl)
+    pct_hillslope = zeros(nl, nhill)
+    hill_ndx   = zeros(Int, nl, nmax)
+    col_ndx_in = zeros(Int, nl, nmax)
+    col_dndx   = fill(-999, nl, nmax)
+    hill_slope   = zeros(nl, nmax)
+    hill_aspect  = zeros(nl, nmax)
+    hill_area    = zeros(nl, nmax)
+    hill_dist    = zeros(nl, nmax)
+    hill_width   = zeros(nl, nmax)
+    hill_elev    = zeros(nl, nmax)
+
+    use_routing = varctl.use_hillslope_routing && !isempty(surf.hillslope_stream_depth)
+    stream_depth = use_routing ? zeros(nl) : nothing
+    stream_width = use_routing ? zeros(nl) : nothing
+    stream_slope = use_routing ? zeros(nl) : nothing
+
+    for l in bounds.begl:bounds.endl
+        lun.itype[l] == ISTSOIL || continue
+        g = lun.gridcell[l]
+        (g >= 1 && g <= length(surf.nhillcolumns)) || continue
+        ncolumns_hillslope[l] = max(surf.nhillcolumns[g], 0)
+        for nh in 1:nhill
+            pct_hillslope[l, nh] = surf.pct_hillslope[g, nh]
+        end
+        for ci in 1:nmax
+            hill_ndx[l, ci]   = surf.hillslope_index[g, ci]
+            col_ndx_in[l, ci] = surf.column_index[g, ci]
+            col_dndx[l, ci]   = surf.downhill_column_index[g, ci]
+            hill_slope[l, ci] = surf.hillslope_slope[g, ci]
+            hill_aspect[l, ci]= surf.hillslope_aspect[g, ci]
+            hill_area[l, ci]  = surf.hillslope_area[g, ci]
+            hill_dist[l, ci]  = surf.hillslope_distance[g, ci]
+            hill_width[l, ci] = surf.hillslope_width[g, ci]
+            hill_elev[l, ci]  = surf.hillslope_elevation[g, ci]
+        end
+        if use_routing
+            stream_depth[l] = surf.hillslope_stream_depth[g]
+            stream_width[l] = surf.hillslope_stream_width[g]
+            stream_slope[l] = surf.hillslope_stream_slope[g]
+        end
+    end
+
+    init_hillslope!(col, lun, grc, bounds.begl:bounds.endl, bounds.begc:bounds.endc;
+        nhillslope = nhill, max_columns_hillslope = nmax,
+        ncolumns_hillslope = ncolumns_hillslope, pct_hillslope = pct_hillslope,
+        hill_ndx = hill_ndx, col_ndx_in = col_ndx_in, col_dndx = col_dndx,
+        hill_slope_in = hill_slope, hill_aspect_in = hill_aspect,
+        hill_area_in = hill_area, hill_dist_in = hill_dist,
+        hill_width_in = hill_width, hill_elev_in = hill_elev,
+        stream_channel_depth = stream_depth, stream_channel_width = stream_width,
+        stream_channel_slope = stream_slope,
+        use_hillslope_routing = use_routing)
+
+    set_hillslope_soil_thickness!(col, lun, bounds.begc:bounds.endc;
+        soil_profile_method = hillslope_config[].soil_profile_method,
+        nlevsoi = varpar.nlevsoi)
+
+    # InitHillslope rewrote col.wtlunit from the per-column hillslope areas; push
+    # that down into col.wtgcell and the patch weights.
+    compute_higher_order_weights!(bounds, col, lun, pch)
+
+    return nothing
+end
+
 # --- Private per-landunit builders ---
 
 function set_landunit_veg_compete!(surf::SurfaceInputData, gi::Int,
@@ -105,33 +198,58 @@ function set_landunit_veg_compete!(surf::SurfaceInputData, gi::Int,
 
     # Always create soil landunit
     add_landunit!(lun, li, gi, ISTSOIL, wt)
-    add_column!(col, lun, ci, li[], 1, 1.0)
 
-    # Add patches for each PFT with non-zero weight — IDENTICAL for the non-FATES and
-    # FATES paths, so the initial stand + patch weights (and hence the dynamics) are
-    # unchanged. For FATES we then PAD the column with extra inactive vegetated patch
-    # slots so its disturbance patches have HLM slots to map onto (up to
-    # fates_maxpatch + 1 total) instead of being dropped from the coupling.
-    n_added = 0
-    for m in 1:natpft_size
-        p_wt = surf.wt_nat_patch[gi, m]
-        if p_wt > 0.0
-            # PFT type: 0-based (m=1 → ptype=0, m=2 → ptype=1, ...)
-            ptype = varpar.natpft_lb + (m - 1)
-            add_patch!(pch, col, lun, pi, ci[], ptype, p_wt)
-            n_added += 1
+    # Number of columns for this natural-veg landunit. Default is a single column;
+    # under hillslope hydrology the landunit is a CATENA of `ncolumns_hillslope`
+    # connected columns (CTSM subgrid_get_info_natveg / set_landunit_veg_compete:
+    # ncols = max(ncolumns_hillslope(gi),1), each with the SAME PFT breakdown, and
+    # column weight 1/ncols set here — later overwritten by InitHillslope from the
+    # per-column hillslope areas). Gated so the default (use_hillslope=false or no
+    # hillslope geometry) builds exactly one column of weight 1.0, byte-identical.
+    ncols_hill = 1
+    have_hill = varctl.use_hillslope && !isempty(surf.nhillcolumns) &&
+                gi <= length(surf.nhillcolumns)
+    if have_hill
+        ncols_hill = max(surf.nhillcolumns[gi], 1)
+    end
+    wtcol2lunit = 1.0 / ncols_hill
+
+    for ci2 in 1:ncols_hill
+        add_column!(col, lun, ci, li[], 1, wtcol2lunit)
+        # Record the external (surfdata) column index so InitHillslope can map the
+        # downhill-neighbour pointers. For the single-column default this is 1 and
+        # never read (is_hillslope_column stays false).
+        if have_hill && !isempty(surf.column_index) && ci2 <= size(surf.column_index, 2)
+            col.col_ndx[ci[]] = surf.column_index[gi, ci2]
         end
-    end
-    # Must have at least one patch (bare ground)
-    if n_added == 0
-        add_patch!(pch, col, lun, pi, ci[], noveg, 1.0)
-        n_added = 1
-    end
-    if varctl.use_fates && varctl.fates_maxpatch > 0
-        # Pad with inactive vegetated slots (weight 0 — FATES sets the real weight/type
-        # from its patch areas when disturbance populates them). Matches count_subgrid_elements.
-        for _ in (n_added + 1):(varctl.fates_maxpatch + 1)
-            add_patch!(pch, col, lun, pi, ci[], varpar.natpft_lb + 1, 0.0)
+
+        # Add patches for each PFT with non-zero weight — IDENTICAL for the non-FATES
+        # and FATES paths, so the initial stand + patch weights (and hence the
+        # dynamics) are unchanged. For FATES we then PAD the column with extra inactive
+        # vegetated patch slots so its disturbance patches have HLM slots to map onto
+        # (up to fates_maxpatch + 1 total) instead of being dropped from the coupling.
+        n_added = 0
+        for m in 1:natpft_size
+            p_wt = surf.wt_nat_patch[gi, m]
+            if p_wt > 0.0
+                # PFT type: 0-based (m=1 → ptype=0, m=2 → ptype=1, ...)
+                ptype = varpar.natpft_lb + (m - 1)
+                add_patch!(pch, col, lun, pi, ci[], ptype, p_wt)
+                n_added += 1
+            end
+        end
+        # Must have at least one patch (bare ground)
+        if n_added == 0
+            add_patch!(pch, col, lun, pi, ci[], noveg, 1.0)
+            n_added = 1
+        end
+        if varctl.use_fates && varctl.fates_maxpatch > 0
+            # Pad with inactive vegetated slots (weight 0 — FATES sets the real
+            # weight/type from its patch areas when disturbance populates them).
+            # Matches count_subgrid_elements.
+            for _ in (n_added + 1):(varctl.fates_maxpatch + 1)
+                add_patch!(pch, col, lun, pi, ci[], varpar.natpft_lb + 1, 0.0)
+            end
         end
     end
 
