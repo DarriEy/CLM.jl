@@ -431,6 +431,7 @@ using CLM
             "test_fates_photosynthesis.jl",      # FATES daytime GPP guard (real Aripuana stand; gated on data)
             "test_fortran_parity.jl",            # per-step Julia↔Fortran (gated)
             "test_fortran_parity_cn.jl",         # CN/BGC/PHS/LUNA/FUN (gated)
+            "test_fun_coldstart_finite.jl",      # use_fun=true cold start stays finite (gated)
             "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
             "test_fortran_parity_freewins.jl",   # soilresis, aerosol free-wins (gated)
             "test_fortran_parity_luna_update.jl",# LUNA EOD vcmax/jmax update (gated)
