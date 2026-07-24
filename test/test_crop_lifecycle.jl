@@ -327,6 +327,129 @@ using CLM
     end
 
     # =====================================================================
+    # S7 — leaf-emergence ALLOCATION coefficients vs the Fortran restart
+    #
+    # calc_crop_allocation_fractions! (allocation.jl) is a faithful line-by-line
+    # port of CNAllocationMod.F90:258-432, but until now it was only self-consistency
+    # tested (sum-to-1, ranges) in test_allocation.jl — never against the Fortran
+    # reference VALUES. This closes CROP_LIFECYCLE_MAP §3b remaining-work item 4
+    # (crop allocation / grain-pool value parity) for the leaf-emergence branch.
+    #
+    # Reference: Crop_USplains.clm2.r.2020-05-30-14400.nc carries aleaf/astem/aleafi/
+    # astemi for the 8 crop patches, all at CPHASE=2 (leaf emergence), peaklai=0.
+    # aroot is NOT stored, so aroot_ref = 1 - aleaf - astem (arepr==0 in leafemerge).
+    #
+    # THE TIMING SUBTLETY (why the restart HUI_VALUE cannot be fed directly):
+    # CTSM calls calc_crop_allocation_fractions BEFORE this step's hui accumulation,
+    # so the restart's end-of-step HUI_VALUE is ~0.5-0.6 GDD AHEAD of the hui the
+    # allocation actually used. Feeding HUI_VALUE reproduces aleaf only to ~1e-3
+    # (amplified to 4e-2 for the bfact=-1 wheat curve) — a characterized offset, not
+    # a formula error. To validate the FORMULA tolerance-free, the exact hui the
+    # Fortran allocation used is recovered from the reference aroot through the port's
+    # OWN aroot equation (invertible), and the INDEPENDENT check is that aleaf & astem
+    # then also reproduce the reference. Two equations (aroot, aleaf) satisfied at one
+    # hidden hui == the port matches Fortran; a wrong aleaf/fleaf curve fails it.
+    #
+    # SCOPE: all 8 crop patches, spanning the three crop families with their
+    # distinct leaf-allocation curves — temperate corn (17/18, bfact=+0.1), spring
+    # wheat (19/20, bfact=-1.0, the J.Norman curve), temperate soybean (23/24,
+    # bfact=+0.1), tropical corn (75/76, bfact=+0.1). Spring wheat's `arootf` is a
+    # _FillValue in clm5_params.nc, and that fill's value is 0.0
+    # (`arootf:_FillValue = 0.`), so BOTH CTSM and the port read arootf[wheat] = 0.0
+    # — not a param-reader hazard, just no distinct final root param for wheat. Using
+    # arootf = 0.0 the wheat aroot equation inverts cleanly and its bfact=-1 leaf
+    # curve reproduces the reference to round-off, same as the others.
+    # =====================================================================
+    @testset "S7 leaf-emergence allocation vs Fortran restart" begin
+        # All 8 crop patches: itype, real params, and restart reference.
+        A_ITYPE  = [17, 18, 19, 20, 23, 24, 75, 76]
+        A_AROOTI = [0.1, 0.1, 0.05, 0.05, 0.200000002980232, 0.200000002980232, 0.1, 0.1]
+        A_AROOTF = [0.05, 0.05, 0.0, 0.0, 0.2, 0.2, 0.05, 0.05]   # wheat arootf = fill (0.0)
+        A_FLEAFI = [0.6, 0.6, 0.899999976158142, 0.899999976158142, 0.85, 0.85, 0.6, 0.6]
+        A_BFACT  = [0.1, 0.1, -1.0, -1.0, 0.1, 0.1, 0.1, 0.1]     # wheat: J.Norman curve
+        A_GDDMAT = [1477.2873853187507, 1476.7794835074303, 1700.0, 1700.0,
+                    1259.2610846357402, 1257.359842574543,
+                    1334.9881712188765, 1334.2627384206983]
+        A_HUIGRAIN = [850.0767538833009, 849.8925535972276, 1020.0, 1020.0,
+                      629.6305423178701, 628.6799212872716,
+                      595.3141022625068, 595.1300578305277]
+        A_HUILEAF  = [44.318621559562516, 44.30338450522291, 85.0, 85.0,
+                      37.77783253907221, 37.72079527723629,
+                      40.04964513656629, 40.02788215262095]
+        # Reference allocation coefficients straight out of the restart file.
+        REF_ALEAF = [0.455219651783756, 0.455293315877664, 0.664311972207405, 0.664354768348965,
+                     0.60730271195235, 0.609151811825638,
+                     0.390361798040385, 0.390469785886946]
+        REF_ASTEM = [0.449226632564808, 0.449149673905939, 0.295721623476066, 0.295676944202271,
+                     0.192697285219793, 0.19084818534261,
+                     0.515702257856129, 0.515591308149427]
+        nA = 8
+        # aroot_ref = 1 - aleaf - astem (arepr == 0 in leaf-emergence).
+        REF_AROOT = [1.0 - REF_ALEAF[k] - REF_ASTEM[k] for k in 1:nA]
+        # The hui the Fortran allocation used, recovered from aroot_ref through the
+        # port's OWN aroot equation: aroot = arooti - (arooti-arootf)*min(1,hui/gddmat).
+        HUI_EFF   = [A_GDDMAT[k] * (A_AROOTI[k] - REF_AROOT[k]) /
+                     (A_AROOTI[k] - A_AROOTF[k]) for k in 1:nA]
+        pfa = CLM.PftConAllocation(
+            woody = zeros(NPFT), froot_leaf = zeros(NPFT), croot_stem = zeros(NPFT),
+            stem_leaf = zeros(NPFT), flivewd = zeros(NPFT), leafcn = fill(25.0, NPFT),
+            frootcn = fill(42.0, NPFT), livewdcn = fill(50.0, NPFT),
+            deadwdcn = fill(500.0, NPFT), graincn = fill(50.0, NPFT),
+            grperc = fill(0.25, NPFT),
+            arooti = zeros(NPFT), arootf = zeros(NPFT), bfact = zeros(NPFT),
+            fleafi = zeros(NPFT), aleaff = zeros(NPFT), astemf = zeros(NPFT),
+            allconss = fill(1.0, NPFT), allconsl = fill(1.0, NPFT),
+            declfact = fill(1.05, NPFT))
+        for (k, t) in enumerate(A_ITYPE)
+            j = t + 1
+            pfa.arooti[j] = A_AROOTI[k]; pfa.arootf[j] = A_AROOTF[k]
+            pfa.fleafi[j] = A_FLEAFI[k]; pfa.bfact[j]  = A_BFACT[k]
+        end
+
+        patch = CLM.PatchData()
+        patch.itype = copy(A_ITYPE); patch.column = fill(1, nA)
+        patch.gridcell = fill(1, nA); patch.wtcol = fill(1.0, nA)
+
+        cr = CLM.CropData(); CLM.crop_init!(cr, nA)
+        cr.croplive_patch .= true
+        cr.hui_patch      .= HUI_EFF
+        cr.gddtsoi_patch  .= A_HUILEAF .+ 1.0   # >= huileaf -> leaf-emergence phase
+
+        vs = CLM.CNVegStateData(); CLM.cnveg_state_init!(vs, nA, 1)
+        vs.huileaf_patch     .= A_HUILEAF
+        vs.huigrain_patch    .= A_HUIGRAIN
+        vs.gddmaturity_patch .= A_GDDMAT
+        vs.peaklai_patch     .= 0
+
+        CLM.calc_crop_allocation_fractions!(BitVector(trues(nA)), 1:nA, pfa,
+                                            patch, cr, vs)
+
+        for k in 1:nA
+            # Every patch must actually be in the leaf-emergence branch (non-vacuous).
+            @test cr.gddtsoi_patch[k] >= vs.huileaf_patch[k]
+            @test cr.hui_patch[k] < vs.huigrain_patch[k]
+
+            # aroot reproduced (confirms the port uses CTSM's aroot equation).
+            @test vs.aroot_patch[k] ≈ REF_AROOT[k] rtol=1e-9
+            # THE independent checks: aleaf (J.Norman fleaf curve) and astem.
+            @test vs.aleaf_patch[k] ≈ REF_ALEAF[k] rtol=1e-6
+            @test vs.astem_patch[k] ≈ REF_ASTEM[k] rtol=1e-6
+            # leaf-emergence saves aleafi/astemi = aleaf/astem for the grainfill phase.
+            @test vs.aleafi_patch[k] ≈ vs.aleaf_patch[k]
+            @test vs.astemi_patch[k] ≈ vs.astem_patch[k]
+            # arepr is zero in leaf emergence.
+            for r in 1:CLM.NREPR
+                @test vs.arepr_patch[k, r] == 0.0
+            end
+        end
+
+        # Discriminative: the corn family (17/18/75/76) is NOT a plain grnfill curve —
+        # feeding a materially wrong fleaf would miss the reference by percent-level.
+        # A loose 1% band would still pass a wrong curve; 1e-6 above cannot.
+        @test maximum(abs.(vs.aleaf_patch .- REF_ALEAF)) < 1e-6
+    end
+
+    # =====================================================================
     # Guard: the init assertion actually fires (dead-wiring cannot return)
     # =====================================================================
     @testset "crop_phenology! refuses to run un-initialized" begin

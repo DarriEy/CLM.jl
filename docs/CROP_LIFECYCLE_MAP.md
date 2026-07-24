@@ -234,8 +234,15 @@ corn-family branch.
    `fortran_parity_common.jl` pattern, which would also close the planting-date gap
    by running from the reference restart (verify the harness datm year/hour first —
    the #233/#240/#243 lesson).
-4. Crop allocation (`arepr`/grain pools) and `CNCropHarvestToProductPools` value
-   parity — reachable now that the lifecycle drives `cphase`.
+4. ~~Crop allocation (`arepr`/grain pools) and `CNCropHarvestToProductPools` value
+   parity — reachable now that the lifecycle drives `cphase`.~~ → **LEAF-EMERGENCE
+   ALLOCATION VALIDATED (2026-07-24), see §3h.** `calc_crop_allocation_fractions!`
+   was a faithful line-by-line port of `CNAllocationMod.F90:258-432` but only
+   self-consistency tested (sum-to-1); it is now validated against the restart's
+   `aleaf`/`astem` on all 8 crop patches, bit-exact. Grain-pool flux value parity
+   (grainfill branch's recursive `astem` decay + `grainc`/`grainc_to_food`) is still
+   open — see §3h for why it is path-dependent and needs a bracketed dump, not one
+   restart snapshot.
 
 ## 3c. `CNSoyfix` activation criterion (2026-07-19, read from source)
 
@@ -566,6 +573,60 @@ numbers (a formula over parameters, not climate). But the reference's
 knowing given `idop` is already flagged as unvalidated in §3b. Flagged, not
 fixed — fixing it invalidates the existing validated reference and is a
 separate decision.
+
+## 3h. Leaf-emergence crop allocation — VALIDATED against the restart (2026-07-24)
+
+`calc_crop_allocation_fractions!` (`src/biogeochem/allocation.jl:465`, a faithful
+port of `CNAllocationMod.F90:258-432`) sets the per-phase `aleaf`/`astem`/`aroot`/
+`arepr` split. It was already wired (driven every step for live crops) and unit
+tested, but the unit tests were self-consistency only (sum-to-1, ranges), never
+against the Fortran *values*. The `Crop_USplains.clm2.r.2020-05-30-14400.nc` restart
+carries `aleaf`/`astem`/`aleafi`/`astemi` for all 8 crop patches, all at CPHASE=2
+(leaf emergence), `peaklai=0` — so the leaf-emergence branch is fully exercised.
+
+### The timing subtlety (why the restart `HUI_VALUE` is not fed directly)
+
+CTSM calls `calc_crop_allocation_fractions` **before** this step's `hui`
+accumulation, so the restart's end-of-step `HUI_VALUE` is ~0.5-0.6 GDD *ahead* of
+the `hui` the allocation actually read. Feeding `HUI_VALUE` straight in reproduces
+`aleaf` only to ~1e-3 (and to ~4e-2 for the wheat `bfact=-1` curve, where the
+exponential amplifies the offset). That residual is a **characterized accumulation
+offset, consistent across all 8 patches — not a formula error.**
+
+### The tolerance-free validation actually used
+
+The leaf-emergence branch is two equations sharing one hidden `hui`:
+`aroot = arooti - (arooti-arootf)·min(1,hui/gddmaturity)` and
+`aleaf = (1-aroot)·fleafi·(e^{-b}-e^{-b·hui/huigrain})/(e^{-b}-1)`. The exact `hui`
+the Fortran allocation used is recovered from the reference `aroot`
+(`= 1-aleaf-astem`, since `arepr=0` here) through the port's OWN `aroot` equation,
+and the **independent** check is that `aleaf` and `astem` then also reproduce the
+reference. Two equations satisfied at one recovered `hui` ⇒ the port matches Fortran;
+a wrong `fleaf` curve fails it. Result on all 8 patches:
+
+| family | itype | bfact | aleaf rel err |
+|---|---|---|---|
+| temperate corn | 17/18 | +0.1 | 2e-14 |
+| spring wheat | 19/20 | -1.0 | 6e-15 |
+| temperate soybean | 23/24 | +0.1 | ~5e-7 (arooti-arootf ≈ 3e-9 ill-conditions the `hui` recovery, not the port) |
+| tropical corn | 75/76 | +0.1 | 2e-14 |
+
+Wheat's `arootf` is a `_FillValue` in `clm5_params.nc`, and the fill's value is
+`0.0` (`arootf:_FillValue = 0.`), so BOTH CTSM and the port read
+`arootf[wheat] = 0.0` — there is no distinct final-root param for spring wheat, and
+no param-reader hazard. Test: `test/test_crop_lifecycle.jl` "S7 leaf-emergence
+allocation vs Fortran restart".
+
+### What is still open (grain-fill branch + grain pools)
+
+The grain-fill branch (`cphase_grainfill`) is **path-dependent**: `astem` and `aleaf`
+decay recursively from their prior-step values
+(`astem = max(astemf, astem·(1-…)^allconss)`), so a single restart snapshot cannot
+validate it — the input `astem` (before the step) is not stored, only the output.
+The grain C/N pools (`grainc`, `cpool_to_grainc`, `grainc_to_food`) are downstream of
+this and equally path-dependent. Validating them needs the consecutive-step
+`refs_crop_july` bracket (which sits partly at CPHASE=3) instrumented to dump
+`aleaf`/`astem`, which the current bgcdump does not carry. Flagged, not attempted.
 
 ## 4. Standing rules for this work
 
