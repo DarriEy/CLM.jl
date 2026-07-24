@@ -184,7 +184,7 @@ adtest_rhs_snow(to, ::Type{FT}) where {FT} = (B = _stbuild(FT);
 
 adtest_rhs_ssw(to, ::Type{FT}) where {FT} = (B = _stbuild(FT); dt = FT(1800);
     _adkernel("rhs_ssw", to, FT, CLM._rhs_ssw_kernel!, (B.nc, STNLEVTOT), B.nc,
-        (s, o) -> (B.mask, o(B.t_soisno), s(B.t_h2osfc), o(B.z), o(B.tk_h2osfc), o(B.dz_h2osfc),
+        (s, o) -> (B.mask, B.itype, o(B.t_soisno), s(B.t_h2osfc), o(B.z), o(B.tk_h2osfc), o(B.dz_h2osfc),
                    o(B.c_h2osfc), o(B.hs_h2osfc), o(B.dhsdT), o(zeros(FT, B.nc)), dt, STNLEVSNO), FT(1f-2)))
 
 adtest_rhs_soil_urban(to, ::Type{FT}) where {FT} = (B = _stbuild(FT);
@@ -210,7 +210,7 @@ adtest_mat_snow(to, ::Type{FT}) where {FT} = (B = _stbuild(FT);
 
 adtest_mat_ssw(to, ::Type{FT}) where {FT} = (B = _stbuild(FT); dt = FT(1800);
     _adkernel("mat_ssw", to, FT, CLM._mat_ssw_kernel!, (B.nc, STNBAND, STNLEVTOT), B.nc,
-        (s, o) -> (B.mask, o(B.z), s(B.tk_h2osfc), o(B.dz_h2osfc), o(B.c_h2osfc), o(B.dhsdT),
+        (s, o) -> (B.mask, B.itype, o(B.z), s(B.tk_h2osfc), o(B.dz_h2osfc), o(B.c_h2osfc), o(B.dhsdT),
                    dt, STNLEVSNO), FT(1f-2)))
 
 adtest_mat_soil_urban(to, ::Type{FT}) where {FT} = (B = _stbuild(FT);
@@ -233,14 +233,14 @@ adtest_mat_h2osfc_corr(to, ::Type{FT}) where {FT} = (B = _stbuild(FT);
 # Every WRITABLE float array receives Dual-derived values, so all floats are lifted to Dual
 # (L = _todual / identity); only t_h2osfc is seeded (SF). dm moves to device (or identity on CPU).
 function adtest_pc_h2osfc(to, ::Type{FT}) where {FT}
-    B = _stbuild(FT); nc = B.nc; dt = FT(1800)
+    B = _stbuild(FT); nc = B.nc; dt = FT(1800); pck = FT(CLM.PHASE_CHANGE_MASS_K[])
     function go(L, SF, dm)
         th = dm(SF(B.t_h2osfc)); ts = dm(L(B.t_soisno))
         CLM._launch!(CLM._phase_change_h2osfc_kernel!, th, ts, dm(L(B.h2osfc)),
             dm(L(B.h2osno_no_layers)), dm(L(B.h2osoi_ice)), dm(L(B.snow_depth)), dm(L(B.int_snow)),
             dm(L(zeros(FT, nc))), dm(L(zeros(FT, nc))), dm(L(zeros(FT, nc))), dm(B.mask), dm(B.snl),
             dm(L(B.fact)), dm(L(B.c_h2osfc)), dm(L(B.frac_sno_eff)), dm(L(B.frac_h2osfc)),
-            dm(L(B.h2osoi_liq)), dm(L(B.dhsdT)), dt, STNLEVSNO)
+            dm(L(B.h2osoi_liq)), dm(L(B.dhsdT)), dt, STNLEVSNO, pck)
         return ts
     end
     td(x) = _todual(FT, x); sdl(x) = _sd(FT, x); h = FT(1f-2)
@@ -262,7 +262,7 @@ end
 # All struct float fields share one element type, so every float is lifted to Dual (L); only
 # t_soisno is seeded (SF). dm moves each array to device (or identity on CPU).
 function adtest_pc_beta(to, ::Type{FT}) where {FT}
-    B = _stbuild(FT); nc = B.nc; dt = FT(1800)
+    B = _stbuild(FT); nc = B.nc; dt = FT(1800); pck = FT(CLM.PHASE_CHANGE_MASS_K[])
     Z(d2) = zeros(FT, nc, d2)
     function go(L, SF, dm)
         Lyr = CLM.PcbLyr(; t_soisno = dm(SF(B.t_soisno)), h2osoi_ice = dm(L(B.h2osoi_ice)),
@@ -283,7 +283,7 @@ function adtest_pc_beta(to, ::Type{FT}) where {FT}
         be = CLM._kernel_backend(Lyr.t_soisno)
         CLM._phase_change_beta_kernel!(be)(Lyr, Col, Pin, Tmp, dm(zeros(Int, nc, STNLEV)),
             dm(B.mask), dm(B.urbpoi), dm(B.snl), dm(B.landunit), dm(B.itype), dm(B.lun_itype),
-            dt, STNLEVSNO, STNLEVGRND, STNLEVURB, STNLEVMAX; ndrange = nc)
+            dt, STNLEVSNO, STNLEVGRND, STNLEVURB, STNLEVMAX, pck; ndrange = nc)
         KernelAbstractions.synchronize(be)
         return Lyr
     end
