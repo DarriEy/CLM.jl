@@ -631,12 +631,11 @@ Ported from `cnveg_nitrogenstate_type%ZeroDwt`.
 """
 function cnveg_nitrogen_state_zero_dwt!(ns::CNVegNitrogenStateData,
                                          bounds_patch::UnitRange{Int})
-    for p in bounds_patch
-        ns.dispvegn_patch[p] = 0.0
-        ns.storvegn_patch[p] = 0.0
-        ns.totvegn_patch[p]  = 0.0
-        ns.totn_patch[p]     = 0.0
-    end
+    # Broadcast-over-view: device-native, byte-identical on the Float64 host path.
+    @views ns.dispvegn_patch[bounds_patch] .= 0
+    @views ns.storvegn_patch[bounds_patch] .= 0
+    @views ns.totvegn_patch[bounds_patch]  .= 0
+    @views ns.totn_patch[bounds_patch]     .= 0
     return nothing
 end
 
