@@ -317,12 +317,23 @@ function clm_initialize!(;
     # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
     inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
     # clm5_0 BGC also defaults to FUN (Fixation & Uptake of Nitrogen) + flexible
-    # leaf C:N ON (the Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true.),
-    # but FUN is left OFF by default here: it is fully wired (see cn_driver.jl) and
-    # validated on the warm-restart parity path (which flips it on), yet defaulting
-    # it on for a COLD start surfaces the separate cold-start canopy-NaN blocker
-    # (FUN reads availc/canopy which are NaN before the canopy spins up). Callers
-    # with a finite (warm) state set inst.bgc_vegetation.config.use_fun = true.
+    # leaf C:N ON (the Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true.).
+    # FUN is left OFF by default here ONLY to keep the default (use_fun=false) path
+    # byte-identical; it is fully wired (see cn_driver.jl) and works at COLD START.
+    #
+    # HISTORY (corrected 2026-07-23): this comment previously claimed defaulting FUN
+    # on for a cold start "surfaces the separate cold-start canopy-NaN blocker (FUN
+    # reads availc/canopy which are NaN before the canopy spins up)". That reason is
+    # DISPROVEN. On the LIVE path calc_gpp_mr_availc! (cn_driver.jl ~L523) runs over
+    # mask_bgc_vegp and populates a FINITE availc BEFORE cnfun! (~L757, same mask)
+    # reads it, so the availc NaN-init is never actually read. A real Bow cold start
+    # with use_fun=true + real forcing photosynthesizes and keeps availc/npp_growth/
+    # leafc finite over many steps (test/test_fun_coldstart_finite.jl). The earlier
+    # "FUN cold-start NaN" was the SAME harness bug as the general canopy NaN: an
+    # UNSET forc_hgt_{u,t,q}_grc=0 → ustar=0 → the canopy Monin-Obukhov solve diverged
+    # → t_veg NaN → maintenance respiration NaN → availc = gpp - mr = NaN. The real
+    # forcing path derives forc_hgt (forcing_reader.jl), so the cold start converges.
+    # Callers with a finite (warm) state set inst.bgc_vegetation.config.use_fun = true.
     nlevdecomp_full = varpar.nlevdecomp_full
     # MIMICS (decomp_method==2) needs 8 pools / 15 transitions; CENTURY keeps 7/10
     # (use_cn) or the SP fallback 7/5. Sizing the soil-BGC state arrays here is the
