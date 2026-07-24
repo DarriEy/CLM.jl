@@ -302,6 +302,48 @@
     end
 
     # ================================================================
+    # Test 3b: calendar-aware days_per_year shifts k_frag (CWD)
+    # ----------------------------------------------------------------
+    # k_frag = 1/(SECSPDAY*days_per_year*tau_cwd) drives CWD fragmentation
+    # (pool 8). Switching NO_LEAP (365.0) → GREGORIAN (365.2425) via
+    # get_average_days_per_year() shifts every MIMICS decomp_k by exactly
+    # 365.0/365.2425 (≈ -0.066%), the residual the MIMICS parity sweep saw.
+    # ================================================================
+    @testset "calendar-aware days_per_year (k_frag shift)" begin
+        dpy_noleap = CLM.get_average_days_per_year("NO_LEAP")
+        dpy_greg   = CLM.get_average_days_per_year("GREGORIAN")
+        @test dpy_noleap == 365.0
+        @test dpy_greg == 365.2425
+
+        run_k(dpy) = begin
+            d = make_mimics_data(; nlevdecomp=1)
+            CLM.init_decompcascade_mimics!(
+                d.mimics_state, d.cascade_con, d.params, d.cn_params;
+                cellclay=d.cellclay, bounds=1:d.nc, nlevdecomp=d.nlevdecomp,
+                ndecomp_pools_max=d.ndecomp_pools,
+                ndecomp_cascade_transitions_max=d.ndecomp_cascade_transitions,
+                use_fates=false)
+            CLM.decomp_rates_mimics!(
+                d.cf, d.mimics_state, d.params, d.cn_params, d.cascade_con;
+                mask_bgc_soilc=d.mask_bgc_soilc, bounds=1:d.nc,
+                nlevdecomp=d.nlevdecomp, t_soisno=d.t_soisno, soilpsi=d.soilpsi,
+                decomp_cpools_vr=d.decomp_cpools_vr, col_dz=d.col_dz,
+                ligninNratioAvg=d.ligninNratioAvg, annsum_npp_col=d.annsum_npp_col,
+                days_per_year=dpy, dt=1800.0)
+            copy(d.cf.decomp_k_col)
+        end
+
+        k_noleap = run_k(dpy_noleap)
+        k_greg   = run_k(dpy_greg)
+        expected_ratio = dpy_noleap / dpy_greg     # ≈ 0.999336
+
+        # CWD is pool 8 (is_cwd[8]); its decomp_k is k_frag * scalars.
+        @test k_noleap[1, 1, 8] > 0.0
+        @test k_greg[1, 1, 8] / k_noleap[1, 1, 8] ≈ expected_ratio rtol=1e-12
+        @test k_greg[1, 1, 8] != k_noleap[1, 1, 8]
+    end
+
+    # ================================================================
     # Test 4: Temperature sensitivity
     # ================================================================
     @testset "Temperature sensitivity" begin

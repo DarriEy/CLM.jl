@@ -2369,7 +2369,10 @@ function clm_drv_core!(config::CLMDriverConfig,
             forc_ndep=a2l.forc_ndep_grc,
             AnnET=wfb.AnnET,
             nfix_timeconst=varctl.nfix_timeconst,
-            dayspyr=365.0,
+            # Calendar-aware average days/year (get_average_days_per_year reads the
+            # module-level CLM_CALENDAR[]): NO_LEAP → 365.0 (default, byte-identical),
+            # GREGORIAN → 365.2425. Feeds the CN/MIMICS decomposition rate constants.
+            dayspyr=get_average_days_per_year(),
             h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
             h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
             # ---- CN fire (Li family) bundle ----

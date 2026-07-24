@@ -274,7 +274,11 @@ function cn_driver_no_leaching!(
         forc_ndep::AbstractVector{<:Real} = Float64[],
         AnnET::AbstractVector{<:Real} = Float64[],
         nfix_timeconst::Real = 0.0,
-        dayspyr::Real = 365.0,
+        # Average days per year for per-year→per-second parameter conversions
+        # (decomposition rate constants k_frag / k_l1 / …). Calendar-dependent
+        # via get_average_days_per_year(): NO_LEAP → 365.0 (the CTSM default,
+        # byte-identical), GREGORIAN → 365.2425.
+        dayspyr::Real = get_average_days_per_year(),
         ndyn_params::Union{NDynamicsParams, Nothing} = nothing,
         # Soil-water state (soil-layer slices) for nitrif/denitrif anoxia.
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
@@ -648,7 +652,7 @@ function cn_driver_no_leaching!(
                 col_dz=_col_dz,
                 ligninNratioAvg=soilbgc_cf.litr_lig_c_to_n_col,
                 annsum_npp_col=cnveg_cf.annsum_npp_col,
-                days_per_year=365.0,
+                days_per_year=dayspyr,
                 dt=dt,
                 spinup_state=0,
                 use_lch4=config.use_lch4,
@@ -662,7 +666,7 @@ function cn_driver_no_leaching!(
                 nlevdecomp=nlevdecomp,
                 t_soisno=t_soisno,
                 soilpsi=soilpsi,
-                days_per_year=365.0,
+                days_per_year=dayspyr,
                 dt=dt,
                 zsoi_vals=zsoi_vals,
                 col_dz=_col_dz)
@@ -949,7 +953,7 @@ function cn_driver_no_leaching!(
                 cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
                 crop, patch, gridcell, cn_shared_params,
                 _lprof, _fprof, _phase;
-                varctl = varctl, is_first_step = is_first_step, avg_dayspyr = 365.0,
+                varctl = varctl, is_first_step = is_first_step, avg_dayspyr = dayspyr,
                 prec10_patch = prec10_patch,
                 # REQUIRED: without these, cn_litter_to_column! defaults to
                 # nlevdecomp=1 and destroys ~86% of all phenological leaf/fine-root
@@ -1162,7 +1166,7 @@ function cn_driver_no_leaching!(
                 heatstress_patch = zeros(_np), nind_patch = zeros(_np))
             cn_gap_mortality!(mask_bgc_vegp, bounds_patch, _gmp, _pftgm, _dgvs, patch,
                 canopystate, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
-                dt = dt, days_per_year = 365.0, use_cndv = false,
+                dt = dt, days_per_year = dayspyr, use_cndv = false,
                 use_matrixcn = config.use_matrixcn, spinup_state = 0, npcropmin = npcropmin)
             cn_gap_patch_to_column!(mask_bgc_vegp, bounds_patch, _pftgm, patch,
                 cnveg_cf, cnveg_nf,
@@ -1507,7 +1511,7 @@ function cn_driver_no_leaching!(
                 prec60_patch = prec60_patch, prec10_patch = prec10_patch,
                 prec30_patch = prec30_patch, rh30_patch = rh30_patch,
                 fsat_col = fsat_fire_col, wf_col = wf_fire_col, wf2_col = wf2_fire_col,
-                dt = dt, dayspyr = 365.0,
+                dt = dt, dayspyr = dayspyr,
                 kmo = fire_kmo, kda = fire_kda, mcsec = fire_mcsec, nstep = fire_nstep,
                 nlevgrnd = nlevgrnd_fire, nlevdecomp = nlevdecomp,
                 ndecomp_pools = ndecomp_pools, transient_landcover = transient_landcover)
@@ -1525,7 +1529,7 @@ function cn_driver_no_leaching!(
                 soilbgc_state.croot_prof_patch, soilbgc_state.stem_prof_patch,
                 _totsomc, soilbgc_cs.decomp_cpools_vr_col,
                 soilbgc_ns.decomp_npools_vr_col, soilbgc_cf.somc_fire_col;
-                dt = dt, dayspyr = 365.0, nlevdecomp = nlevdecomp,
+                dt = dt, dayspyr = dayspyr, nlevdecomp = nlevdecomp,
                 ndecomp_pools = ndecomp_pools, i_met_lit = i_litr_min,
                 i_litr_max = i_litr_max, transient_landcover = transient_landcover,
                 use_matrixcn = config.use_matrixcn, use_cndv = config.use_cndv,

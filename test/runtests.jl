@@ -6,6 +6,7 @@ using CLM
     include("test_driver_defaults_audit.jl")  # driver/varctl defaults pinned vs CTSM (docs/DRIVER_DEFAULTS_AUDIT.md)
     include("test_qsat.jl")
     include("test_tridiagonal.jl")
+    include("test_calendar_days.jl")
     include("test_decomp.jl")
     include("test_decomp_init.jl")
     include("test_threaded_clumps.jl")
