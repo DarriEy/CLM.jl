@@ -1,5 +1,17 @@
 # Fortran-dependent validation backlog
 
+> **CLEARED 2026-07-21/23 (rows below now DONE — see `docs/MULTISITE_PARITY_MATRIX.md`
+> and `multisite-fortran-parity-sweep` memory):**
+> - **C1 Isotopes** — wired + validated (#288); tropical δ13C discrimination confirmed.
+> - **C3 VOC/MEGAN** — wired (#293) + `annlai` season (#300); tropical isoprene parity PASS.
+> - **C4 MIMICS** — wired (#294) + lignin:N (#296); **byte-exact** vs Fortran at Bow + Aripuanã (first numeric oracle).
+> - **B4 Hillslope** — reader+builder (#302) + surfdata gen (#303) + full-driver timestep & Fortran parity (#304): H2OSOI 8e-3, ZWT 4e-7.
+> - **Dry deposition** — wired (#298) + `index_season` bit-exact vs Fortran (#300).
+>
+> Still genuinely blocked / open (the CH4-source, fire crop/tropical-LU, and crop-CFT
+> rows below): unchanged — they need transient-landcover streams or crop-CFT surfdata
+> that are not on disk. See the per-row notes.
+
 **What this is.** The list of CLM.jl subsystems whose Fortran parity is *not yet
 established* because it requires **generating new Fortran (CTSM) ground truth** — a new
 site, a non-soil landunit, or a config-flag rerun — that does not exist on disk today.

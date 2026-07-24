@@ -1,5 +1,15 @@
 # Lake surface turbulent-flux residual (backlog B1)
 
+> **STATUS 2026-07-21 — LARGELY RESOLVED.** Five distinct defects (A–E) were root-caused
+> and fixed: #275 (harness off-by-one — the dominant cause), #279 (`t_ref2m` dead-write +
+> the Monin-Obukhov kernel had 1 of 4 stability regimes), #281 (`ks` eddy depth-decay
+> hardwired to zero → the lake mixed to the bed), #284 (`savedtke1` cold-start seed tuned
+> against #275's off-by-one), #285 (re-evaluate the frozen/unfrozen surface branch each
+> iteration → step-1 skin over-cool). **Run max\|rel\| went 13 → ~0.46; steps 3–47 now
+> match Fortran to ~0.03–0.05.** The only remaining item is a step-1 `LAKE_REC_SHIFT`
+> harness record-alignment (not physics). The narrative below stops at defect D and is
+> preserved as the investigation log — read it as history, not current status.
+
 Open residual: on the cold-start PCT_LAKE=100 SP reference
 (`scripts/validation/gen_lake_ref.sh` → `SYMFLUENCE_data/clm_lake_run`), the lake
 THERMODYNAMICS track Fortran (TLAKE / LAKEICEFRAC ~1%) but the SURFACE TURBULENT-FLUX
