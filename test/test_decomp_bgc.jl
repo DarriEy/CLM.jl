@@ -237,6 +237,60 @@
     end
 
     # ================================================================
+    # Test 3b: calendar-aware days_per_year shifts the BGC rate constants
+    # ----------------------------------------------------------------
+    # The decomposition rate constants are k = 1/(SECSPDAY*days_per_year*tau),
+    # so with everything else held fixed the per-pool decomp_k scales as
+    # 1/days_per_year. Switching the calendar from NO_LEAP (365.0) to GREGORIAN
+    # (365.2425) via get_average_days_per_year() must therefore shift every k
+    # (k_l1 = pool 1, k_frag/CWD, …) by exactly 365.0/365.2425 (≈ -0.066%).
+    # ================================================================
+    @testset "calendar-aware days_per_year (rate-constant shift)" begin
+        # Helper values first.
+        @test CLM.get_average_days_per_year("NO_LEAP") == 365.0
+        @test CLM.get_average_days_per_year("GREGORIAN") == 365.2425
+        @test CLM.get_average_days_per_year("no_leap") == 365.0     # case-insensitive
+        @test CLM.get_average_days_per_year("gregorian") == 365.2425
+        @test_throws ErrorException CLM.get_average_days_per_year("JULIAN")
+        # Default (module-level CLM_CALENDAR[]) is the CTSM default NO_LEAP → 365.0.
+        @test CLM.get_average_days_per_year() == 365.0
+        @test CLM.CLM_CALENDAR[] == "NO_LEAP"
+
+        dpy_noleap = CLM.get_average_days_per_year("NO_LEAP")
+        dpy_greg   = CLM.get_average_days_per_year("GREGORIAN")
+
+        run_k(dpy) = begin
+            d = make_decomp_bgc_data(; nlevdecomp=1)
+            CLM.init_decomp_cascade_bgc!(
+                d.bgc_state, d.cascade_con, d.params, d.cn_params;
+                cellsand=d.cellsand, bounds=1:d.nc, nlevdecomp=d.nlevdecomp,
+                ndecomp_pools_max=d.ndecomp_pools,
+                ndecomp_cascade_transitions_max=d.ndecomp_cascade_transitions,
+                use_fates=false)
+            CLM.decomp_rate_constants_bgc!(
+                d.cf, d.bgc_state, d.params, d.cn_params, d.cascade_con;
+                mask_bgc_soilc=d.mask_bgc_soilc, bounds=1:d.nc,
+                nlevdecomp=d.nlevdecomp, t_soisno=d.t_soisno, soilpsi=d.soilpsi,
+                days_per_year=dpy, dt=1800.0, zsoi_vals=d.zsoi_vals, col_dz=d.col_dz)
+            copy(d.cf.decomp_k_col)
+        end
+
+        k_noleap = run_k(dpy_noleap)
+        k_greg   = run_k(dpy_greg)
+
+        expected_ratio = dpy_noleap / dpy_greg            # ≈ 0.999336
+        @test expected_ratio ≈ 0.9993364 atol=1e-6
+        # k_l1 (pool 1 = metabolic litter) shifts by exactly the days-per-year ratio.
+        @test k_greg[1, 1, 1] / k_noleap[1, 1, 1] ≈ expected_ratio rtol=1e-12
+        @test k_greg[1, 1, 1] != k_noleap[1, 1, 1]        # calendar-awareness is live
+        # Every pool at every column shifts by the same ratio.
+        for c in 1:size(k_noleap, 1), pool in 1:size(k_noleap, 3)
+            k_noleap[c, 1, pool] > 0.0 || continue
+            @test k_greg[c, 1, pool] / k_noleap[c, 1, pool] ≈ expected_ratio rtol=1e-12
+        end
+    end
+
+    # ================================================================
     # Test 4: decomp_rate_constants_bgc! (multi-level)
     # ================================================================
     @testset "decomp_rate_constants_bgc! (multi-level)" begin
