@@ -931,21 +931,14 @@ function cnveg_nitrogen_flux_zero_dwt!(nf::CNVegNitrogenFluxData,
                                         bounds_col::UnitRange{Int};
                                         nlevdecomp_full::Int=1,
                                         i_litr_max::Int=I_LITR1)
-    for g in bounds_grc
-        nf.dwt_seedn_to_leaf_grc[g]     = 0.0
-        nf.dwt_seedn_to_deadstem_grc[g] = 0.0
-        nf.dwt_conv_nflux_grc[g]        = 0.0
-    end
+    # Broadcast-over-view: device-native, byte-identical on the Float64 host path.
+    @views nf.dwt_seedn_to_leaf_grc[bounds_grc]     .= 0
+    @views nf.dwt_seedn_to_deadstem_grc[bounds_grc] .= 0
+    @views nf.dwt_conv_nflux_grc[bounds_grc]        .= 0
 
-    for j in 1:nlevdecomp_full
-        for c in bounds_col
-            for k in 1:i_litr_max
-                nf.dwt_frootn_to_litr_n_col[c,j,k] = 0.0
-            end
-            nf.dwt_livecrootn_to_cwdn_col[c,j] = 0.0
-            nf.dwt_deadcrootn_to_cwdn_col[c,j] = 0.0
-        end
-    end
+    @views nf.dwt_frootn_to_litr_n_col[bounds_col, 1:nlevdecomp_full, 1:i_litr_max] .= 0
+    @views nf.dwt_livecrootn_to_cwdn_col[bounds_col, 1:nlevdecomp_full] .= 0
+    @views nf.dwt_deadcrootn_to_cwdn_col[bounds_col, 1:nlevdecomp_full] .= 0
 
     nothing
 end
@@ -957,10 +950,8 @@ end
 
 function cnveg_nitrogen_flux_zero_gru!(nf::CNVegNitrogenFluxData,
                                         bounds_grc::UnitRange{Int})
-    for g in bounds_grc
-        nf.gru_conv_nflux_grc[g]         = 0.0
-        nf.gru_wood_productn_gain_grc[g]  = 0.0
-    end
+    @views nf.gru_conv_nflux_grc[bounds_grc]        .= 0
+    @views nf.gru_wood_productn_gain_grc[bounds_grc] .= 0
 
     nothing
 end

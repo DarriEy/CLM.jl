@@ -1217,25 +1217,20 @@ function cnveg_carbon_flux_zero_dwt!(cf::CNVegCarbonFluxData,
                                       bounds_col::UnitRange{Int};
                                       nlevdecomp_full::Int=1,
                                       i_litr_max::Int=I_LITR1)
-    for g in bounds_grc
-        cf.dwt_seedc_to_leaf_grc[g]     = 0.0
-        cf.dwt_seedc_to_deadstem_grc[g] = 0.0
-        cf.dwt_conv_cflux_grc[g]        = 0.0
-        cf.dwt_slash_cflux_grc[g]       = 0.0
-    end
+    # Broadcast-over-view instead of a scalar host loop: device-native (no scalar
+    # setindex! on GPU arrays) and byte-identical on the Float64 host path (fills
+    # exactly 0.0 over the same ranges the loop covered).
+    @views cf.dwt_seedc_to_leaf_grc[bounds_grc]     .= 0
+    @views cf.dwt_seedc_to_deadstem_grc[bounds_grc] .= 0
+    @views cf.dwt_conv_cflux_grc[bounds_grc]        .= 0
+    @views cf.dwt_slash_cflux_grc[bounds_grc]       .= 0
 
     # litr index runs i_litr_min:i_litr_max (i_litr_min == 1), matching Fortran
     # CNVegCarbonFluxType::ZeroDwt — NOT 1:ndecomp_pools (dwt_frootc_to_litr_c_col's
     # 3rd dim is the litter sub-pool count, not the full decomp-pool count).
-    for j in 1:nlevdecomp_full
-        for c in bounds_col
-            for k in 1:i_litr_max
-                cf.dwt_frootc_to_litr_c_col[c,j,k] = 0.0
-            end
-            cf.dwt_livecrootc_to_cwdc_col[c,j] = 0.0
-            cf.dwt_deadcrootc_to_cwdc_col[c,j] = 0.0
-        end
-    end
+    @views cf.dwt_frootc_to_litr_c_col[bounds_col, 1:nlevdecomp_full, 1:i_litr_max] .= 0
+    @views cf.dwt_livecrootc_to_cwdc_col[bounds_col, 1:nlevdecomp_full] .= 0
+    @views cf.dwt_deadcrootc_to_cwdc_col[bounds_col, 1:nlevdecomp_full] .= 0
 
     nothing
 end
@@ -1247,9 +1242,7 @@ end
 
 function cnveg_carbon_flux_zero_gru!(cf::CNVegCarbonFluxData,
                                       bounds_grc::UnitRange{Int})
-    for g in bounds_grc
-        cf.gru_conv_cflux_grc[g] = 0.0
-    end
+    @views cf.gru_conv_cflux_grc[bounds_grc] .= 0
     nothing
 end
 

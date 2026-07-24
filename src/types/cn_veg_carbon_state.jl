@@ -606,11 +606,10 @@ Ported from `cnveg_carbonstate_type%ZeroDwt`.
 """
 function cnveg_carbon_state_zero_dwt!(cs::CNVegCarbonStateData,
                                       bounds_patch::UnitRange{Int})
-    for p in bounds_patch
-        cs.dispvegc_patch[p] = 0.0
-        cs.storvegc_patch[p] = 0.0
-        cs.totc_patch[p]     = 0.0
-    end
+    # Broadcast-over-view: device-native, byte-identical on the Float64 host path.
+    @views cs.dispvegc_patch[bounds_patch] .= 0
+    @views cs.storvegc_patch[bounds_patch] .= 0
+    @views cs.totc_patch[bounds_patch]     .= 0
     return nothing
 end
 

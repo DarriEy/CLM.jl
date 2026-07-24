@@ -154,13 +154,15 @@ Ported from `SetValues` in `CNProductsMod.F90`.
 function cn_products_set_values!(prod::CNProductsFullData, bounds::BoundsType,
                                   setval::Real)
     # Assumes a single clump with begg == 1 (ndrange = length of gridcell arrays).
+    # Cast setval to the target-array eltype (not hard Float64): Float64 on the host
+    # path (byte-identical), Float32 on device so no double leaks into the kernel.
     cnprod_set_values!(prod.dwt_prod10_gain_grc,
                        prod.dwt_prod100_gain_grc,
                        prod.dwt_cropprod1_gain_grc,
                        prod.crop_harvest_to_cropprod1_grc,
                        prod.hrv_deadstem_to_prod10_grc,
                        prod.hrv_deadstem_to_prod100_grc,
-                       Float64(setval))
+                       eltype(prod.dwt_prod10_gain_grc)(setval))
     return nothing
 end
 
@@ -491,10 +493,13 @@ end
 function cn_products_compute_product_summary!(prod::CNProductsFullData,
                                                bounds::BoundsType,
                                                dt::Real)
-    # Decay constants (1/s) for 1-yr, 10-yr, 100-yr pools
-    kprod1   = 7.2e-8
-    kprod10  = 7.2e-9
-    kprod100 = 7.2e-10
+    # Decay constants (1/s) for 1-yr, 10-yr, 100-yr pools. Cast to the target-array
+    # eltype (not hard Float64) so no double scalar leaks into the device kernel;
+    # Float64 on the host path keeps the constants byte-identical.
+    FT = eltype(prod.cropprod1_grc)
+    kprod1   = FT(7.2e-8)
+    kprod10  = FT(7.2e-9)
+    kprod100 = FT(7.2e-10)
 
     # Assumes a single clump with begg == 1 (ndrange = length of gridcell arrays).
     cnprod_compute_product_summary!(prod.cropprod1_grc, prod.prod10_grc,
@@ -503,7 +508,7 @@ function cn_products_compute_product_summary!(prod::CNProductsFullData,
         prod.dwt_prod10_gain_grc, prod.dwt_prod100_gain_grc,
         prod.gru_prod10_gain_grc, prod.gru_prod100_gain_grc,
         prod.crop_harvest_to_cropprod1_grc, prod.hrv_deadstem_to_prod10_grc,
-        prod.hrv_deadstem_to_prod100_grc, kprod1, kprod10, kprod100, Float64(dt))
+        prod.hrv_deadstem_to_prod100_grc, kprod1, kprod10, kprod100, FT(dt))
 
     return nothing
 end
