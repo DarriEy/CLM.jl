@@ -111,23 +111,42 @@ claim:
    here injects `sabg = θ_snow·FSDS` and *skips* canopy fluxes, so over a consistent ~10-day
    melt window those fluxes stay valid (eval-KGE ≈ 0.72 on Krycklan 2011) but over 365 days they
    go **stale → melt timing drifts → unphysical**. A genuine full-year hydrograph therefore also
-   requires the surface energy balance — **a scope beyond the snow+hydrology subset**, and the
-   canopy-flux path carries photosynthesis/LUNA whose Dual-cleanliness is **not yet established**.
+   requires the surface energy balance — **a scope beyond the snow+hydrology subset**.
 
-So the correct statement is: the **snow+hydrology full-year feasibility is proven** (memory-constant,
-~36–40 s/gradient to a year, all components Dual-clean, zero `src` changes); a **physically
-realistic full-year streamflow calibration additionally requires the energy-balance path**, whose
-forward-mode differentiability is the **next open feasibility question** — possibly CLM.jl's exact
-whole-model AD boundary, which is itself a paper-relevant result.
+**That dependency is now settled — and it is NOT a wall** (`forwarddiff_canopy_probe.jl`). The
+surface-energy-balance / canopy-flux path was run on a Dual-typed real `inst`, phase by phase,
+in both configs: turbulent fluxes only (`use_psn=false`, 10 phases) and **+Farquhar
+photosynthesis** (`use_psn=true`, 16 phases) — **all Dual-clean**, and the gradient of a
+melt-relevant output through the full Monin–Obukhov + turbulent-flux + photosynthesis Newton
+solve gates against central FD (`d Σt_veg / d air-temp`, FwdDiff vs FD rel **6.6e-7**). So:
+
+- **Farquhar photosynthesis is Dual-clean — it is NOT the forward-AD boundary.** The only
+  Float64 pin found was in the aux *builder* `canopy_rev_aux` (`driver_reverse.jl:87,134`
+  hardcodes `FT=Float64`) — the same harness/aux-typing class as the earlier hydrology walls,
+  removable by an eltype-generic helper (a minimal, additive, default-exact `src` change, or a
+  harness mirror as used here). The physics kernels carry no Dual-hostile Float64 dependency.
+- **LUNA** (Rubisco-N acclimation) is a *periodic driver-level* call, not part of the per-step
+  `canopy_fluxes!` path, so it does not enter the per-step melt chain (unprobed, out of scope).
+
+So the correct statement is: **every component of a physical full-year ForwardDiff hydrograph —
+snow accumulation/melt/layer-management, hydrology, AND the surface energy balance incl.
+photosynthesis — is confirmed Dual-differentiable, gradient-gated, at flat memory-constant cost.**
+The full-year hydrograph is therefore a **large-but-real engineering assembly** (wire the ~35-call
+per-step year loop + eltype-generic aux helpers), **not a feasibility barrier** — there is **no
+whole-model forward-AD wall at canopy fluxes or photosynthesis**. Zero `src` changes throughout;
+the residual Float64 pins are all in harness/aux builders, each minimal-additive-fixable.
 
 ## 4. The honest bounds (differentiability *scope*)
 
 These are named, not hidden — several are directly paper-relevant:
 
-- **A genuine full-year hydrograph split-sample is not yet assembled** (see §3b): the
-  forward-mode machinery reaches a year at constant memory and cost, but the full snow-water
-  cycle (accumulation + cross-season layer management) still needs wiring into the Dual thread.
-  A bounded build; every piece is proven Dual-clean.
+- **A genuine full-year hydrograph split-sample is not yet assembled** (see §3b): every
+  component — snow accumulation/melt/layer-management, hydrology, *and* the surface energy
+  balance incl. photosynthesis — is now confirmed Dual-clean and gradient-gated, so this is a
+  **large engineering assembly (the ~35-call per-step year loop + eltype-generic aux helpers),
+  not a feasibility barrier**. The residual Float64 pins are all in harness/aux *builders*, each
+  minimal-additive-fixable. (`LUNA`, a periodic driver-level call, is outside the per-step chain
+  and unprobed.)
 - **Reverse horizon:** exact and cheap to season scale; a full year is compute-feasible via
   checkpointing (reverse) or natively memory-constant (forward, §3b).
 - **Discrete snow-layer ops** (`combine_snow_layers!`/`divide_snow_layers!` change `snl`, the
