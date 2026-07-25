@@ -202,6 +202,41 @@ end
 g_comp = dbits.frictionvel.obu_patch[1]
 @printf("comp dL/d(obu)        = % .8e\n", g_comp)
 
+# --- env-gated FD-vs-eps convergence sweep toward the reverse-AD reference ---
+# Writes a CSV of |central-FD(eps) - AD| for three REAL coupled canopy gradient
+# components, used to draw the paper's FD->AD convergence V. Default run unaffected.
+if haskey(ENV, "AD_FD_SWEEP_CSV")
+    # reverse-AD references for the two per-phase components
+    let
+        sf = deepcopy(bits0); phase1!(sf); u1 = copy(sf.frictionvel.ustar_patch)
+        d1 = Enzyme.make_zero(bits0); d1.frictionvel.ustar_patch .= 2.0 .* u1
+        b1 = deepcopy(bits0)
+        Enzyme.autodiff(revmode, (x) -> (phase1!(x); nothing), Enzyme.Const, Enzyme.Duplicated(b1, d1))
+        global g1_ad = d1.frictionvel.obu_patch[1]
+        base = deepcopy(bits0); phase1!(base)
+        sf2 = deepcopy(base); phase2!(sf2); r2 = copy(sf2.frictionvel.ram1_patch)
+        d2 = Enzyme.make_zero(bits0); d2.frictionvel.ram1_patch .= 2.0 .* r2
+        b2 = deepcopy(base)
+        Enzyme.autodiff(revmode, (x) -> (phase2!(x); nothing), Enzyme.Const, Enzyme.Duplicated(b2, d2))
+        global g2_ad = d2.frictionvel.ustar_patch[1]
+        global base2 = base
+    end
+    fL1(δ) = (s = deepcopy(bits0); s.frictionvel.obu_patch[1] += δ; phase1!(s); sum(abs2, s.frictionvel.ustar_patch))
+    fL2(δ) = (s = deepcopy(base2); s.frictionvel.ustar_patch[1] += δ; phase2!(s); sum(abs2, s.frictionvel.ram1_patch))
+    open(ENV["AD_FD_SWEEP_CSV"], "w") do io
+        println(io, "# ad_chain=", g_comp, " ad_phase1=", g1_ad, " ad_phase2=", g2_ad)
+        println(io, "eps,fd_chain,fd_phase1,fd_phase2,ad_chain,ad_phase1,ad_phase2")
+        for e in exp10.(range(-1, -12, length=45))
+            fdc = (L_perturbed(e) - L_perturbed(-e)) / (2e)
+            fd1 = (fL1(e) - fL1(-e)) / (2e)
+            fd2 = (fL2(e) - fL2(-e)) / (2e)
+            println(io, e, ",", fdc, ",", fd1, ",", fd2, ",", g_comp, ",", g1_ad, ",", g2_ad)
+        end
+    end
+    @printf("Wrote AD-FD sweep CSV: %s (ad_chain=%.8e ad_phase1=%.8e ad_phase2=%.8e)\n",
+            ENV["AD_FD_SWEEP_CSV"], g_comp, g1_ad, g2_ad)
+end
+
 # ---------------------------------------------------------------------------
 # Compare.
 # ---------------------------------------------------------------------------
