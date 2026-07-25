@@ -38,7 +38,13 @@ _hasfree(ty) = ty isa TypeVar || (ty isa UnionAll) ||
     (ty isa DataType && any(_hasfree, ty.parameters))
 function retype_val(::Type{T}, v, dft) where {T}
     if v isa AbstractArray
-        return (eltype(v) <: AbstractFloat && _hasfree(dft)) ? T.(v) : v
+        if eltype(v) <: AbstractFloat
+            return _hasfree(dft) ? T.(v) : v
+        elseif !isempty(v) && _isclm(first(v))
+            return map(e -> retype_struct(T, e), v)      # array of CLM structs
+        else
+            return v                                      # Int/Bool/etc arrays
+        end
     elseif v isa AbstractFloat
         return _hasfree(dft) ? T(v) : v
     elseif _isclm(v)
@@ -47,12 +53,24 @@ function retype_val(::Type{T}, v, dft) where {T}
         return v
     end
 end
+const RETYPE_FALLBACK = Set{Symbol}()   # structs left Float64 (config/no-constructor)
+# Config structs that are NOT differentiated state — leave Float64 (θ is seeded via the phase
+# functions, not through these). CLMInstances fields are abstract-typed so the mix is accepted.
+_skip_retype(x) = (n = String(nameof(typeof(x))); n != "UrbanParamsData" &&
+                    (occursin("Config", n) || occursin("Constants", n) ||
+                     occursin("Overrides", n) || occursin("Params", n)))
 function retype_struct(::Type{T}, obj) where {T}
-    DT = typeof(obj)
-    body = Base.unwrap_unionall(DT.name.wrapper)   # DataType w/ raw TypeVar params (::FT stays a TypeVar)
-    dfts = fieldtypes(body)
-    vals = Any[ retype_val(T, getfield(obj, fn), dfts[i]) for (i,fn) in enumerate(fieldnames(DT)) ]
-    return DT.name.wrapper(vals...)
+    _skip_retype(obj) && (push!(RETYPE_FALLBACK, nameof(typeof(obj))); return obj)
+    DT = typeof(obj); W = DT.name.wrapper
+    body = Base.unwrap_unionall(W); dfts = fieldtypes(body); fns = fieldnames(DT)
+    vals = ntuple(i -> retype_val(T, getfield(obj, fns[i]), dfts[i]), length(fns))
+    any(i -> typeof(vals[i]) !== typeof(getfield(obj, fns[i])), eachindex(fns)) || return obj
+    try
+        return W(; NamedTuple{fns}(vals)...)             # @kwdef KEYWORD constructor (wall-3 fix)
+    catch e
+        push!(RETYPE_FALLBACK, nameof(typeof(obj)))      # no usable constructor → leave Float64
+        return obj
+    end
 end
 retype(::Type{T}, x) where {T} = retype_struct(T, x)
 
@@ -149,11 +167,22 @@ const BFS0 = FT(C.BASEFLOW_SCALAR[])
 rain_ser = read_forcing_window(START, NSTEPS)
 @printf("STAGE A ForwardDiff feasibility: domain=%s N=%d steps  fff0=%.4f bf0=%.3e\n", DOMAIN, NSTEPS, FFF0, BFS0)
 
+# soil_temperature! phase whose Float64 aux (urbantv) is rebuilt to the BUNDLE eltype, so
+# the urban building-temp sub-path (_BTLunIn) doesn't mix Float64 aux with Dual state.
+function soiltemp_ft!(b, bnds, flt)
+    T = eltype(b.theta)
+    a0 = C.soiltemp_rev_aux(bnds, flt; dtime=DT)
+    a = (; urbantv = fill(T(a0.urbantv[1]), length(a0.urbantv)), dtime=a0.dtime,
+           bc_col=a0.bc_col, bc_lun=a0.bc_lun, bc_patch=a0.bc_patch,
+           nolakec=a0.nolakec, nolakep=a0.nolakep, urbanl=a0.urbanl, urbanc=a0.urbanc)
+    C.soiltemp_rev_phase!(b, a)
+end
 a_surf = C.surfhydro_rev_aux(bounds, filt; dtime=DT, use_hydrstress=config.use_hydrstress)
 bf_aux = (; cols=HCOLS, nlevsno=C.varpar.nlevsno, nlevsoi=C.varpar.nlevsoi,
             n_baseflow=FT(C.soilhydrology_params.n_baseflow), dt=DT)
 function step_phases(k)
-    Any[(rain_inject!, ((; cols=HCOLS, rain=rain_ser[k]),)),
+    Any[(rain_inject!, ((; cols=HCOLS, rain=max(rain_ser[k], 3e-4)),)),
+        (soiltemp_ft!, (bounds, filt)),   # soil_temperature! — probing the urban sub-path wall
         (C.setsoilfrac_rev_phase!, (a_surf,)), (C.setfloodc_rev_phase!, (a_surf,)),
         (satexcess_cal!, ((; cols=HCOLS),)),
         (C.setqflx_rev_phase!, (a_surf,)), (C.inflexcess_rev_phase!, (a_surf,)),
@@ -177,6 +206,16 @@ function series_T(θ::AbstractVector{T}) where {T}
 end
 loss_fd(θ) = sum(abs2, series_T(θ))              # simple SSE-to-zero-target (gate is grad vs FD)
 
+# reverse-AD gradient of the SAME loss/window (Float64 inst + Enzyme multistep_reverse!) — the
+# cross-check that ForwardDiff (forward-mode, Dual) agrees with the validated reverse-mode path.
+function grad_rev(θ)
+    mkbundle(θ) = (; C.driver_rev_bundle(deepcopy(inst))..., theta=collect(FT,θ), series=zeros(FT,NSTEPS))
+    b0 = mkbundle(θ); for ph in STEPS, (f,ca) in ph; f(b0,ca...); end
+    dd = 2 .* b0.series                          # dL/dseries for L = sum(abs2, series)
+    seed!(db,b) = (db.series .= dd; nothing)
+    return copy(C.multistep_reverse!(STEPS, mkbundle(θ), seed!).theta)
+end
+
 # =============================================================================
 # TEST 1 — does retype build a Dual inst + run ONE step? (isolate the break site)
 # =============================================================================
@@ -184,7 +223,10 @@ println("\n[T1] retype inst → Dual eltype and run 1 step ...")
 t1 = try
     D = ForwardDiff.Dual{:probe}(1.0, 1.0, 0.0)
     instD = retype(typeof(D), inst)
-    @printf("     retype OK: eltype(zwt_col)=%s\n", string(eltype(instD.soilhydrology.zwt_col)))
+    @printf("     retype OK: eltype(zwt_col)=%s  eltype(qflx_surf)=%s\n",
+        string(eltype(instD.soilhydrology.zwt_col)),
+        string(eltype(instD.water.waterfluxbulk_inst.wf.qflx_surf_col)))
+    @printf("     structs left Float64 (config/no-ctor): %s\n", string(sort(collect(RETYPE_FALLBACK))))
     b = (; inst=instD, scratch=C.cf_rev_scratch(typeof(D), length(instD.patch.column)),
            theta=[D, D], series=zeros(typeof(D), NSTEPS))
     for (f,ca) in STEPS[1]; f(b, ca...); end
@@ -210,6 +252,17 @@ if t1
             cfd=(loss_fd(θa)-loss_fd(θb))/(2h); rel=abs(g_fd[j]-cfd)/max(abs(cfd),1e-30)
             @printf("     ∂/∂%-16s FwdDiff=% .6e centralFD=% .6e rel=%.2e %s\n",
                 name, g_fd[j], cfd, rel, rel<1e-6 ? "PASS ✓" : "CHECK")
+        end
+        # cross-check vs reverse-AD (non-fatal: Enzyme reverse may not cover every phase Fwd does)
+        try
+            gr = grad_rev(θ0)
+            for (j,name) in ((1,"fff"),(2,"baseflow_scalar"))
+                rel=abs(g_fd[j]-gr[j])/max(abs(gr[j]),1e-30)
+                @printf("     FwdDiff-vs-Reverse %-16s fwd=% .6e rev=% .6e rel=%.2e %s\n",
+                    name, g_fd[j], gr[j], rel, rel<1e-6 ? "MATCH ✓" : "DIFF")
+            end
+        catch e
+            @printf("     reverse cross-check n/a (reverse-mode): %s\n", sprint(showerror,e)[1:min(60,end)])
         end
     catch e
         println("     ForwardDiff.gradient BREAK: ", sprint(showerror, e))
