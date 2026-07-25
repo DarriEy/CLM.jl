@@ -136,6 +136,11 @@ function clm_run!(;
     forcing_phase_shift_s::Int = 0,
     overrides::Union{CalibrationOverrides, Nothing} = nothing,
     step_probe::Union{Function, Nothing} = nothing,
+    # false => water/energy balance violations past skip_steps degrade to a @warn
+    # instead of endrun. The error THRESHOLD stays Fortran-exact (1e-5 mm); this only
+    # flips the same hard_error gate the AD/GPU/DA paths already use, so an annual
+    # free-run completes past a marginal (~2e-8 relative) dry-regime residual.
+    balance_hard_error::Bool = true,
     device_adapt::Union{Function, Nothing} = nothing)
 
     # ========================================================================
@@ -168,6 +173,11 @@ function clm_run!(;
     # light_inhibit=.true. for the clm5 physics; the reference lnd_in sets it too).
     # The Julia PhotosynsData field defaults to false, so enable it here to match.
     inst.photosyns.light_inhibit = true
+
+    # Fortran-exact threshold; caller may degrade the hard stop to a warning so an
+    # annual free-run completes past a marginal (Fortran-matched 1e-5 mm) dry-regime
+    # balance residual — see the `balance_hard_error` kwarg note above.
+    inst.balcheck.hard_error = balance_hard_error
 
     config = CLMDriverConfig(use_cn=use_cn, use_aquifer_layer=use_aquifer_layer,
                              use_hillslope_routing=use_hillslope_routing,
