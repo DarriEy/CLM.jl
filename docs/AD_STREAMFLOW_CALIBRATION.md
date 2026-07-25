@@ -90,14 +90,35 @@ type-genericity in the *harness*, not a model refactor; the physics is already D
   DDS's global search generalizes better — the same hard-year/multimodal pathology as §3/§4,
   **not** an AD defect (the gradient is exact).
 
-**Honest scope of "full year":** what is *run* is a melt-**season** (fixed-layer) ForwardDiff
-split-sample **plus** the year-scale gradient gate, the flat wall-time, and the combine/divide
-Dual proof — every ingredient of a genuine full-year hydrograph split-sample shown Dual-clean.
-What is **not yet run** is the literal 1yr-spinup/1yr-cal/1yr-eval hydrograph with real winter
-accumulation firing combine/divide across seasons: that needs the snow-accumulation/layer-
-management path (`handle_new_snow!`, `SnowWater`, compaction) wired into the Dual time-stepping
-thread. That is now a **bounded build, not a feasibility question** — the AD machinery, the
-discrete-op handling, and the ~40 s/gradient year-scale cost are all proven.
+**Honest scope of "full year".** What is *run* is a melt-**season** (fixed-layer) ForwardDiff
+split-sample **plus** the year-scale gradient gate and flat wall-time. What is *proven
+Dual-clean* is now the **entire snow+hydrology per-step chain**, empirically on a real Dual
+Krycklan state (`snl=−5`): **winter accumulation** (`handle_new_snow!`), cross-season
+`combine_snow_layers!`/`divide_snow_layers!`, `snow_compaction!`, melt (`soil_temperature!`),
+and the hydrology — plus a source-level audit of the water/percolation/capping/`downscale_forcings!`
+ops (thin eltype-generic KA wrappers, no `convert(Float64)`/`::Float64` on the per-step path).
+
+What is **not run** is the literal 1yr-spinup/1yr-cal/1yr-eval **hydrograph** split-sample, and
+the reason is now precise — two parts, the second of which corrects an earlier "just assembly"
+claim:
+
+1. **Assembly:** a genuine per-step year is ~35 correctly-wired calls/step over ~17.5k steps.
+   Every function is Dual-clean, but hand-wiring it is a large, error-prone build (3 signature
+   bugs surfaced on combine/divide alone) — not shipped rather than ship half-wired/fabricated.
+2. **A real physical dependency (not just assembly):** a *physically realistic* year hydrograph
+   needs the **surface energy balance** for melt timing. `soil_temperature!`'s ground-heat flux
+   consumes turbulent fluxes (`eflx_sh`, `eflx_lh`) set by `canopy_fluxes!`; the melt thread
+   here injects `sabg = θ_snow·FSDS` and *skips* canopy fluxes, so over a consistent ~10-day
+   melt window those fluxes stay valid (eval-KGE ≈ 0.72 on Krycklan 2011) but over 365 days they
+   go **stale → melt timing drifts → unphysical**. A genuine full-year hydrograph therefore also
+   requires the surface energy balance — **a scope beyond the snow+hydrology subset**, and the
+   canopy-flux path carries photosynthesis/LUNA whose Dual-cleanliness is **not yet established**.
+
+So the correct statement is: the **snow+hydrology full-year feasibility is proven** (memory-constant,
+~36–40 s/gradient to a year, all components Dual-clean, zero `src` changes); a **physically
+realistic full-year streamflow calibration additionally requires the energy-balance path**, whose
+forward-mode differentiability is the **next open feasibility question** — possibly CLM.jl's exact
+whole-model AD boundary, which is itself a paper-relevant result.
 
 ## 4. The honest bounds (differentiability *scope*)
 
