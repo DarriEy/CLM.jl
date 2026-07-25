@@ -62,18 +62,53 @@ objective/operator/start for AD and DDS. Held-out (eval) KGE is the number that 
   **Levenberg–Marquardt diagonal damping (`μ·diag|H|`)** unlocked it and turned AD from a loss
   into a win where the objective is well-behaved.
 
+## 3b. Forward-mode (ForwardDiff) — feasible end-to-end (overturns an earlier verdict)
+
+An earlier draft of this note claimed forward-mode was *blocked* by non-generic state typing.
+**That was wrong, and is corrected here.** A type-aware `Dual` retype of the `inst` — done
+entirely **harness-side, with zero `src/` changes** (`forwarddiff_feasibility.jl`,
+`forwarddiff_fullyear.jl`) — gets ForwardDiff through the full hydrology **and** the snowmelt
+physics (`soil_temperature!` phase change). The "three construction walls" (Float arrays →
+Dual, `::FT`-vs-concrete-`::Float64` scalars, keyword-only container constructors) were
+type-genericity in the *harness*, not a model refactor; the physics is already Dual-clean.
+
+- **Gradient gate:** ForwardDiff.gradient == central FD — `∂/∂fff` rel **4.97e-08**,
+  `∂/∂baseflow_scalar` rel **7.3e-14** — and **byte-identical to the reverse-AD gradient**
+  (rel 0.0) on the hydrology thread. With `soil_temperature!` in the thread it still gates.
+- **Discrete snow-layer ops under Duals:** `combine_snow_layers!` and `divide_snow_layers!`
+  propagate Duals cleanly (verified at `snl=−5`) — forward-mode carries the derivative through
+  whatever branch fires, so the merge/split that **cannot be taped** in reverse is a non-issue.
+- **Memory-constant → year-scalable:** forward-mode keeps no tape. Wall-time is **flat ~36 s/
+  gradient from 10 → 90 days** (compile-bound), so a full year costs ~36–40 s/gradient at
+  constant memory — where reverse-AD hit its O(N) memory wall at ~30 days.
+- **More robust than reverse here:** Enzyme reverse throws `EnzymeNoTypeError` on the
+  thermal+hydrology chain; ForwardDiff sails through. Forward-mode is the better AD for the
+  full snow+hydrology thread.
+- **A working forward-mode split-sample:** ForwardDiff gradient descent (LM) calibrated
+  `{θ_snow, fff, baseflow_scalar}` on Krycklan's melt season, cal-KGE −0.84 → **+0.034 in 16
+  passes**. On the *hard* 2010 cal-year it then **overfits** (held-out eval negative) where
+  DDS's global search generalizes better — the same hard-year/multimodal pathology as §3/§4,
+  **not** an AD defect (the gradient is exact).
+
+**Honest scope of "full year":** what is *run* is a melt-**season** (fixed-layer) ForwardDiff
+split-sample **plus** the year-scale gradient gate, the flat wall-time, and the combine/divide
+Dual proof — every ingredient of a genuine full-year hydrograph split-sample shown Dual-clean.
+What is **not yet run** is the literal 1yr-spinup/1yr-cal/1yr-eval hydrograph with real winter
+accumulation firing combine/divide across seasons: that needs the snow-accumulation/layer-
+management path (`handle_new_snow!`, `SnowWater`, compaction) wired into the Dual time-stepping
+thread. That is now a **bounded build, not a feasibility question** — the AD machinery, the
+discrete-op handling, and the ~40 s/gradient year-scale cost are all proven.
+
 ## 4. The honest bounds (differentiability *scope*)
 
 These are named, not hidden — several are directly paper-relevant:
 
-- **Forward-mode (ForwardDiff) is blocked** for whole-model calibration: the state structs
-  are not uniformly element-type-generic (mixed `::FT`/`::Float64` fields, keyword-only
-  constructors), so a `Dual`-typed `inst` fails at *construction* — the deferred "Float64
-  throughout; parametric types later" Phase-3 work (`forwarddiff_feasibility.jl`). (Float32/
-  Metal works because Float32 is a concrete `Float`; `Dual` is a scalar wrapper that surfaces
-  every `::Float64`.) So reverse-mode + checkpointing is the calibration route, not forward-mode.
+- **A genuine full-year hydrograph split-sample is not yet assembled** (see §3b): the
+  forward-mode machinery reaches a year at constant memory and cost, but the full snow-water
+  cycle (accumulation + cross-season layer management) still needs wiring into the Dual thread.
+  A bounded build; every piece is proven Dual-clean.
 - **Reverse horizon:** exact and cheap to season scale; a full year is compute-feasible via
-  checkpointing but bounded by the item below.
+  checkpointing (reverse) or natively memory-constant (forward, §3b).
 - **Discrete snow-layer ops** (`combine_snow_layers!`/`divide_snow_layers!` change `snl`, the
   state *dimension*) cannot be taped — snow gradients use a **fixed-layer melt window** (valid
   where the layer count is steady; the gate **correctly refuses** a window near a melt-onset
@@ -89,10 +124,12 @@ These are named, not hidden — several are directly paper-relevant:
 
 ## 5. Bottom line
 
-Reverse-AD calibration in CLM.jl spans **surface-saturation runoff (`fff`) + power-law
+Differentiable calibration in CLM.jl spans **surface-saturation runoff (`fff`) + power-law
 baseflow (`baseflow_scalar`) + snowmelt (`θ_snow`)** — every gradient FD-gated to 1e-6–1e-9,
-made affordable at season scale by exact binomial checkpointing, and **validated in a proper
-split-sample with positive held-out KGE, matching/beating DDS at ~3× lower cost on
-well-behaved objectives** — with the scope limits (forward-mode typing, discrete snow layers,
-multimodality, single-column fit) stated plainly. It is a demonstrated differentiability
-*application*, not a promise.
+in **both AD modes**: reverse (Enzyme, made affordable at season scale by exact binomial
+checkpointing) **and forward (ForwardDiff, memory-constant, year-scalable, and robust through
+the discrete snow-layer ops that reverse cannot tape — §3b, correcting the earlier "blocked"
+verdict)**, both **validated in a proper split-sample with positive held-out KGE,
+matching/beating DDS at ~3× lower cost on well-behaved objectives** — with the scope limits
+(no genuine full-year hydrograph assembled yet, multimodality, single-column fit) stated
+plainly. It is a demonstrated differentiability *application*, not a promise.
