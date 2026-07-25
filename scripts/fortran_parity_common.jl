@@ -285,10 +285,11 @@ Diff the live Julia `inst` prognostic state against a Fortran pdump file.
 Prints per-field max-abs / max-rel diffs and returns a Vector of
 (name, nabs, nrel, npts) plus the global max relative diff.
 """
-function compare_inst_to_dump(inst, dumpfile; label::String="", tol::Float64=1e-9)
+function compare_inst_to_dump(inst, dumpfile; label::String="", tol::Float64=1e-9,
+                              extra::Vector=Tuple[])
     ds = NCDataset(dumpfile, "r")
     nlevsno = CLM.varpar.nlevsno
-    reg = _parity_registry(inst)
+    reg = isempty(extra) ? _parity_registry(inst) : vcat(_parity_registry(inst), extra)
     results = Tuple{String,Float64,Float64,Int}[]
     gmax = 0.0
     @printf("  %-14s %12s %12s  %s\n", "field", "max|abs|", "max|rel|", "status")
@@ -326,6 +327,21 @@ function compare_inst_to_dump(inst, dumpfile; label::String="", tol::Float64=1e-
     close(ds)
     @printf("  %s\n", "-"^52)
     @printf("  %s global max|rel| = %.3e  (tol %.0e)\n", label, gmax, tol)
+    # Optional CSV dump (OFF by default; enabled only when PARITY_CSV_DIR is set).
+    # Appends one row per compared field so an external tool can build the
+    # port-vs-Fortran per-timestep error distribution. Nothing else changes.
+    csvdir = get(ENV, "PARITY_CSV_DIR", "")
+    if !isempty(csvdir)
+        mkpath(csvdir)
+        csvpath = joinpath(csvdir, "parity_fields.csv")
+        newfile = !isfile(csvpath)
+        open(csvpath, "a") do io
+            newfile && println(io, "harness,var,nabs,nrel,npts")
+            for (nm, a, r, p) in results
+                @printf(io, "%s,%s,%.17e,%.17e,%d\n", label, nm, a, r, p)
+            end
+        end
+    end
     return results, gmax
 end
 

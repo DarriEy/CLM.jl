@@ -136,3 +136,53 @@ def series(ds, v, idx):
         a = a.reshape(a.shape[0], -1)[:, 0]
     a = a.flatten()[idx]
     return np.where(np.isfinite(a) & (a > -9990), a, np.nan)
+
+
+def gate_cell(j, f, unit_floor, is_temp):
+    """The STRICT per-cell parity gate (single source of truth, shared by
+    parity_gate.py and the strict scorecard). Both a daily-aligned Julia series
+    `j` and Fortran series `f` must already be SCALED and index-aligned to the
+    common dates.
+
+    Returns (passed, ann_ok, rmse_ok, dpct_or_dk, nrmse) or None when fewer than
+    three finite paired samples exist (cannot be scored)."""
+    v = np.isfinite(j) & np.isfinite(f)
+    if v.sum() < 3:
+        return None
+    j, f = j[v], f[v]
+    jm, fm = j.mean(), f.mean()
+    d = jm - fm
+    rmse = float(np.sqrt(np.mean((j - f) ** 2)))
+    std_f = float(np.std(f))
+    if is_temp:
+        ann_ok = abs(d) <= STRICT_TEMP_K
+        rmse_ok = rmse <= STRICT_TEMP_RMSE_K
+        metric = d  # K
+        nrmse = rmse / std_f if std_f > 1e-9 else 0.0
+    else:
+        if abs(fm) > 1e-12:
+            pct = d / abs(fm) * 100
+            ann_ok = (abs(pct) <= STRICT_PCT) or (abs(d) <= unit_floor)
+        else:
+            # Fortran mean is ~0: the relative % is degenerate. Judge ONLY by the
+            # absolute per-unit floor — a 0% here must NOT auto-pass a cell where
+            # Fortran≈0 but Julia is large. (pct kept at 0.0 for reporting only.)
+            pct = 0.0
+            ann_ok = abs(d) <= unit_floor
+        # daily gate: normalized RMSE where the series has real variability;
+        # otherwise (near-constant) judge the absolute RMSE against the floor.
+        # A cell also passes when the ABSOLUTE daily RMSE is itself below the
+        # per-unit noise floor — the differences are physically negligible
+        # regardless of how small the Fortran std is (this is the config's stated
+        # near-zero philosophy: near-zero quantities judged vs the absolute floor).
+        # Without this, a variable that is ~0 all year (e.g. surface water at a
+        # site that ponds a few days) fails on a normalized RMSE of noise even
+        # though the actual difference is below the floor.
+        if std_f > unit_floor:
+            nrmse = rmse / std_f
+            rmse_ok = (nrmse <= STRICT_NRMSE) or (rmse <= unit_floor)
+        else:
+            nrmse = rmse / std_f if std_f > 1e-9 else 0.0
+            rmse_ok = rmse <= unit_floor
+        metric = pct
+    return (ann_ok and rmse_ok), ann_ok, rmse_ok, metric, nrmse
