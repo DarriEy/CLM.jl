@@ -16,47 +16,11 @@ skipped and reported as pending.
 import os, sys
 import numpy as np
 from netCDF4 import Dataset
-from parity_config import (DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series,
+from parity_config import (DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series, gate_cell,
                            STRICT_PCT, STRICT_TEMP_K, STRICT_NRMSE, STRICT_TEMP_RMSE_K,
                            TEMP_VARS, DOCUMENTED_EXCEPTIONS)
 
 BRIEF = "--brief" in sys.argv
-
-def gate_cell(j, f, unit_floor, is_temp):
-    """Return (passed, ann_ok, rmse_ok, dpct_or_dk, nrmse, note)."""
-    v = np.isfinite(j) & np.isfinite(f)
-    if v.sum() < 3:
-        return None
-    j, f = j[v], f[v]
-    jm, fm = j.mean(), f.mean()
-    d = jm - fm
-    rmse = float(np.sqrt(np.mean((j - f) ** 2)))
-    std_f = float(np.std(f))
-    if is_temp:
-        ann_ok = abs(d) <= STRICT_TEMP_K
-        rmse_ok = rmse <= STRICT_TEMP_RMSE_K
-        metric = d  # K
-        nrmse = rmse / std_f if std_f > 1e-9 else 0.0
-    else:
-        pct = d / abs(fm) * 100 if abs(fm) > 1e-12 else 0.0
-        ann_ok = (abs(pct) <= STRICT_PCT) or (abs(d) <= unit_floor)
-        # daily gate: normalized RMSE where the series has real variability;
-        # otherwise (near-constant) judge the absolute RMSE against the floor.
-        # A cell also passes when the ABSOLUTE daily RMSE is itself below the
-        # per-unit noise floor — the differences are physically negligible
-        # regardless of how small the Fortran std is (this is the config's stated
-        # near-zero philosophy: near-zero quantities judged vs the absolute floor).
-        # Without this, a variable that is ~0 all year (e.g. surface water at a
-        # site that ponds a few days) fails on a normalized RMSE of noise even
-        # though the actual difference is below the floor.
-        if std_f > unit_floor:
-            nrmse = rmse / std_f
-            rmse_ok = (nrmse <= STRICT_NRMSE) or (rmse <= unit_floor)
-        else:
-            nrmse = rmse / std_f if std_f > 1e-9 else 0.0
-            rmse_ok = rmse <= unit_floor
-        metric = pct
-    return (ann_ok and rmse_ok), ann_ok, rmse_ok, metric, nrmse
 
 pending, per_dom = [], []
 undocumented, documented_hit = [], []

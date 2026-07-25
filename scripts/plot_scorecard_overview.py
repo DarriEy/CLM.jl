@@ -21,7 +21,7 @@ from matplotlib.patches import Rectangle
 # COVERAGE tier (|Δ|<10% / 0.5K or unit floor). The domain registry + variable
 # set + per-unit floors live in the shared parity_config; the strict scientific-
 # parity gate uses the same definitions via scripts/parity_gate.py.
-from parity_config import DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series
+from parity_config import DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series, TEMP_VARS
 
 # Only score domains whose Fortran reference AND Julia output both exist; newly
 # added biomes whose references are still generating are skipped until ready.
@@ -42,12 +42,17 @@ for i, (key, fh0, jnc, lab, biome) in enumerate(DOMAINS):
         if j is None or f is None: continue
         jm, fm = np.nanmean(j)*sc, np.nanmean(f)*sc
         d = jm - fm
-        pct = d/abs(fm)*100 if abs(fm) > 1e-9 else 0.0
+        near_zero_f = abs(fm) <= 1e-9
+        pct = d/abs(fm)*100 if not near_zero_f else 0.0
         grid[i, k] = pct
-        ok = (abs(d) < 0.5) if grp == "State" and "T" == vl.split()[-1][:1] and floor == 0.5 and vl not in ("Sat fraction",) else False
-        # temperature vars: |Δ|<0.5K; else |%|<10 OR |Δ|<unit floor
-        if floor == 0.5 and ("T" in vl):
+        # temperature vars (from the shared TEMP_VARS set): |Δ|<0.5K. Otherwise
+        # |%|<10 OR |Δ|<unit floor — except when the Fortran mean is ~0, where the
+        # relative % is degenerate and we judge ONLY by the absolute floor (a 0%
+        # must not auto-pass a Fortran≈0 / Julia-large cell).
+        if jn in TEMP_VARS:
             ok = abs(d) < 0.5
+        elif near_zero_f:
+            ok = abs(d) < floor
         else:
             ok = (abs(pct) < 10) or (abs(d) < floor)
         passed[i, k] = ok
