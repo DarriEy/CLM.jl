@@ -232,7 +232,28 @@ if STAGE == "combine"
             snowc, bounds.begc:bounds.endc, nsno)
         ok_d=true; @printf("divide_snow_layers! on Dual: OK  (snl[%d]=%d)\n", c0, col.snl[c0])
     catch e; @printf("divide_snow_layers! Dual BREAK: %s\n", sprint(showerror,e)[1:min(140,end)]); end
-    @printf("STAGE combine: %s\n", (ok_c && ok_d) ? "PASS ✓ — discrete snow-layer ops run with Duals (forward-mode)" : "see breaks above")
+    # --- ACCUMULATION side: handle_new_snow! (new snowfall → fresh layer) + snow_compaction! ---
+    a2l=instD.atm2lnd; ok_h=false; ok_sc=false
+    try
+        for c in bounds.begc:bounds.endc; a2l.forc_snow_downscaled_col[c]=1e-3; a2l.forc_t_downscaled_col[c]=270.0; end
+        snl0=col.snl[c0]
+        C.handle_new_snow!(instD.temperature, wsb, wd, col, lun, filt.nolakec, bounds.begc:bounds.endc, DT, nsno;
+            forc_t=a2l.forc_t_downscaled_col, forc_wind=a2l.forc_wind_grc,
+            qflx_snow_grnd=wf.qflx_snow_grnd_col, qflx_snow_drain=wf.qflx_snow_drain_col,
+            int_snow=wsb.int_snow_col, scf_method=instD.scf_method)
+        ok_h=true; @printf("handle_new_snow! on Dual: OK  (snl %d→%d, eltype snowdepth=%s)\n",
+            snl0, col.snl[c0], string(eltype(wd.snow_depth_col)))
+    catch e; @printf("handle_new_snow! Dual BREAK: %s\n", sprint(showerror,e)[1:min(160,end)]); end
+    try
+        C.snow_compaction!(col.dz, DT, col.snl, instD.temperature.t_soisno_col, ws.h2osoi_ice_col, ws.h2osoi_liq_col,
+            instD.temperature.imelt_col, wd.frac_sno_col, wd.frac_h2osfc_col, wd.swe_old_col, wsb.int_snow_col,
+            wd.frac_iceold_col, a2l.forc_wind_grc, col.gridcell, col.landunit, lun.lakpoi, lun.urbpoi,
+            snowc, bounds.begc:bounds.endc, nsno; use_subgrid_fluxes=false,
+            n_melt=fill(20.0,length(col.snl)), int_snow_max=2000.0)
+        ok_sc=true; @printf("snow_compaction! on Dual: OK  (eltype dz=%s)\n", string(eltype(col.dz)))
+    catch e; @printf("snow_compaction! Dual BREAK: %s\n", sprint(showerror,e)[1:min(160,end)]); end
+    @printf("STAGE combine: %s\n", (ok_c && ok_d && ok_h && ok_sc) ?
+        "PASS — combine/divide + handle_new_snow + compaction all run with Duals (forward-mode)" : "see results above")
 end
 
 if STAGE == "gate"
