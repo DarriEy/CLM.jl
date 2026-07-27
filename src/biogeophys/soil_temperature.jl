@@ -72,6 +72,28 @@ const THIN_SFCLAYER = 1.0e-6  # Threshold for thin surface layer
 # same reasoning, same value as snow_hydrology.jl's SNOW_PERC_WATER_K.
 const PHASE_CHANGE_MASS_K = Ref(1.0e9)
 
+# PHASE_CHANGE_TEMP_K — sharpness of the melt/freeze LABEL transition (Phase-3 "last mile").
+#   The melt-identification `t_soisno > tfrz` (with ice) is a hard threshold whose derivative
+#   kinks the snow-melt flux at tfrz: below tfrz no melt, above it melt ∝ (t−tfrz). Under a
+#   smooth mode (ForwardDiff.Dual, or SMOOTH_MODE=:always for FD/AD consistency) the melt
+#   driver becomes `smooth_max(0, t−tfrz; k=PHASE_CHANGE_TEMP_K)` — a C¹ softplus that ramps
+#   through tfrz. CRITICAL — this axis is a TEMPERATURE in KELVIN, not a mass: width =
+#   log(2)/k. k = 1e3 → width 6.9e-4 K, and the smooth_max saturation guard returns EXACTLY
+#   max(0,·) more than _SMOOTH_SAT/k ≈ 0.036 K from tfrz, so a cold layer (t ≪ tfrz) is
+#   byte-identical to the hard path and only a ~0.036 K band around freezing is rounded — far
+#   below any physical freezing-point uncertainty, so the melt-mass bias is negligible (unlike
+#   the kg/m² mass axis, where a comparable width would misassign 0.0139 mm of ice — see
+#   PHASE_CHANGE_MASS_K). Default path is untouched: the hard branch runs unless _pc_smooth(T).
+const PHASE_CHANGE_TEMP_K = Ref(1.0e3)
+
+# GPU-safe smooth-mode predicate for phase-change control flow. Float64 consults the host-only
+# SMOOTH_MODE=:always override (CPU calibration / FD-consistency); every other type (Float32
+# device kernels, ForwardDiff.Dual) is purely type-based and never dereferences the host global —
+# so a device kernel (Float32 → false) stays exact and never reads a host Ref. Mirrors how the
+# smooth_max/smooth_min methods themselves gate the global read by dispatch.
+@inline _pc_smooth(::Type{Float64}) = _use_smooth(Float64) || _smooth_f64()
+@inline _pc_smooth(::Type{T}) where {T} = _use_smooth(T)
+
 # =========================================================================
 # Kernels for the soil_temperature! orchestrator's own per-column/-level loops
 # (so the whole driver runs on a device, not just its sub-functions). Each is the
@@ -1862,13 +1884,15 @@ Adapt.@adapt_structure PcbTmp
 @kernel function _phase_change_beta_kernel!(lyr::PcbLyr, colv::PcbCol, pin::PcbIn,
         tmp::PcbTmp, imelt, @Const(mask), @Const(urbpoi), @Const(snl), @Const(landunit),
         @Const(itype), @Const(lun_itype), dtime, nlevsno::Int, nlevgrnd::Int,
-        nlevurb::Int, nlevmaxurbgrnd::Int, pck)
+        nlevurb::Int, nlevmaxurbgrnd::Int, pck, ptk)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(lyr.t_soisno)
         joff = nlevsno
         tfrz = T(TFRZ); hfus = T(HFUS); grav = T(GRAV); denice = T(DENICE); thou = T(1000.0)
         mk = T(pck)  # latent-heat mass-clamp sharpness (PHASE_CHANGE_MASS_K)
+        smooth_lab = _pc_smooth(T)   # smooth the melt/freeze LABEL transition? (Dual / :always)
+        tk = T(ptk)                  # melt-label sharpness (PHASE_CHANGE_TEMP_K), temperature axis
         l = landunit[c]
         it = itype[c]
         wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
@@ -1905,15 +1929,38 @@ Adapt.@adapt_structure PcbTmp
         for j in (-nlevsno + 1):0
             jj = j + joff
             if j >= snl[c] + 1
-                if lyr.h2osoi_ice[c, jj] > zero(T) && lyr.t_soisno[c, jj] > tfrz
-                    imelt[c, jj] = 1
-                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
-                    lyr.t_soisno[c, jj] = tfrz
-                end
-                if lyr.h2osoi_liq[c, jj] > zero(T) && lyr.t_soisno[c, jj] < tfrz
-                    imelt[c, jj] = 2
-                    tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
-                    lyr.t_soisno[c, jj] = tfrz
+                if smooth_lab
+                    # SMOOTH melt driver (Phase-3 last mile): tinc = -smooth_max(0, t−tfrz),
+                    # a C¹ softplus ramp through tfrz. The smooth_max saturation guard returns
+                    # EXACTLY 0 for t < tfrz − _SMOOTH_SAT/tk (~0.036 K), so a genuinely cold
+                    # layer is byte-identical to the hard test below; only a ~0.036 K band is
+                    # rounded. Freeze is excluded where melt fired (mutually exclusive, as the
+                    # hard `t = tfrz` made them below).
+                    if lyr.h2osoi_ice[c, jj] > zero(T)
+                        dmelt = smooth_max(zero(T), lyr.t_soisno[c, jj] - tfrz; k = tk)
+                        if dmelt > zero(T)
+                            imelt[c, jj] = 1
+                            tmp.tinc[c, jj] = -dmelt
+                            lyr.t_soisno[c, jj] -= dmelt
+                        end
+                    end
+                    if imelt[c, jj] != 1 && lyr.h2osoi_liq[c, jj] > zero(T) && lyr.t_soisno[c, jj] < tfrz
+                        imelt[c, jj] = 2
+                        tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                        lyr.t_soisno[c, jj] = tfrz
+                    end
+                else
+                    # HARD default (byte-identical): unchanged from the Fortran port.
+                    if lyr.h2osoi_ice[c, jj] > zero(T) && lyr.t_soisno[c, jj] > tfrz
+                        imelt[c, jj] = 1
+                        tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                        lyr.t_soisno[c, jj] = tfrz
+                    end
+                    if lyr.h2osoi_liq[c, jj] > zero(T) && lyr.t_soisno[c, jj] < tfrz
+                        imelt[c, jj] = 2
+                        tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
+                        lyr.t_soisno[c, jj] = tfrz
+                    end
                 end
             end
         end
@@ -2189,7 +2236,8 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
     backend = _kernel_backend(t_soisno)
     _phase_change_beta_kernel!(backend)(lyr, colv, pin, tmp, temperature.imelt_col,
         mask_nolakec, lun.urbpoi, col.snl, col.landunit, col.itype, lun.itype,
-        dt, nlevsno, nlevgrnd, nlevurb, nlevmaxurbgrnd, FT(PHASE_CHANGE_MASS_K[]); ndrange = nc)
+        dt, nlevsno, nlevgrnd, nlevurb, nlevmaxurbgrnd,
+        FT(PHASE_CHANGE_MASS_K[]), FT(PHASE_CHANGE_TEMP_K[]); ndrange = nc)
     KernelAbstractions.synchronize(backend)
 
     return nothing

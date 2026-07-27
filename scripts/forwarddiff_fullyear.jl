@@ -30,6 +30,10 @@ const DOM_DIR = joinpath(ROOT, "domain_$DOMAIN")
 const FSURDAT = joinpath(DOM_DIR, "settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = joinpath(DOM_DIR, "settings/CLM/parameters/clm5_params.nc")
 const STAGE = get(ENV, "CLM_FY_STAGE", "combine")
+# CLM_SMOOTH=always|never|auto — set SMOOTH_MODE so BOTH the ForwardDiff (Dual) and central-FD
+# (Float64) paths evaluate the SAME function. Under the default :auto, Dual smooths but Float64
+# is exact, so an FD-vs-AD gap conflates the smooth-vs-hard mismatch with real non-smoothness.
+get(ENV,"CLM_SMOOTH","")!="" && (C.SMOOTH_MODE[] = Symbol(ENV["CLM_SMOOTH"]))
 const ABSORP = parse(Float64, get(ENV, "CLM_ABSORP", "0.12"))
 const NACC = parse(Int, get(ENV, "CLM_NACC", "140"))
 const NDAYS = parse(Int, get(ENV, "CLM_NDAYS", "10"))

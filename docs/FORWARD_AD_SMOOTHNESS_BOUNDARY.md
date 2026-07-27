@@ -123,6 +123,45 @@ JAX/PyTorch physics engines). Standard remedies, in CLM.jl terms:
 
 ---
 
+## 5b. Phase-3 executed — the `imelt` label smoothed, quantified
+
+Two things sharpen §3/§5 after actually doing the work.
+
+**(i) The continuous smoothing already existed, and a `:auto` artifact inflated the residual.**
+`soil_temperature.jl`/`snow_hydrology.jl` already smooth the *continuous* heat/mass partitions
+(gated by `SMOOTH_MODE`); the authors deliberately left the integer `imelt` **label** and the
+combine/divide **layer count** discrete. My original sweep ran under `SMOOTH_MODE=:auto`, where
+ForwardDiff (Dual) smooths but central-FD (Float64) does not — so part of the "~1e-3 pervasive"
+was a **smooth-vs-hard mismatch**, not non-smoothness. Re-run under `:always` (both paths on the
+same smoothed function), the settled-melt residual tightens to **~2–6e-4** (FD-truncation-limited),
+and the genuine non-smoothness concentrates at the discrete-label flips.
+
+**(ii) The `imelt` melt label is now smoothed (the last mile).** The snow melt identification
+`t_soisno > tfrz` (with ice) — a hard threshold — is replaced, under a smooth mode, by a C¹ melt
+driver `tinc = −smooth_max(0, t − tfrz; k = PHASE_CHANGE_TEMP_K)`. The key is the **axis**: this is
+a **temperature in Kelvin**, so width `log(2)/k` at `k=1e3` is `6.9e-4 K`, and the `smooth_max`
+saturation guard returns **exactly** 0 for `t < tfrz − 0.036 K` — a genuinely cold layer is
+byte-identical to the hard path; only a ~0.036 K band around freezing is rounded, a negligible
+melt-mass bias (unlike the kg/m² mass axis, where a comparable width would misassign 0.0139 mm of
+ice). Default (`:auto` + Float64) runs the original hard branch verbatim.
+
+**Measured effect** (`CLM_SMOOTH=always` sweep, before → after the label smoothing):
+
+| θ_snow | before | after | what it is |
+|---|---|---|---|
+| 0.500 | **2.44** (sign-flipped) | **0.015** | pure `imelt` label flip → **fixed** |
+| 1.926 | **0.427** | **0.004** | pure `imelt` label flip → **fixed** |
+| 0.704 / 0.907 | 0.9 / 0.05 | 0.9 / 0.6 | `snl` combine/divide straddle → **remains** |
+| settled melt | 2–6e-4 | 2–6e-4 | unchanged (FD-truncation-limited) |
+
+So smoothing the temperature-threshold label removes the label-flip spikes; **the residual
+non-smoothness is now purely the `snl` combine/divide layer-count change** — the genuine
+dimension-change discontinuity that cannot be smoothed without a structural fixed-layer
+reformulation. Validated: **507 default-path tests byte-identical** (`_pc_smooth(T)` is false for
+`Float64`+`:auto`); the melt driver is C¹ across `tfrz` under Dual and `→ hard as k → ∞`
+(`test_phase_snow_smoothing.jl`). Freeze and soil-layer labels are left hard (same technique
+applies; they do not drive the spring-melt streamflow gradient).
+
 ## 6. The photosynthesis claim, corrected
 
 The earlier "Farquhar photosynthesis is Dual-clean" claim was **unproven — potentially vacuous**.
@@ -148,8 +187,12 @@ This is the same class as the port's other hard-won lessons — *conservation is
 *vacuous checks*: assert the **value** (the gradient, across a transition), never that it merely ran.
 
 **Bottom line.** CLM.jl has **no forward-AD type wall** — the whole per-step physics is `Dual`-clean.
-Its forward-AD boundary is **smoothness**: the discrete snow events (`imelt`, combine/divide) make
-the streamflow loss piecewise-smooth, so the gradient is **exact away from transitions, usable across
-sparse ones (and empirically calibrates real basins), and needs Phase-3 smoothing to be robust across
-the dense transitions of a full year.** `Dual`-clean is necessary but not sufficient; smoothness is
-the deeper requirement.
+Its forward-AD boundary is **smoothness**: the discrete snow events make the streamflow loss
+piecewise-smooth. The continuous heat/mass partitions were already smoothed; **Phase-3 now also
+smooths the `imelt` melt label** on the temperature axis (negligible bias, default byte-identical),
+removing the label-flip gradient spikes (§5b). The gradient is **exact away from transitions and
+usable across sparse ones (and empirically calibrates real basins)**; the **one remaining
+discontinuity is the `snl` combine/divide layer-count** — a genuine dimension change that needs a
+structural fixed-layer reformulation, not a threshold smoothing. `Dual`-clean is necessary but not
+sufficient; smoothness is the deeper requirement, and it is now closed except for the integer
+layer count.
