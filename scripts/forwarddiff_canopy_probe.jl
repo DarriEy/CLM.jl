@@ -170,6 +170,28 @@ if aux !== nothing
         rel = abs(g-fd)/max(abs(fd),1e-30)
         @printf("[GATE] d(Σ t_veg)/d(air-temp scale): FwdDiff=% .6e  FD=% .6e  rel=%.2e  %s\n",
             g, fd, rel, rel<1e-5 ? "PASS ✓" : "CHECK")
+        # ---- psn-DEGENERACY check: is the "Farquhar Dual-clean" claim NON-VACUOUS? ----
+        # The t_veg gate flows through the ENERGY BALANCE; it does NOT prove the derivative goes
+        # through the Farquhar solve. Gate a genuinely photosynthesis-dependent output (GPP =
+        # Σ psnsun). If GPP≈0 in the probe state, d(GPP)/dθ = 0 → VACUOUS: psn runs without a
+        # type-break but is un-exercised, so its Dual-cleanliness is UNCONFIRMED.
+        if USE_PSN
+            function gpp_of(θ::AbstractVector{Q}) where {Q}
+                iT = retype(Q, deepcopy(inst))
+                iT.atm2lnd.forc_t_downscaled_col .= θ[1] .* bt; iT.atm2lnd.forc_th_downscaled_col .= θ[1] .* bth
+                a = canopy_aux_T(iT, bounds, filt, Q; use_psn=true, dtime=DT)
+                bb = (; inst=iT, scratch=C.cf_rev_scratch(Q, np))
+                vv = C.cf_rev_bundle(iT.canopystate, iT.energyflux, iT.frictionvel, iT.temperature,
+                    iT.solarabs, iT.soilstate, iT.water.waterfluxbulk_inst, iT.water.waterstatebulk_inst,
+                    iT.water.waterdiagnosticbulk_inst, iT.photosyns, bb.scratch)
+                for (f2,ca2) in C.cf_rev_phases(a, 3); f2(vv, ca2...); end
+                s = zero(Q); for p in expp; s += iT.photosyns.psnsun_patch[p]; end; s
+            end
+            gpp0 = gpp_of([1.0]); gg = ForwardDiff.gradient(gpp_of, [1.0])[1]
+            @printf("[psn-degeneracy] GPP=Σpsnsun=% .4e  d(GPP)/d(air-temp)=% .4e  →  %s\n", gpp0, gg,
+                abs(gg)<1e-30 ? "VACUOUS — psn un-exercised, Farquhar Dual-cleanliness UNCONFIRMED" :
+                                "non-zero — Farquhar IS exercised (Dual-clean confirmed)")
+        end
     else
         pi,fn,msg = firstbreak
         @printf("FIRST BREAK at canopy phase %d (%s):\n  %s\n", pi, string(fn), msg[1:min(260,end)])

@@ -10,7 +10,13 @@
 #   STAGE split    — ForwardDiff LM calibration of {θ_snow, fff, baseflow_scalar} on a melt
 #                    season, evaluated on the independent same-season-next-year window, vs DDS.
 #
-#   CLM_FY_STAGE=combine|gate|split  julia --project=. scripts/forwarddiff_fullyear.jl
+#   STAGE sweep    — ADVERSARIAL: sweep θ_snow across combine/divide (snl) + imelt transitions,
+#                    FwdDiff gradient vs central FD at each θ. Shows the gradient is only
+#                    piecewise-valid: exact away from transitions, ~1e-3 imelt kink on melt
+#                    steps, 11-85% at snl straddles → the SMOOTHNESS boundary (see
+#                    docs/FORWARD_AD_SMOOTHNESS_BOUNDARY.md). Run with CLM_LAYERS=1.
+#
+#   CLM_FY_STAGE=combine|gate|split|sweep  julia --project=. scripts/forwarddiff_fullyear.jl
 # =============================================================================
 using CLM, ForwardDiff, Printf, Statistics, NCDatasets, Dates, Random, LinearAlgebra
 const C = CLM
@@ -145,6 +151,24 @@ function accum_runoff!(b,aux); wf=b.inst.water.waterfluxbulk_inst.wf; s=zero(elt
     @inbounds for c in aux.cols; s+=wf.qflx_surf_col[c]+wf.qflx_drain_col[c]; end
     b.series[aux.k]+=s; nothing; end
 
+# ---- DISCRETE snow-layer management: combine/divide fire snl TRANSITIONS inside the
+# differentiated loop (only wired in when CLM_LAYERS=1). Signatures match the STAGE combine
+# probe above. These are the operations whose kink breaks gradient smoothness. ----
+function combine_phase!(b,aux); i=b.inst; col=i.column; wsb=i.water.waterstatebulk_inst; ws=wsb.ws
+    wd=i.water.waterdiagnosticbulk_inst; wf=i.water.waterfluxbulk_inst.wf; lun=i.landunit
+    @inbounds for c in aux.bc; aux.snowc[c]= col.snl[c]<0; end
+    C.combine_snow_layers!(col.snl, col.dz, col.zi, col.z, i.temperature.t_soisno_col,
+        ws.h2osoi_ice_col, ws.h2osoi_liq_col, ws.h2osno_no_layers_col, wd.snow_depth_col,
+        wd.frac_sno_col, wd.frac_sno_eff_col, wsb.int_snow_col, wd.snw_rds_col, i.aerosol,
+        lun.itype, lun.urbpoi, col.landunit, aux.snowc, aux.bc, aux.nsno,
+        wf.qflx_sl_top_soil_col, aux.dt); nothing; end
+function divide_phase!(b,aux); i=b.inst; col=i.column; ws=i.water.waterstatebulk_inst.ws
+    wd=i.water.waterdiagnosticbulk_inst
+    @inbounds for c in aux.bc; aux.snowc[c]= col.snl[c]<0; end
+    C.divide_snow_layers!(col.snl, col.dz, col.zi, col.z, i.temperature.t_soisno_col,
+        ws.h2osoi_ice_col, ws.h2osoi_liq_col, wd.frac_sno_col, wd.snw_rds_col, i.aerosol, false,
+        aux.snowc, aux.bc, aux.nsno); nothing; end
+
 # ---- build a ForwardDiff season context ----
 function make_ff_season(start::Date; ndays::Int, gain_fixed=nothing)
     nsteps=ndays*STEPS_PER_DAY
@@ -160,6 +184,8 @@ function make_ff_season(start::Date; ndays::Int, gain_fixed=nothing)
     hnd_aux=C.hydnodrain_rev_aux(bounds,filt; dtime=DT)
     bf_aux=(; cols=hcols, nlevsno=C.varpar.nlevsno, nlevsoi=C.varpar.nlevsoi,
              n_baseflow=FT(C.soilhydrology_params.n_baseflow), dt=DT)
+    with_layers = get(ENV,"CLM_LAYERS","0")=="1"   # wire combine/divide (snl transitions) into the loop
+    lay_aux=(; snowc=falses(length(inst.column.snl)), bc=bounds.begc:bounds.endc, nsno=C.varpar.nlevsno, dt=DT)
     step_phases(k)=Any[
         (meltenergy_phase!, ((; mask=smask, energy=fsds[k]*ABSORP),)),
         (soiltemp_ft!, ((; a0=st_a0),)),
@@ -171,7 +197,8 @@ function make_ff_season(start::Date; ndays::Int, gain_fixed=nothing)
         (C.infil_rev_phase!,(a_surf,)),(C.totalrunoff_rev_phase!,(a_surf,)),
         (C.soilwater_rev_phase!,(sw_aux,)),(C.watertable_rev_phase!,(wt_aux,)),
         (C.hydnodrain_rev_phase!,(hnd_aux,)),
-        (baseflow_cal!,(bf_aux,)),(accum_runoff!,((; cols=hcols, k=k),))]
+        (baseflow_cal!,(bf_aux,)),(accum_runoff!,((; cols=hcols, k=k),)),
+        (with_layers ? Any[(combine_phase!,(lay_aux,)),(divide_phase!,(lay_aux,))] : Any[])...]
     steps=[step_phases(k) for k in 1:nsteps]
     function series_T(θ::AbstractVector{Tt}) where {Tt}
         instT=retype(Tt, deepcopy(inst))    # fresh copy: never mutate the pristine base inst
@@ -197,8 +224,14 @@ function make_ff_season(start::Date; ndays::Int, gain_fixed=nothing)
     grad(θ)=ForwardDiff.gradient(loss, θ)
     mkbundle(θ)=(; inst=retype(FT, deepcopy(inst)), scratch=C.cf_rev_scratch(FT, length(inst.patch.column)),
                    theta=collect(FT,θ), series=zeros(FT,nsteps))
+    # snl trajectory over the window (Float64 run) to detect discrete snl transitions firing
+    function snl_traj(θ)
+        b=mkbundle(θ); tr=Int[]
+        for ph in steps; for (f,ca) in ph; f(b,ca...); end; push!(tr, b.inst.column.snl[hcols[1]]); end
+        tr
+    end
     (; inst,bounds,filt,config,hcols,nsteps,ndays,series_T,loss,grad,kge_g,own_gain,gain,fin,
-       nfin=count(fin), start, steps, mkbundle)
+       nfin=count(fin), start, steps, mkbundle, snl_traj)
 end
 
 # init once so the param globals (fff/baseflow_scalar) are the basin defaults, not pre-init NaN
@@ -335,4 +368,41 @@ if STAGE == "split"
         @printf("%-6s | %-+8.4f | %-+11.4f | %-+11.4f | %d fwd-evals\n","DDS",dds_cal,dds_es,dds_ebc,evals)
         println("="^80)
     end
+end
+
+# =============================================================================
+# STAGE sweep — ADVERSARIAL: does the ForwardDiff gradient survive discrete snl/imelt
+# TRANSITIONS? Sweep θ_snow over a range that drives the pack through combine/divide (snl
+# changes) and imelt freeze/thaw flips. At each θ: FwdDiff gradient vs CENTRAL FD (central FD
+# re-runs the whole loop at θ±h so it is the ground truth for the ACTUAL kinked function).
+# A spike in |FwdDiff-FD| where snl/imelt changes = the gradient is only piecewise-valid.
+# Run with CLM_LAYERS=1 to include combine/divide (snl transitions); =0 for imelt-only.
+# =============================================================================
+if STAGE == "sweep"
+    println("="^92); @printf("STAGE sweep — FwdDiff vs central FD across snl/imelt transitions (LAYERS=%s)\n", get(ENV,"CLM_LAYERS","0")); println("="^92)
+    s=make_ff_season(Date(2010,4,20); ndays=parse(Int,get(ENV,"CLM_NDAYS","10")))
+    fff0=FT(C.sat_excess_runoff_params.fff); bf0=FT(C.BASEFLOW_SCALAR[])
+    lo=parse(Float64,get(ENV,"CLM_SNOW_LO","0.5")); hi=parse(Float64,get(ENV,"CLM_SNOW_HI","6.0"))
+    nθ=parse(Int,get(ENV,"CLM_NSWEEP","28")); h=parse(Float64,get(ENV,"CLM_FDH","1e-4"))
+    @printf("θ_snow sweep [%.2f,%.2f] × %d,  FD h=%.1e,  N=%d steps\n", lo, hi, nθ, h, s.nsteps)
+    @printf("%-8s %-9s %-13s %-13s %-9s %-18s %s\n","θ_snow","loss","FwdDiff","centralFD","rel","snl(θ) uniq","snl-change@θ±h?")
+    println("-"^92)
+    worst=Ref((0.0, 0.0))   # Ref: top-level `for` is soft-scope, avoid the local-shadow gotcha
+    for θs in range(lo, hi, length=nθ)
+        θ=[θs, fff0, bf0]
+        g=s.grad(θ)[1]
+        fd=(s.loss([θs+h,fff0,bf0])-s.loss([θs-h,fff0,bf0]))/(2h)
+        rel=abs(g-fd)/max(abs(fd),1e-30)
+        tr=s.snl_traj(θ); uq=unique(tr)
+        trp=s.snl_traj([θs+h,fff0,bf0]); trm=s.snl_traj([θs-h,fff0,bf0])
+        changed = (tr != trp) || (tr != trm)   # snl trajectory differs across the FD bracket?
+        @printf("%-8.3f %-9.3e % -12.5e % -12.5e %-9.2e %-18s %s\n", θs, s.loss(θ), g, fd, rel,
+            string(uq), changed ? "YES <- STRADDLE" : "no")
+        rel>worst[][2] && (worst[]=(θs, rel))
+    end
+    println("-"^92)
+    @printf("worst FwdDiff-vs-FD rel over sweep = %.2e at θ_snow=%.3f\n", worst[][2], worst[][1])
+    println("VERDICT: ", worst[][2]<0.05 ?
+        "transitions gradient-BENIGN (FwdDiff==FD across snl/imelt changes → full-year is genuinely assembly)" :
+        "FwdDiff DIVERGES from FD across transitions (gradient only piecewise-valid → needs smoothing; quantified above)")
 end
