@@ -120,33 +120,47 @@ photosynthesis** (`use_psn=true`, 16 phases) — **all Dual-clean**, and the gra
 melt-relevant output through the full Monin–Obukhov + turbulent-flux + photosynthesis Newton
 solve gates against central FD (`d Σt_veg / d air-temp`, FwdDiff vs FD rel **6.6e-7**). So:
 
-- **Farquhar photosynthesis is Dual-clean — it is NOT the forward-AD boundary.** The only
-  Float64 pin found was in the aux *builder* `canopy_rev_aux` (`driver_reverse.jl:87,134`
-  hardcodes `FT=Float64`) — the same harness/aux-typing class as the earlier hydrology walls,
-  removable by an eltype-generic helper (a minimal, additive, default-exact `src` change, or a
-  harness mirror as used here). The physics kernels carry no Dual-hostile Float64 dependency.
+- **Surface energy balance is non-degenerately Dual-clean** (`d Σt_veg/d air-temp` rel 6.6e-7 —
+  the derivative genuinely flows through the Monin–Obukhov + turbulent-flux solve). The only
+  Float64 pin found was the aux *builder* `canopy_rev_aux` (`driver_reverse.jl:87,134` hardcodes
+  `FT=Float64`) — the same harness/aux-typing class as the hydrology walls, eltype-generic-fixable.
+- **Farquhar photosynthesis: `Dual`-cleanliness UNCONFIRMED (an earlier "Dual-clean" claim here
+  was vacuous).** The 6.6e-7 gate flowed through the energy balance, **not** demonstrably through
+  the photosynthesis solve; a direct `d(GPP)/d(vcmax)` gate returned **0.0** because `psnsun`≈0 in
+  the probe state, so the derivative never entered the Farquhar Newton solve. The psn phases run
+  without a type-break, but a non-zero psn gradient (needing a genuinely photosynthesizing state)
+  was not produced. "It ran clean" is not evidence the gradient is real.
 - **LUNA** (Rubisco-N acclimation) is a *periodic driver-level* call, not part of the per-step
   `canopy_fluxes!` path, so it does not enter the per-step melt chain (unprobed, out of scope).
 
-So the correct statement is: **every component of a physical full-year ForwardDiff hydrograph —
-snow accumulation/melt/layer-management, hydrology, AND the surface energy balance incl.
-photosynthesis — is confirmed Dual-differentiable, gradient-gated, at flat memory-constant cost.**
-The full-year hydrograph is therefore a **large-but-real engineering assembly** (wire the ~35-call
-per-step year loop + eltype-generic aux helpers), **not a feasibility barrier** — there is **no
-whole-model forward-AD wall at canopy fluxes or photosynthesis**. Zero `src` changes throughout;
-the residual Float64 pins are all in harness/aux builders, each minimal-additive-fixable.
+**⚠ Correction (see `FORWARD_AD_SMOOTHNESS_BOUNDARY.md`).** An earlier version of this section
+stated the full-year hydrograph is "a large engineering assembly, not a feasibility barrier" and
+that photosynthesis "is Dual-clean." **Both were overstated.** Adversarial testing showed that
+`Dual`-clean (the forward pass runs) does **not** imply a correct gradient: CLM's discrete snow
+events (`imelt` freeze/thaw, `combine`/`divide_snow_layers!`) make the loss **piecewise-smooth**,
+and the ForwardDiff gradient **diverges from central FD by 11–85 % at `snl` straddles** and carries
+a **pervasive ~1e-3 `imelt` kink-error** on melt steps (transition-free control ~1e-8; reproduced
+on two runs). So the correct statement is: **the whole per-step physics is `Dual`-clean (no *type*
+wall), but CLM.jl's forward-AD boundary is *smoothness*** — the gradient is exact away from
+transitions, usable across sparse ones (it calibrated real basins to positive held-out KGE), and
+needs the **Phase-3 `smooth_max`/`smooth_min`** at the discrete thresholds to be robust across the
+dense transitions of a full year. That smoothing is a modeling choice (the constant *k* is
+dimensional — it trades a kink for a `log(2)/k` bias), not a porting fix. The full-year hydrograph
+is therefore **gated by differentiability smoothness, not merely by assembly**.
 
 ## 4. The honest bounds (differentiability *scope*)
 
 These are named, not hidden — several are directly paper-relevant:
 
-- **A genuine full-year hydrograph split-sample is not yet assembled** (see §3b): every
-  component — snow accumulation/melt/layer-management, hydrology, *and* the surface energy
-  balance incl. photosynthesis — is now confirmed Dual-clean and gradient-gated, so this is a
-  **large engineering assembly (the ~35-call per-step year loop + eltype-generic aux helpers),
-  not a feasibility barrier**. The residual Float64 pins are all in harness/aux *builders*, each
-  minimal-additive-fixable. (`LUNA`, a periodic driver-level call, is outside the per-step chain
-  and unprobed.)
+- **A genuine full-year hydrograph split-sample is gated by *smoothness*, not assembly** (see
+  `FORWARD_AD_SMOOTHNESS_BOUNDARY.md` and the §3b correction): the whole per-step physics is
+  `Dual`-clean (no type wall), but the discrete snow events (`imelt`, `combine`/`divide`) make the
+  loss piecewise-smooth — the ForwardDiff gradient diverges from FD by 11–85 % at `snl` straddles
+  and carries a pervasive ~1e-3 `imelt` kink-error. A robust full-year calibration needs the
+  Phase-3 `smooth_max`/`smooth_min` at those thresholds (a modeling choice: *k* is dimensional).
+  Away from transitions the gradient is exact (~1e-8); across sparse transitions it is usable and
+  empirically calibrates real basins. (`LUNA` is a periodic driver-level call, outside the per-step
+  chain, unprobed.)
 - **Reverse horizon:** exact and cheap to season scale; a full year is compute-feasible via
   checkpointing (reverse) or natively memory-constant (forward, §3b).
 - **Discrete snow-layer ops** (`combine_snow_layers!`/`divide_snow_layers!` change `snl`, the
