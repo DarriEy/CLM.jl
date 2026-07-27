@@ -274,4 +274,58 @@ using CLM
         @test isfinite(v)
         @test v > 0.0
     end
+
+    # ---------------------------------------------------------------------
+    # phase_change_beta! MELT-LABEL smoothing (Phase-3 last mile)
+    # ---------------------------------------------------------------------
+    # The snow melt IDENTIFICATION `t_soisno > tfrz` (with ice) is a hard threshold
+    # whose derivative kinks the snow-melt flux at tfrz. Under a smooth mode the melt
+    # driver is tinc = -smooth_max(0, t - tfrz; k = PHASE_CHANGE_TEMP_K), a C¹ softplus
+    # ramp through tfrz. CRITICAL — this axis is a TEMPERATURE in KELVIN: width log(2)/k
+    # is negligible (k=1e3 → 6.9e-4 K), and the smooth_max saturation guard returns
+    # EXACTLY 0 for t < tfrz − _SMOOTH_SAT/k (~0.036 K), so a genuinely cold layer is
+    # byte-identical to the hard test (only the tfrz band is rounded). Unlike the kg/m²
+    # mass axis, this incurs a negligible melt-mass bias. (The integer combine/divide
+    # layer count `snl` stays discrete — a separate, dimension-change problem.)
+    @testset "(melt label) smooth ON C¹ across tfrz; OFF byte-identical; cold exact" begin
+        tk = CLM.PHASE_CHANGE_TEMP_K[]
+        driver(t) = CLM.smooth_max(zero(typeof(t)), t - tfrz; k = oftype(t, tk))
+        # Float64: byte-identical to the hard melt driver max(0, t - tfrz)
+        maxd = 0.0
+        for t in (tfrz - 5.0):0.05:(tfrz + 5.0)
+            maxd = max(maxd, abs(driver(t) - max(0.0, t - tfrz)))
+        end
+        @test maxd == 0.0
+        # A genuinely cold layer (t well below tfrz) melts EXACTLY zero (saturation guard)
+        @test driver(tfrz - 1.0) == 0.0
+        @test ForwardDiff.derivative(driver, tfrz - 1.0) == 0.0
+        # Dual: finite & continuous derivative across tfrz (the label kink is rounded)
+        eps_k = 1.0 / tk
+        anynan = false; prev = nothing; smooth_maxjump = 0.0
+        for i in -40:40
+            t = tfrz + i * eps_k
+            g = ForwardDiff.derivative(driver, t)
+            isfinite(g) || (anynan = true)
+            prev !== nothing && (smooth_maxjump = max(smooth_maxjump, abs(g - prev)))
+            prev = g
+        end
+        @test !anynan
+        @test smooth_maxjump < 1.0                                   # no step: derivative ramps 0 → 1
+        @test ForwardDiff.derivative(driver, tfrz) ≈ 0.5 atol = 1e-6 # C¹ midpoint AT the kink
+        @test ForwardDiff.derivative(driver, tfrz + 40 * eps_k) ≈ 1.0 atol = 1e-6
+        @test ForwardDiff.derivative(driver, tfrz - 40 * eps_k) < 1e-6
+        # Melt-mass bias bounded by the KELVIN width log(2)/k (negligible)
+        worst = maximum(abs(value(CLM.smooth_max(Dual(0.0, 0.0), Dual(t - tfrz, 0.0); k = tk)) -
+                            max(0.0, t - tfrz))
+                        for t in (tfrz - 10 * eps_k):eps_k:(tfrz + 10 * eps_k))
+        @test worst <= log(2.0) / tk + 1e-15
+    end
+
+    @testset "(melt label) smooth → hard as k → ∞" begin
+        t = tfrz    # AT the kink, where smooth ≠ hard (overshoot = log(2)/k)
+        sv(k) = value(CLM.smooth_max(Dual(0.0, 0.0), Dual(t - tfrz, 0.0); k = k))
+        errs = [abs(sv(k) - max(0.0, t - tfrz)) for k in (5.0, 50.0, 500.0, 5000.0)]
+        @test issorted(errs; rev = true)
+        @test errs[end] < 1e-3
+    end
 end
