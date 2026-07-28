@@ -1611,7 +1611,14 @@ Adapt.@adapt_structure CombineSnowCol
         j = msn_old + 1
         while j <= 0
             jj = j + nlevsno
-            if m.h2osoi_ice[c, jj] <= (fixdim ? edz : ice_thresh)
+            # Fixed-dim: only collapse a melted layer once it is empty in BOTH ice AND thickness,
+            # so a melted-but-thick layer PERSISTS in place (snl fixed, no reindex) rather than
+            # being merged — the reindex of a finite-dz layer is the θ=0.704 whole-pack-collapse
+            # kink AD cannot differentiate. Default keeps the pure ice ≤ 0.01 kg/m² trigger.
+            remove_j = fixdim ?
+                (m.h2osoi_ice[c, jj] <= edz && cv.frac_sno_eff[c] * m.dz[c, jj] <= edz) :
+                (m.h2osoi_ice[c, jj] <= ice_thresh)
+            if remove_j
                 l = col_landunit[c]
                 ltype = lun_itype[l]
                 if j < 0 || (ltype == ISTSOIL || urbpoi[l] || ltype == ISTCROP)

@@ -194,11 +194,21 @@ byte-identical** (217 snow/robustness tests; gates are behind `_pc_smooth(T)`, f
 `Float64`+`:auto`). The sharpest spike — the `snl→0` layered→bulk representation switch — is
 essentially removed.
 
-**The remaining residual is precise:** θ=0.704, where the *entire* pack melts out within the
-window (all six layers cross empty near-simultaneously → snl −6→−1 in one step). This is a genuine
-whole-pack-disappearance kink, not a per-layer combine, and closing it is Stage 2 (a smooth
-bulk↔layered blend, or a total-SWE-continuous melt-out). Net: the integer-layer-count residual is
-pushed from "every transition spikes" down to "only the total melt-out instant spikes," default-exact.
+**Stage 2 — the whole-pack melt-out residual closed.** The last spike (θ=0.704) was probed and
+turned out **not** to be a layer-count *difference* (the `snl` trajectory was identical across
+θ±h) but the whole-pack *collapse itself*: melted layers empty in **mass** but retain **thickness**,
+so reindexing a finite-`dz` layer when the pack drops 6→1 is a restructuring AD cannot
+differentiate (FwdDiff 6.8 vs FD 52 at near-identical states). The fix: require **both** ice *and*
+thickness `< SNOW_COMBINE_EMPTY_DZ` before collapsing a layer, so a melted-but-thick layer
+**persists in place** and `snl` stays genuinely fixed — no reindex, ever. Result: across the whole
+sweep `snl` is now **constant (`−6`)**, θ=0.704 drops **8.7e-1 → 1.5e-4**, the worst point over the
+entire sweep is **4.5e-2** (isolated, not `snl`-related), the thermal solve **survives the persistent
+empty-thick layers (no NaN)**, and the sweep's own verdict flips to **"gradient-BENIGN
+(FwdDiff==FD)."** Default byte-identical (gates behind `_pc_smooth(T)`). The smooth-mode physics
+differs slightly from the hard path (empty slots linger — the analog of the dimensional-`k` trade),
+which is AD-neutral for calibration (AD and DDS use the same smooth path). Net: **the integer
+layer-count — the last discrete residual of the forward-AD smoothness boundary — is resolved for the
+melt window; the gradient is now benign across the full θ sweep, default-exact.**
 
 ## 6. The photosynthesis claim, corrected
 
