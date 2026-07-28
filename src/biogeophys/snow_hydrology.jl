@@ -105,6 +105,20 @@ const SNOW_DZMIN   = Ref(Float64[])
 const SNOW_DZMAX_L = Ref(Float64[])
 const SNOW_DZMAX_U = Ref(Float64[])
 
+# FIXED-DIMENSION snow (Phase-3, forward-AD): the integer layer count `snl` is the last discrete
+# residual. `combine_snow_layers!` drops a layer on THREE finite triggers — ice ≤ 0.01 kg/m² (the
+# dominant one during MELT), thickness < dzmin (~0.01 m), and density < 50 — so each N→N−1
+# discretization change kinks the gradient (the `snl→0` layered→bulk switch is the sharpest).
+# Under a smooth mode (Dual / SMOOTH_MODE=:always) every trigger instead waits until the layer is
+# essentially GONE — ice or thickness below this smallness threshold — so removing it carries ≈0
+# mass/thickness and is CONTINUOUS, holding `snl` fixed through the melt window WITHOUT touching
+# the 621 `snl`-bound loops. Applied on both the mass (kg/m²) and thickness (m) axes; both are
+# "essentially zero" at 1e-8. The DEFAULT (hard) path keeps the 0.01/dzmin/50 triggers
+# (byte-identical). This is the imelt fix applied to the layer count: make the discrete event
+# happen at zero-contribution. Sweep: flattens the mode-switch spike 0.59→0.003 and θ=0.500
+# 0.015→7e-5; the whole-pack simultaneous melt-out (θ=0.704) remains (all layers empty at once).
+const SNOW_COMBINE_EMPTY_DZ = Ref(1.0e-8)
+
 # Snow resetting parameters
 const RESET_SNOW = Ref(false)
 const RESET_SNOW_GLC = Ref(false)
@@ -1569,11 +1583,15 @@ Adapt.@adapt_structure CombineSnowCol
 # reaches a Float32-only backend (Metal) while staying byte-identical on Float64 CPU.
 @kernel function _snowhyd_combine_kernel!(snl, m::CombineSnowMat, a::CombineSnowAero,
         cv::CombineSnowCol, @Const(mask_snow), @Const(lun_itype), @Const(urbpoi),
-        @Const(col_landunit), @Const(dzmin), dtime, nlevsno::Int, cmin::Int, cmax::Int)
+        @Const(col_landunit), @Const(dzmin), dtime, nlevsno::Int, cmin::Int, cmax::Int, emptydz)
     c = @index(Global)
     @inbounds if cmin <= c <= cmax && mask_snow[c]
         T = eltype(m.dz)
         zr = zero(T); thresh50 = T(50.0); ice_thresh = T(0.01); half = T(0.5)
+        # FIXED-DIMENSION snow (forward-AD, SMOOTH_MODE-gated): under a smooth mode, wait to
+        # combine/collapse a layer until its thickness → ~0 (empty), so `snl` holds fixed through
+        # the melt window and the removal is continuous. Default keeps the hard dzmin/density trigger.
+        fixdim = _pc_smooth(T); edz = T(emptydz)
         dzmin1 = T(dzmin[1]); lsadz = T(LSADZ)
         ncol_lyr = size(m.h2osoi_liq, 2)
         dt = T(dtime)
@@ -1584,11 +1602,16 @@ Adapt.@adapt_structure CombineSnowCol
 
         msn_old = snl[c]
 
-        # Remove thin layers with very little ice
+        # Remove thin layers with very little ice.
+        # FIXED-DIMENSION (forward-AD): this mass-based removal is the dominant `snl` reducer
+        # during MELT — a layer is dropped when its ice falls below ice_thresh (0.01 kg/m², a
+        # FINITE mass), so the N→N−1 discretization kinks the gradient. Under smooth mode, wait
+        # until the layer's ice is ~0 (edz) so the removal carries ≈0 mass → continuous, holding
+        # `snl` fixed. Default keeps the 0.01 kg/m² trigger (byte-identical).
         j = msn_old + 1
         while j <= 0
             jj = j + nlevsno
-            if m.h2osoi_ice[c, jj] <= ice_thresh
+            if m.h2osoi_ice[c, jj] <= (fixdim ? edz : ice_thresh)
                 l = col_landunit[c]
                 ltype = lun_itype[l]
                 if j < 0 || (ltype == ISTSOIL || urbpoi[l] || ltype == ISTCROP)
@@ -1669,10 +1692,14 @@ Adapt.@adapt_structure CombineSnowCol
         if cv.snow_depth[c] > zr
             l = col_landunit[c]
             ltype = lun_itype[l]
-            if (ltype == ISTDLAK && cv.snow_depth[c] < dzmin1 + lsadz) ||
-               (ltype != ISTDLAK &&
-                (cv.frac_sno_eff[c] * cv.snow_depth[c] < dzmin1 ||
-                 h2osno_total / (cv.frac_sno_eff[c] * cv.snow_depth[c]) < thresh50))
+            all_gone = (ltype == ISTDLAK && cv.snow_depth[c] < dzmin1 + lsadz) ||
+                       (ltype != ISTDLAK && (fixdim ?
+                          # smooth mode: collapse the last layer only when it is ~gone (continuous)
+                          (cv.frac_sno_eff[c] * cv.snow_depth[c] < edz) :
+                          # default hard: dzmin / density trigger (byte-identical)
+                          (cv.frac_sno_eff[c] * cv.snow_depth[c] < dzmin1 ||
+                           h2osno_total / (cv.frac_sno_eff[c] * cv.snow_depth[c]) < thresh50)))
+            if all_gone
 
                 # Transfer ice to h2osno_no_layers, liquid to top soil layer
                 zwice = zr
@@ -1726,9 +1753,14 @@ Adapt.@adapt_structure CombineSnowCol
             i = snl[c] + 1
             while i <= 0
                 jj_i = i + nlevsno
-                if (cv.frac_sno_eff[c] * m.dz[c, jj_i] < T(dzmin[mssi])) ||
-                   ((m.h2osoi_ice[c, jj_i] + m.h2osoi_liq[c, jj_i]) /
-                    (cv.frac_sno_eff[c] * m.dz[c, jj_i]) < thresh50)
+                combine_i = fixdim ?
+                    # smooth mode: merge an interior layer only once it is ~gone (continuous removal)
+                    (cv.frac_sno_eff[c] * m.dz[c, jj_i] < edz) :
+                    # default hard: dzmin / density trigger (byte-identical)
+                    ((cv.frac_sno_eff[c] * m.dz[c, jj_i] < T(dzmin[mssi])) ||
+                     ((m.h2osoi_ice[c, jj_i] + m.h2osoi_liq[c, jj_i]) /
+                      (cv.frac_sno_eff[c] * m.dz[c, jj_i]) < thresh50))
+                if combine_i
 
                     if i == snl[c] + 1
                         neibor = i + 1
@@ -1881,8 +1913,8 @@ function combine_snow_layers!(
     # sibling launches in this file already do (lines 396, 663, 825). Identity on a
     # Float64 backend, so the CPU path stays byte-identical.
     _launch!(_snowhyd_combine_kernel!, snl, m, a, cv, mask_snow, lun_itype, urbpoi,
-             col_landunit, dzmin, eltype(dz)(dtime), nlevsno, first(bounds), last(bounds);
-             ndrange = length(snl))
+             col_landunit, dzmin, eltype(dz)(dtime), nlevsno, first(bounds), last(bounds),
+             eltype(dz)(SNOW_COMBINE_EMPTY_DZ[]); ndrange = length(snl))
     return nothing
 end
 

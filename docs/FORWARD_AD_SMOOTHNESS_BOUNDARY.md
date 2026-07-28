@@ -162,6 +162,44 @@ reformulation. Validated: **507 default-path tests byte-identical** (`_pc_smooth
 (`test_phase_snow_smoothing.jl`). Freeze and soil-layer labels are left hard (same technique
 applies; they do not drive the spring-melt streamflow gradient).
 
+## 5c. Phase-3 continued — the integer layer count `snl` (fixed-dimension, Stage 1)
+
+`snl` — the number of snow layers — is the last discrete residual, and it is *categorically*
+harder than the `imelt` label: it is a **dimension**, not a threshold on a continuous quantity,
+so no sigmoid smooths it. Diagnosis first (this mattered): the melt-time `snl` reduction is **not**
+the thickness/`dzmin` combine — it is the **ice-mass removal** in `combine_snow_layers!`, which
+drops a layer once its ice falls below `0.01 kg/m²` (a *finite* mass). A three-order-of-magnitude
+sweep of the collapse threshold (`edz` = 1e-5 → 1e-12) was byte-identical until *that* trigger was
+found and gated — a reminder to locate the actual discontinuity, not the assumed one.
+
+**Approach (fixed-dimension without the 621-site rewrite):** hold `snl` *fixed* through the melt
+window by making all three removal triggers (ice-mass, thickness/`dzmin`, and the `snl→0`
+all-snow-gone switch) wait, under a smooth mode, until the layer is **essentially empty** (ice or
+thickness `< SNOW_COMBINE_EMPTY_DZ`, 1e-8). Removing a ≈0 layer is continuous — the same
+"discrete event at zero-contribution" principle as the `imelt` fix — and because `snl` simply
+stays fixed, none of the 621 `snl`-bound loops need to change.
+
+**Result (`CLM_SMOOTH=always` sweep):**
+
+| θ_snow | before | after (fixed-`snl`) | what it is |
+|---|---|---|---|
+| 0.500 | 1.5e-2 | **7.1e-5** | thin-layer removal → continuous |
+| **0.907** | **5.9e-1** | **2.9e-3** | the **layered→bulk mode switch** → continuous |
+| settled melt | 3–5e-4 | 3–5e-4 | unchanged |
+| **0.704** | 9.3e-1 | **8.7e-1** | **whole-pack melt-out** — remains |
+
+Two structural risks cleared: the **thermal solve survives** the resulting persistent thin layers
+(no NaN — a naive fixed-dimension change would divide by dz→0), and the **default path stays
+byte-identical** (217 snow/robustness tests; gates are behind `_pc_smooth(T)`, false for
+`Float64`+`:auto`). The sharpest spike — the `snl→0` layered→bulk representation switch — is
+essentially removed.
+
+**The remaining residual is precise:** θ=0.704, where the *entire* pack melts out within the
+window (all six layers cross empty near-simultaneously → snl −6→−1 in one step). This is a genuine
+whole-pack-disappearance kink, not a per-layer combine, and closing it is Stage 2 (a smooth
+bulk↔layered blend, or a total-SWE-continuous melt-out). Net: the integer-layer-count residual is
+pushed from "every transition spikes" down to "only the total melt-out instant spikes," default-exact.
+
 ## 6. The photosynthesis claim, corrected
 
 The earlier "Farquhar photosynthesis is Dual-clean" claim was **unproven — potentially vacuous**.
