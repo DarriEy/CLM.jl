@@ -413,3 +413,35 @@ if STAGE == "sweep"
         "transitions gradient-BENIGN (FwdDiff==FD across snl/imelt changes → full-year is genuinely assembly)" :
         "FwdDiff DIVERGES from FD across transitions (gradient only piecewise-valid → needs smoothing; quantified above)")
 end
+
+# =============================================================================
+# STAGE probe — localize the WHOLE-PACK MELT-OUT residual (θ≈0.704). Trace per-step
+# runoff at θ±h and dump the state at the step whose runoff jumps most, to find which
+# quantity (snl / frac_sno / qflx_snomelt / ice / dz) is discontinuous.
+# =============================================================================
+if STAGE == "probe"
+    θc = parse(Float64, get(ENV,"CLM_PROBE_THETA","0.704")); h = parse(Float64, get(ENV,"CLM_FDH","1e-4"))
+    s = make_ff_season(Date(2010,4,20); ndays=parse(Int,get(ENV,"CLM_NDAYS","10")))
+    fff0=FT(C.sat_excess_runoff_params.fff); bf0=FT(C.BASEFLOW_SCALAR[]); c=s.hcols[1]; nsno=C.varpar.nlevsno
+    function trace(θ)
+        b=s.mkbundle([θ,fff0,bf0]); rec=Vector{NTuple{6,Float64}}()
+        for (k,ph) in enumerate(s.steps)
+            for (f,ca) in ph; f(b,ca...); end
+            i=b.inst; wf=i.water.waterfluxbulk_inst.wf; wd=i.water.waterdiagnosticbulk_inst
+            ws=i.water.waterstatebulk_inst.ws; col=i.column
+            icetot=sum(ws.h2osoi_ice_col[c,jj] for jj in 1:nsno)
+            dztot=sum(col.dz[c,jj] for jj in 1:nsno if isfinite(col.dz[c,jj]) && col.dz[c,jj]<1e29)
+            push!(rec,(b.series[k], Float64(col.snl[c]), wd.frac_sno_eff_col[c], wf.qflx_snomelt_col[c], icetot, dztot))
+        end
+        rec
+    end
+    rp=trace(θc+h); rm=trace(θc-h)
+    diffs=[abs(rp[k][1]-rm[k][1]) for k in 1:length(rp)]
+    ks=sortperm(diffs,rev=true)[1:6]
+    @printf("STAGE probe θ=%.4f ±%.0e  (SMOOTH=%s LAYERS=%s)\n", θc, h, get(ENV,"CLM_SMOOTH",""), get(ENV,"CLM_LAYERS","0"))
+    println("  step | runoffΔ    | θ+h: snl fsno    qmelt     ice       dz      | θ-h: snl fsno    qmelt     ice       dz")
+    for k in ks
+        @printf("  %4d | %.3e | %+d %.5f %.3e %.3e %.3e | %+d %.5f %.3e %.3e %.3e\n",
+            k, diffs[k], Int(rp[k][2]),rp[k][3],rp[k][4],rp[k][5],rp[k][6], Int(rm[k][2]),rm[k][3],rm[k][4],rm[k][5],rm[k][6])
+    end
+end
