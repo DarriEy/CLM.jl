@@ -1138,7 +1138,25 @@ function balance_check!(
                 if _is_ad_type(FT_bc)
                     @warn "BalanceCheck: column water balance error exceeded threshold (AD mode, continuing)" maxlog=1
                 else
-                    @error "Stopping: errh2o > $(BALANCE_ERROR_THRESH) mm" nstep indexc errh2o=errh2o_col[indexc] forc_rain=forc_rain_c[indexc]*dtime forc_snow=forc_snow_c[indexc]*dtime endwb=endwb_col[indexc] begwb=begwb_col[indexc] qflx_evap_tot=qflx_evap_tot_col[indexc]*dtime qflx_surf=qflx_surf_col[indexc]*dtime qflx_drain=qflx_drain_col[indexc]*dtime
+                    @error("Stopping: errh2o > $(BALANCE_ERROR_THRESH) mm",
+                        nstep, indexc, errh2o=errh2o_col[indexc],
+                        forc_rain=forc_rain_c[indexc]*dtime,
+                        forc_snow=forc_snow_c[indexc]*dtime,
+                        endwb=endwb_col[indexc], begwb=begwb_col[indexc],
+                        qflx_evap_tot=qflx_evap_tot_col[indexc]*dtime,
+                        qflx_evap_soi=wf.qflx_evap_soi_col[indexc]*dtime,
+                        qflx_liqevap_top=wf.qflx_liqevap_from_top_layer_col[indexc]*dtime,
+                        qflx_solidevap_top=wf.qflx_solidevap_from_top_layer_col[indexc]*dtime,
+                        qflx_evap_veg=wf.qflx_evap_veg_col[indexc]*dtime,
+                        qflx_tran_veg=wf.qflx_tran_veg_col[indexc]*dtime,
+                        qflx_rootsoi=sum(@view waterflux.qflx_rootsoi_col[indexc, :])*dtime,
+                        qflx_surf=qflx_surf_col[indexc]*dtime,
+                        qflx_qrgwl=qflx_qrgwl_col[indexc]*dtime,
+                        qflx_drain=qflx_drain_col[indexc]*dtime,
+                        qflx_drain_perched=qflx_drain_perched_col[indexc]*dtime,
+                        qflx_ice_runoff=qflx_ice_runoff_col[indexc]*dtime,
+                        qflx_discarded_liq=qflx_snwcp_discarded_liq_col[indexc]*dtime,
+                        qflx_discarded_ice=qflx_snwcp_discarded_ice_col[indexc]*dtime)
                     error("BalanceCheck: column water balance error exceeded threshold at c=$indexc")
                 end
             end

@@ -305,3 +305,18 @@
         CLM.soil_resistance_read_nl!()
     end
 end
+
+@testset "Final PHS canopy evaporation uses final transpiration" begin
+    # Regression for Aripuanã step 6978: the last PHS solve lowered
+    # transpiration after the iterative ecidif cap, leaving positive canopy
+    # evaporation against an empty store and a 1.12e-5 mm column residual.
+    evap = 1.0817372510263078e-4
+    tran = 1.0816858610145868e-4
+    store = 1.214306433183765e-17
+    dtime = 3600.0
+    limited, rejected = CLM.final_canopy_evap_limit(evap, tran, store, dtime)
+    @test limited <= tran + store / dtime
+    @test limited ≈ tran + store / dtime
+    @test rejected ≈ evap - limited
+    @test (limited - tran) * dtime <= store + eps(store)
+end

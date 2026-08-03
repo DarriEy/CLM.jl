@@ -1118,7 +1118,7 @@ Base.@kwdef struct CfDiagOut{V}   # written per-patch outputs
     dlrad::V; ulrad::V; t_skin::V; cgrnds::V; cgrndl::V; cgrnd::V
     snocan_baseline::V; liqcan::V; snocan::V
 end
-Base.@kwdef struct CfDiagP{V}     # read-only per-patch inputs
+Base.@kwdef struct CfDiagP{V}     # per-patch inputs; final evap/SH are corrected in place
     frac_rad_abs_by_stem::V; sabv::V; air::V; bir::V; tlbef::V; dt_veg::V; cir::V
     lw_leaf::V; lw_stem::V; eflx_sh_veg::V; qflx_evap_veg::V; tl_ini::V; cp_leaf::V
     cp_stem::V; ts_ini::V; eflx_sh_stem::V; stem_biomass::V; wtal::V; wtl0::V; wta0::V
@@ -1135,6 +1135,12 @@ Adapt.@adapt_structure CfDiagOut
 Adapt.@adapt_structure CfDiagP
 Adapt.@adapt_structure CfDiagC
 
+@inline function final_canopy_evap_limit(evap, tran, h2ocan, dtime)
+    cap = tran + h2ocan / dtime
+    rejected = max(zero(evap), evap - cap)
+    return min(evap, cap), rejected
+end
+
 @kernel function _cf_postiter_kernel!(out, pp, cc, @Const(t_soisno), @Const(filterp),
         @Const(column), @Const(gridcell), @Const(snl), @Const(forc_u), @Const(forc_v),
         use_biomass::Bool, nlevsno::Int, dtime)
@@ -1145,6 +1151,16 @@ Adapt.@adapt_structure CfDiagC
         c = column[p]; g = gridcell[p]
         snl_c = snl[c]
         rho = cc.forc_rho[c]; tveg = pp.t_veg[p]; thm = pp.thm[p]; frac_rad = pp.frac_rad_abs_by_stem[p]
+        # PHS updates qflx_tran_veg inside the final photosynthesis solve, after
+        # the iterative ecidif limiter has used the preceding transpiration value.
+        # Reapply the limiter to the final pair so canopy evaporation cannot
+        # exceed final transpiration plus the available canopy store. Transfer
+        # the rejected latent flux to sensible heat, matching the in-iteration
+        # ecidif treatment and preserving the leaf energy balance.
+        h2ocan = out.liqcan[p] + out.snocan[p]
+        pp.qflx_evap_veg[p], ecidif_final = final_canopy_evap_limit(
+            pp.qflx_evap_veg[p], pp.qflx_tran_veg[p], h2ocan, dtime)
+        pp.eflx_sh_veg[p] += T(HVAP) * ecidif_final
         lw_grnd = cc.frac_sno_eff[c] * t_soisno[c, snl_c + 1 + nlevsno]^4 +
             (one(T) - cc.frac_sno_eff[c] - cc.frac_h2osfc[c]) * t_soisno[c, 1 + nlevsno]^4 +
             cc.frac_h2osfc[c] * cc.t_h2osfc[c]^4
