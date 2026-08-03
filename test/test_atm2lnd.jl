@@ -325,3 +325,28 @@
     end
 
 end
+
+# ==========================================================================
+# rof -> lnd feedback state (Wateratm2lndType.F90). The coupler fills these from
+# the river model's export bundle (Flrr_volr / Flrr_volrmch / Flrr_flood); they
+# are the ONLY river->land feedback CTSM has. Zero in an uncoupled run, which is
+# the Fortran `ival = 0` initialization and reproduces standalone CLM exactly.
+# ==========================================================================
+@testset "atm2lnd rof->lnd feedback fields (volr / forc_flood)" begin
+    ng, nc, np = 3, 6, 9
+    a = CLM.Atm2LndData()
+    @test length(a.volr_grc) == 0
+    @test length(a.forc_flood_grc) == 0
+
+    CLM.atm2lnd_init!(a, ng, nc, np)
+    for f in (:volr_grc, :volrmch_grc, :forc_flood_grc)
+        v = getfield(a, f)
+        @test length(v) == ng
+        @test all(iszero, v)      # uncoupled default
+    end
+
+    CLM.atm2lnd_clean!(a)
+    @test length(a.volr_grc) == 0
+    @test length(a.volrmch_grc) == 0
+    @test length(a.forc_flood_grc) == 0
+end

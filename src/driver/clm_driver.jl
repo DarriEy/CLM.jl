@@ -1219,7 +1219,13 @@ function clm_drv_core!(config::CLMDriverConfig,
     np = length(pch.column)
     forc_rain_col = isdefined(Main, :nothing) ? _zlike(nc) : _zlike(nc)  # will use a2l fields
     forc_snow_col = _zlike(nc)
-    qflx_floodg = _zlike(length(grc.lat))
+    # Flood water returned by the river model. Fortran reads it from
+    # `wateratm2lndbulk_inst%forc_flood_grc`, which the coupler fills from the ROF
+    # export field `Flrr_flood`; this port keeps it on Atm2LndData. It is
+    # identically zero in an uncoupled run (that is the Fortran `ival = 0`
+    # initialization), so the default trajectory is unchanged.
+    qflx_floodg = length(a2l.forc_flood_grc) == length(grc.lat) ?
+        a2l.forc_flood_grc : _zlike(length(grc.lat))
     # Use Atm2LndData rain/snow if available (populated by downscale_forcings!/forcing_reader)
     if length(a2l.forc_rain_downscaled_col) == nc
         forc_rain_col = a2l.forc_rain_downscaled_col
@@ -1710,8 +1716,12 @@ function clm_drv_core!(config::CLMDriverConfig,
     # deficit on exposed irrigated patches and set the per-patch irrigation rate +
     # n_irrig_steps_left for the next step's withdrawal. local_time_sec_patch is the
     # local solar time (seconds since midnight) at each patch's longitude, mirroring
-    # the Fortran get_local_time(londeg, offset=0). volr (river volume) is only used
-    # when limit_irrigation_if_rof_enabled — passed as zeros (ROF limiting off).
+    # the Fortran get_local_time(londeg, offset=0). volr (river volume) is only
+    # consulted when `limit_irrigation_if_rof_enabled && rof_prognostic`; it comes
+    # from `wateratm2lndbulk_inst%volr_grc`, which the coupler fills from the ROF
+    # export field `Flrr_volr`. In an uncoupled run it is zero (the Fortran
+    # `ival = 0` initialization), which is also what the standalone port used to
+    # pass unconditionally — so the default trajectory is unchanged.
     if config.irrigate && !isempty(irr.irrig_method_patch) && !isempty(pftcon.irrigated)
         local_time_sec_patch = zeros(Int, length(pch.gridcell))
         for p in bc_patch
@@ -1720,7 +1730,9 @@ function clm_drv_core!(config::CLMDriverConfig,
             lon < 0.0 && (lon += 360.0)
             local_time_sec_patch[p] = mod(secs + round(Int, lon / DEGPSEC), ISECSPDAY)
         end
-        volr_irr = zeros(eltype(ss.eff_porosity_col), length(grc.londeg))
+        volr_irr = length(a2l.volr_grc) == length(grc.londeg) ?
+            convert(Vector{eltype(ss.eff_porosity_col)}, Array(a2l.volr_grc)) :
+            zeros(eltype(ss.eff_porosity_col), length(grc.londeg))
         calc_irrigation_needed!(irr, cs.elai_patch, temp.t_soisno_col,
                                 ss.eff_porosity_col, wsb.ws.h2osoi_liq_col,
                                 volr_irr, rof_prognostic,
@@ -2882,12 +2894,15 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Land to atmosphere
     # ========================================================================
-    # Placeholder: lnd2atm!(bounds_proc, ...) [gridcell averaging for the coupler]
-    #
-    # The ice-runoff part of lnd2atm IS wired: qflx_ice_runoff_col (= snow-capping
-    # solid runoff + excess-soil-ice solid runoff) is a sink in the column water
-    # balance below (BalanceCheckMod.F90:650), so it must be computed before the
-    # balance check — Fortran likewise calls lnd2atm before BalanceCheck.
+    # The WATER half of lnd2atm is wired here (the patch->gridcell energy/albedo
+    # half is `lnd2atm!` in infrastructure/lnd2atm_mod.jl, which clm_run! calls
+    # after this):
+    #   * the ice-runoff part — qflx_ice_runoff_col (= snow-capping solid runoff +
+    #     excess-soil-ice solid runoff) is a sink in the column water balance below
+    #     (BalanceCheckMod.F90:650), so it must be computed before the balance
+    #     check; Fortran likewise calls lnd2atm before BalanceCheck;
+    #   * the `! lnd -> rof` block — `lnd2atm_rof!` further down, which fills the
+    #     gridcell fields a river model is forced with.
     #
     # clm_instInit! allocates the outputs; tolerate hand-built instances (and match
     # the working backend/precision) by allocating on first use.
@@ -2898,6 +2913,20 @@ function clm_drv_core!(config::CLMDriverConfig,
     if length(l2a.eflx_sh_ice_to_liq_col) != nc
         l2a.eflx_sh_ice_to_liq_col = _zlike(nc)
     end
+    # Same tolerance for the lnd->rof gridcell exports.
+    let ng_ = length(grc.lat)
+        if length(l2a.qflx_rofliq_grc) != ng_
+            l2a.qflx_rofliq_grc                = _zlike(ng_)
+            l2a.qflx_rofliq_qsur_grc           = _zlike(ng_)
+            l2a.qflx_rofliq_qsub_grc           = _zlike(ng_)
+            l2a.qflx_rofliq_qgwl_grc           = _zlike(ng_)
+            l2a.qflx_rofliq_drain_perched_grc  = _zlike(ng_)
+            l2a.qflx_rofliq_stream_grc         = _zlike(ng_)
+            l2a.qflx_rofice_grc                = _zlike(ng_)
+            l2a.qirrig_grc                     = _zlike(ng_)
+            l2a.qflx_evap_tot_grc              = _zlike(ng_)
+        end
+    end
     handle_ice_runoff!(l2a, wfb, col, lun, bc_col)
     # Melted ice runoff (only when melt_non_icesheet_ice_runoff; off by default)
     # leaves via qflx_qrgwl instead, which the balance check already accounts for.
@@ -2906,7 +2935,21 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Land to GLC
     # ========================================================================
-    # Placeholder: lnd2glc_inst%update_lnd2glc!(bc, ...) [land-glacier coupling]
+    # WIRED (was a placeholder comment). Fills the per-gridcell, per-glacier-
+    # elevation-class surface mass balance (qice), surface temperature (tsrf) and
+    # elevation (topo) that an ice-sheet model is forced with, straight out of
+    # CLM's own state: qflx_glcice_col (glacier_surface_mass_balance.jl),
+    # t_soisno(c,1) and topo_col. Runs over `filt.do_smb_c`, i.e. the ISTICE
+    # elevation-class columns plus the bare-land (ISTSOIL) column, and must come
+    # AFTER compute_surface_mass_balance! / adjust_runoff_terms! so qflx_glcice_col
+    # is final for the step. Cheap and self-contained, so it is unconditional:
+    # with no glacier landunit the do_smb filter is empty and it only writes the
+    # defaults (qice = 0, tsrf = TFRZ, topo = 0).
+    if !isempty(inst.lnd2glc.qice_grc)
+        update_lnd2glc!(inst.lnd2glc, temp, wfb, inst.topo, col, lun, grc,
+                        filt.do_smb_c, bc_col, bc_grc;
+                        init = false, use_hillslope = config.use_hillslope_routing)
+    end
 
     # ========================================================================
     # Energy and water balance check
@@ -2947,48 +2990,27 @@ function clm_drv_core!(config::CLMDriverConfig,
             copyto!(wdbulk.tws_grc, inst.water.waterbalancebulk_inst.endwb_grc)
         end
     end
-    _g_evap_tot     = _zlike(length(grc.lat)); _g_surf      = _zlike(length(grc.lat))
-    _g_qrgwl        = _zlike(length(grc.lat)); _g_drain     = _zlike(length(grc.lat))
-    _g_drain_perch  = _zlike(length(grc.lat)); _g_sfc_irrig = _zlike(length(grc.lat))
-    _g_ice_runoff   = _zlike(length(grc.lat))
-    # 'urbanf' c2l scaling, NOT unity — Fortran BalanceCheckMod aggregates every
-    # water-balance column term with c2l_scale_type='urbanf' (walls x 3*canyon_hwr,
-    # roads x 3), because those fluxes are per-m2 of WALL / ROAD area, not of
-    # GROUND area. With unity the urban gridcell could not close even when every
-    # column closed to 1e-13. Identical to c2g_unity! with no urban landunit.
-    c2g_urbanf!(_g_evap_tot,    wfb.wf.qflx_evap_tot_col,      col, lun, bc_col, bc_grc)
-    c2g_urbanf!(_g_qrgwl,       wfb.wf.qflx_qrgwl_col,         col, lun, bc_col, bc_grc)
-    c2g_urbanf!(_g_sfc_irrig,   wfb.wf.qflx_sfc_irrig_col,     col, lun, bc_col, bc_grc)
-    # Surface runoff + (perched) drainage → gridcell rof. Under hillslope routing
-    # these three fluxes are sent to the stream channel (accounted in
-    # qflx_streamflow_grc) rather than directly to rof, so the hillslope columns
-    # must be EXCLUDED from the gridcell average to avoid double-counting — exactly
-    # CTSM lnd2atmMod.F90:356-379. Masked column copies (hillslope cols zeroed) are
-    # aggregated; on the default (non-routing) path the mask is all-false ⇒ the
-    # copies equal the originals ⇒ byte-identical.
-    _streamflow_grc = _zlike(length(grc.lat))
-    if config.use_hillslope_routing
-        _nothill = (!).(col.is_hillslope_column)
-        _surf_to_rof  = wfb.wf.qflx_surf_col          .* _nothill
-        _drain_to_rof = wfb.wf.qflx_drain_col         .* _nothill
-        _perch_to_rof = wfb.wf.qflx_drain_perched_col .* _nothill
-        c2g_urbanf!(_g_surf,        _surf_to_rof,  col, lun, bc_col, bc_grc)
-        c2g_urbanf!(_g_drain,       _drain_to_rof, col, lun, bc_col, bc_grc)
-        c2g_urbanf!(_g_drain_perch, _perch_to_rof, col, lun, bc_col, bc_grc)
-        # qflx_streamflow_grc[g] = Σ_l volumetric_streamflow_lun[l] (m3/s) over the
-        # gridcell's active landunits, converted to mm/s via 1e3/(area_km2*1e6).
-        # Volume/time is summed (NOT weighted) over landunits (lnd2atmMod.F90:345-354).
-        hillslope_streamflow_to_grc!(_streamflow_grc, wfb.wf.volumetric_streamflow_lun,
-                                     lun, grc, bc_lun, bc_grc)
-    else
-        c2g_urbanf!(_g_surf,        wfb.wf.qflx_surf_col,          col, lun, bc_col, bc_grc)
-        c2g_urbanf!(_g_drain,       wfb.wf.qflx_drain_col,         col, lun, bc_col, bc_grc)
-        c2g_urbanf!(_g_drain_perch, wfb.wf.qflx_drain_perched_col, col, lun, bc_col, bc_grc)
-    end
-    # qflx_rofice_grc = c2g(qflx_ice_runoff_col) (lnd2atmMod.F90:459). The dynbal
-    # correction Fortran subtracts there is zero in the port (no dynamic landunits
-    # coupling), so the plain aggregate is the whole term.
-    c2g_urbanf!(_g_ice_runoff,  l2a.qflx_ice_runoff_col,      col, lun, bc_col, bc_grc)
+    # ------------------------------------------------------------------------
+    # lnd -> rof : aggregate every column runoff term to the gridcell.
+    #
+    # This USED to be an inline block writing throwaway `_g_*` scratch vectors
+    # that only the balance check below ever saw, so the river-forcing fields the
+    # coupler needs did not exist anywhere in the port. It is now the ported
+    # `lnd2atm_rof!` (driver/lnd2atm.jl, from the `! lnd -> rof` section of
+    # lnd2atmMod.F90), which writes the persistent `waterlnd2atm_type` members on
+    # `inst.lnd2atm` — qflx_rofliq_{qsur,qsub,qgwl,drain_perched,stream}_grc,
+    # qflx_rofliq_grc, qflx_rofice_grc, qirrig_grc, qflx_evap_tot_grc. The balance
+    # check then reads those same arrays, so the exported flux and the balanced
+    # flux are one number by construction.
+    #
+    # 'urbanf' c2l scaling, NOT unity — Fortran aggregates every water-balance
+    # column term with c2l_scale_type='urbanf' (walls x 3*canyon_hwr, roads x 3),
+    # because those fluxes are per-m2 of WALL / ROAD area, not of GROUND area.
+    # With unity the urban gridcell could not close even when every column closed
+    # to 1e-13. Identical to c2g_unity! with no urban landunit.
+    # ------------------------------------------------------------------------
+    lnd2atm_rof!(l2a, wfb, col, lun, grc, bc_col, bc_lun, bc_grc;
+                 use_hillslope_routing = config.use_hillslope_routing)
 
     # BalanceCheck — WIRED
     # DAnstep = steps since run start / restart / last DA state jump (Fortran
@@ -3009,16 +3031,17 @@ function clm_drv_core!(config::CLMDriverConfig,
                    forc_solad_col=a2l.forc_solad_downscaled_col,
                    forc_solai_grc=a2l.forc_solai_grc,
                    forc_lwrad_col=a2l.forc_lwrad_downscaled_col,
-                   forc_flood_grc=_zlike(length(grc.lat)),
+                   forc_flood_grc=length(a2l.forc_flood_grc) == length(grc.lat) ?
+                       a2l.forc_flood_grc : _zlike(length(grc.lat)),
                    qflx_ice_runoff_col=l2a.qflx_ice_runoff_col,
-                   qflx_evap_tot_grc=_g_evap_tot,
-                   qflx_surf_grc=_g_surf,
-                   qflx_qrgwl_grc=_g_qrgwl,
-                   qflx_drain_grc=_g_drain,
-                   qflx_drain_perched_grc=_g_drain_perch,
-                   qflx_ice_runoff_grc=_g_ice_runoff,
-                   qflx_sfc_irrig_grc=_g_sfc_irrig,
-                   qflx_streamflow_grc=_streamflow_grc,
+                   qflx_evap_tot_grc=l2a.qflx_evap_tot_grc,
+                   qflx_surf_grc=l2a.qflx_rofliq_qsur_grc,
+                   qflx_qrgwl_grc=l2a.qflx_rofliq_qgwl_grc,
+                   qflx_drain_grc=l2a.qflx_rofliq_qsub_grc,
+                   qflx_drain_perched_grc=l2a.qflx_rofliq_drain_perched_grc,
+                   qflx_ice_runoff_grc=l2a.qflx_rofice_grc,
+                   qflx_sfc_irrig_grc=l2a.qirrig_grc,
+                   qflx_streamflow_grc=l2a.qflx_rofliq_stream_grc,
                    use_hillslope_routing=config.use_hillslope_routing,
                    # FATES trips the (now live) check on its own real coupling gaps
                    # — fsa/fsr unset on FATES patches, ~142 W/m2 solar residual. The

@@ -161,6 +161,7 @@ using CLM
     include("test_atm2lnd.jl")
     include("test_multigridcell_forcing.jl")
     include("test_lnd2atm.jl")
+    include("test_lnd2glc.jl")
     include("test_topo.jl")
     include("test_subgrid_ave.jl")
     include("test_accumul.jl")
