@@ -95,7 +95,9 @@ include(joinpath(@__DIR__, "testdata.jl"))
         # ----------------------------------------------------------------------
         @testset "decomp N-source integrated delta (n$nstep_dec)" begin
             Base.include(@__MODULE__, common)   # build_bow_inst / run_one_parity_step! / FFORCING
-            forcing2002 = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
+            forcing_path = Base.invokelatest(getglobal, @__MODULE__, :FFORCING)
+            run_parity_step! = Base.invokelatest(getglobal, @__MODULE__, :run_one_parity_step!)
+            forcing2002 = replace(forcing_path, "clmforc.2003.nc" => "clmforc.2002.nc")
 
             # Confirm the _P rate-print dumps really are dead (justifies the
             # integrated-delta approach rather than a direct rate diff).
@@ -109,7 +111,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
             @info "Fortran _P rate-term dumps dead (all zero)?" rate_dead
             @test rate_dead   # if this ever flips, a direct rate parity becomes possible
 
-            inst, bounds = run_one_parity_step!(nstep_dec; use_cn=true, dumpdir=dumpdir,
+            inst, bounds = Base.invokelatest(run_parity_step!, nstep_dec; use_cn=true, dumpdir=dumpdir,
                 use_hydrstress=true, use_luna=true,
                 step_date=DateTime(2002,1,1) + Hour(nstep_dec - date_base),
                 forcing_file=forcing2002)

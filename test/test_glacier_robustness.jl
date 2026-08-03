@@ -36,7 +36,8 @@ using Test, CLM
         mod = Module(:GLAC_SMOKE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
         Base.include(mod, script)   # no auto-run: PROGRAM_FILE guard
-        r = Base.invokelatest(getfield(mod, :glacier_smoke_result); nsteps=24)
+        smoke_fn = Base.invokelatest(getfield, mod, :glacier_smoke_result)
+        r = Base.invokelatest(smoke_fn; nsteps=24)
         if r === missing
             @info "glacier robustness: inputs absent, skipping"
             @test_skip r !== missing

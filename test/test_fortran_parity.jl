@@ -40,6 +40,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
         @test_skip have_dumps
     else
         Base.include(@__MODULE__, common)   # build_bow_inst / run_one_parity_step! / DUMPDIR
+        run_parity_step! = Base.invokelatest(getglobal, @__MODULE__, :run_one_parity_step!)
 
         # (dump_name, kind, abs_tol, inst->array)
         rd(v) = ismissing(v) ? NaN : Float64(v)
@@ -86,7 +87,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
 
         for n in steps
             @testset "step n$n" begin
-                inst, _ = run_one_parity_step!(n; use_hydrstress=true)
+                inst, _ = Base.invokelatest(run_parity_step!, n; use_hydrstress=true)
                 ds = NCDataset(joinpath(dumpdir, "pdump_after_hydrologydrainage_n$(n).nc"), "r")
                 for (name, kind, tol, jl) in fields(inst, n)
                     m = maxabs(ds, name, kind, jl)

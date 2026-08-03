@@ -20,7 +20,8 @@ using Test, CLM
         mod = Module(:SNOW_SMOKE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
         Base.include(mod, script)
-        ok = Base.invokelatest(getfield(mod, :snow_smoke_ok); nsteps=240)
+        smoke_fn = Base.invokelatest(getfield, mod, :snow_smoke_ok)
+        ok = Base.invokelatest(smoke_fn; nsteps=240)
         if ok === missing
             @info "snow robustness: inputs absent, skipping"
             @test_skip ok === true

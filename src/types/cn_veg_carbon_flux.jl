@@ -860,7 +860,7 @@ function cnveg_carbon_flux_set_values!(cf::CNVegCarbonFluxData,
                                        nrepr::Int=NREPR,
                                        nlevdecomp_full::Int=1,
                                        ndecomp_pools::Int=1,
-                                       nvegcpool::Int=NVEGPOOL_NATVEG) where {FT}
+                                       nvegcpool::Int=NVEGPOOL_NATVEG)
     # Patch-level 1D fields
     for i in eachindex(mask_patch)
         mask_patch[i] || continue

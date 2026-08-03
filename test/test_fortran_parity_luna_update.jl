@@ -35,6 +35,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
     else
         common = joinpath(@__DIR__, "..", "scripts", "fortran_parity_common.jl")
         Base.include(@__MODULE__, common)
+        build_inst = Base.invokelatest(getglobal, @__MODULE__, :build_bow_inst)
 
         # Fortran ground truth at nstep 1757880 (LunaMod PARITYLUNA / PARITYLUNO).
         F = Dict(
@@ -48,7 +49,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
                pnlc=0.0899999999999997, enzs=1.00494913755897))
         CO2_240=28.96185; O2_240=16493.26; PBOT240=78915.11; DAYL=57263.81; DAYLF=0.944373
 
-        (inst, bounds, filt, tm) = Base.invokelatest(build_bow_inst; dtime=3600,
+        (inst, bounds, filt, tm) = Base.invokelatest(build_inst; dtime=3600,
             start_date=DateTime(2002,7,15,23), use_cn=true, use_luna=true)
         ps=inst.photosyns; temp=inst.temperature; cs=inst.canopystate; alb=inst.surfalb
         sa=inst.solarabs; wdb=inst.water.waterdiagnosticbulk_inst; fv=inst.frictionvel

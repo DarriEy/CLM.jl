@@ -39,8 +39,10 @@
 # QUIRK: stored here in common with the land-ice albedo rather than on the
 # parameter file, mirroring upstream FATES.
 const albice   = [0.80, 0.55]   # albedo land ice by waveband (1=vis, 2=nir)
-const rho_snow = [0.80, 0.55]   # canopy snow reflectance by waveband
-const tau_snow = [0.01, 0.01]   # canopy snow transmittance by waveband
+# `rho_snow` and `tau_snow` are defined by FatesRadiationMemMod.jl, which is
+# included into this same Julia module before this solver.  Upstream keeps them
+# in that radiation-memory module too; defining them again here only rebound
+# the constants during precompilation.
 
 """
     PatchNormanRadiation(currentPatch,

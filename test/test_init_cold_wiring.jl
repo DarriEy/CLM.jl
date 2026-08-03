@@ -171,14 +171,15 @@ end
         mod = Module(:INITCOLD_PROBE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
         Base.include(mod, probe)   # PROGRAM_FILE guard: no auto-run
-        BOW_FS = getfield(mod, :BOW_FS)
-        BOW_FP = getfield(mod, :BOW_FP)
+        BOW_FS = Base.invokelatest(getfield, mod, :BOW_FS)
+        BOW_FP = Base.invokelatest(getfield, mod, :BOW_FP)
 
         if !(isfile(BOW_FS) && isfile(BOW_FP))
             @info "InitCold runtime: Bow inputs absent, skipping" BOW_FS BOW_FP
             @test_skip isfile(BOW_FS)
         else
-            r = Base.invokelatest(getfield(mod, :run_domain), "BOW";
+            run_domain_fn = Base.invokelatest(getfield, mod, :run_domain)
+            r = Base.invokelatest(run_domain_fn, "BOW";
                                   fsurdat = BOW_FS, nsteps = 1)
             @test r !== nothing
             nan_fields = Set(String(x.field) for x in r.post_step)

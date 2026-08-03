@@ -27,6 +27,8 @@ set -euo pipefail
 CASE="${CASE:-/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/cases/symfluence_build}"
 BASE="${BASE:-/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data/clm_parity_run}"
 LK="${LK:-/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_lake_run}"
+DATA_ROOT="${DATA_ROOT:-$(dirname "$BASE")}"
+CESM_INPUTDATA="${CESM_INPUTDATA:-$DATA_ROOT/installs/cesm-inputdata}"
 # CTSM-format PCT_LAKE=100 surfdata lives in the Julia repo test inputs:
 LAKESURF="${LAKESURF:-$(cd "$(dirname "$0")/../.." && pwd)/test_inputs/lake/surfdata_lake100.nc}"
 
@@ -59,6 +61,27 @@ s = re.sub(r"stop_n\s*=\s*-?\d+",       "stop_n = 48", s)
 s = re.sub(r"restart_option\s*=\s*\w+", "restart_option = nsteps", s)
 s = re.sub(r"restart_n\s*=\s*-?\d+",    "restart_n = 48", s)
 open(p, "w").write(s)
+PY
+
+# Relocate absolute paths preserved in the migrated run configuration.  These
+# point at the retired workstation but the same mesh, forcing, and inputdata
+# hierarchy lives below DATA_ROOT on the replacement machine.
+python3 - "$LK" "$DATA_ROOT" "$CESM_INPUTDATA" <<'PY'
+import pathlib, sys
+
+run_dir, data_root, inputdata = sys.argv[1:]
+replacements = {
+    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data": data_root,
+    "/Users/darri.eythorsson/compHydro/SYMFLUENCE/SYMFLUENCE_data": data_root,
+    "/Users/darri.eythorsson/projects/cesm-inputdata": inputdata,
+}
+for name in ("drv_in", "datm_in", "datm.streams.xml", "drv_flds_in",
+             "nuopc.runconfig", "nuopc.runseq", "lnd_in", "fd.yaml"):
+    path = pathlib.Path(run_dir, name)
+    text = path.read_text()
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    path.write_text(text)
 PY
 
 # --- codesign a local copy of the exe (macOS 26 ad-hoc-sign SIGTRAP fix) + run ---

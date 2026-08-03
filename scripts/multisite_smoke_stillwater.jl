@@ -14,11 +14,15 @@
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
-const STW = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Stillwater_Oklahoma"
+const DATA = get(ENV, "SYMFLUENCE_DATA",
+    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
+const STW = joinpath(DATA, "domain_Stillwater_Oklahoma")
 const FS  = joinpath(STW, "settings/CLM/parameters/surfdata_clm.nc")
 const FP  = joinpath(STW, "settings/CLM/parameters/clm5_params.nc")
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const SNICAR = joinpath(get(ENV, "CESM_INPUTDATA", joinpath(DATA, "installs/cesm-inputdata")),
+    "lnd/clm2/snicardata")
+const SNOWOPT = joinpath(SNICAR, "snicar_optics_5bnd_c013122.nc")
+const SNOWAGE = joinpath(SNICAR, "snicar_drdt_bst_fit_60_c070416.nc")
 
 function set_semiarid_forcing!(inst, ng, nc)
     a = inst.atm2lnd

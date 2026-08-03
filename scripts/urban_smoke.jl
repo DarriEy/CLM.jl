@@ -19,7 +19,9 @@
 # This is NOT a Fortran-parity test (no urban reference dumps yet) — it is a
 # finiteness / robustness gate.
 #
-# Usage: julia +1.12 --project=. scripts/urban_smoke.jl
+# Usage:
+#   CLM_URBAN_SURFDATA=/path/to/surfdata_1x1_mexicocityMEX_*.nc \
+#     julia +1.12 --project=. scripts/urban_smoke.jl
 # =============================================================================
 # NB: `Base.include(@__MODULE__, ...)`, not bare `include`. Several of these
 # scripts are loaded by their tests into a fresh `Module(:X)`, which does NOT
@@ -28,8 +30,9 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
 
 using CLM, NCDatasets, Dates, Printf
 
-const URB_FS = symfluence_path("installs", "clm", "python", "ctsm", "test", "testinputs",
-                               "surfdata_1x1_mexicocityMEX_hist_16pfts_CMIP6_2000_c231103.nc")
+const URB_FS = get(ENV, "CLM_URBAN_SURFDATA",
+    symfluence_path("installs", "clm", "python", "ctsm", "test", "testinputs",
+                    "surfdata_1x1_mexicocityMEX_hist_16pfts_CMIP6_2000_c231103.nc"))
 const BOW_CAL = domain_params_dir("domain_Bow_at_Banff_lumped")
 const URB_FP = joinpath(BOW_CAL, "clm5_params.nc")
 const SNOWOPT = snicar_optics()
@@ -165,7 +168,7 @@ end
 # urban surfdata / param file is absent (gated regression test skips).
 function urban_smoke_ok(; nsteps::Int = 6)
     (isfile(URB_FS) && isfile(URB_FP)) ||
-        (@info "urban smoke: inputs absent, skipping" URB_FS URB_FP; return missing)
+        (@info "urban smoke: inputs absent, skipping; stage the CTSM Mexico City testinput or set CLM_URBAN_SURFDATA" URB_FS URB_FP; return missing)
     r = main(; nsteps=nsteps)
     return r.nbad == 0 && r.nurb > 0
 end
