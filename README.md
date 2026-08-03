@@ -1,326 +1,338 @@
 # CLM.jl
 
+[![CI](https://github.com/DarriEy/CLM.jl/actions/workflows/test.yml/badge.svg)](https://github.com/DarriEy/CLM.jl/actions/workflows/test.yml)
+[![Julia 1.10+](https://img.shields.io/badge/Julia-1.10%2B-9558B2.svg)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Julia](https://img.shields.io/badge/Julia-1.10%2B-purple.svg)](https://julialang.org)
-[![Tests](https://img.shields.io/badge/Tests-15%2C528_passing-brightgreen.svg)]()
 
-A differentiable Julia port of the [Community Land Model version 5](https://www.cesm.ucar.edu/models/clm/) (CLM5/CTSM) — the land surface component of the Community Earth System Model (CESM).
+CLM.jl is a differentiable Julia port of the Community Land Model in
+[CTSM](https://github.com/ESCOMP/CTSM). It implements the CLM5 land-surface
+physics, hydrology, snow, carbon–nitrogen biogeochemistry, and a broad set of
+optional process models in a structure-of-arrays design that supports automatic
+differentiation and accelerator execution.
 
-CLM.jl reproduces the full CLM5 biogeophysics in pure Julia, enabling **automatic differentiation** for gradient-based parameter calibration, **GPU-ready architecture** with BitVector masks, and **composability** with the Julia scientific ecosystem (ForwardDiff.jl, Enzyme.jl, Flux.jl, Optim.jl).
+The project is currently an **unreleased research artifact** (`v0.1.0`), not a
+drop-in replacement for CTSM and not yet registered in Julia's General registry.
+Use it for research and development only after independently validating the
+configuration and outputs that matter to you.
 
-> ## ⚠️ Read this first: an agentic-engineering experiment
->
-> **This codebase was written almost entirely by AI agents running in a continuous "[Ralph](https://ghuntley.com/ralph/)" loop.** No human has hand-written any meaningful amount of the code here, and the author has read only a small fraction of it. What you see is the output of a large amount of *agentic* engineering — autonomous agents reading the original Fortran, porting it, writing tests, validating against reference output, and iterating — supervised at the goal level, not the line level.
->
-> This project exists to find out **what *can* be done** with agentic engineering on a serious scientific codebase — not to demonstrate what *should* be done. It is a probe into the limits of the approach, and should be read as such.
->
-> **Implications you must take seriously:**
-> - 🧪 **It is a research artifact, not production software.** Do not use it for science, operations, or decisions you care about without independent verification.
-> - 🔍 **Validation is partial.** The numbers below are real, but they cover a limited slice (single-point sites, one year each, selected variables, biogeophysics only). Whole subsystems are implemented but unvalidated, and "tests pass" means the agents' own tests pass.
-> - 🐛 **Expect latent bugs.** Plausible-looking code that no human has reviewed can be subtly or badly wrong in ways tests don't catch. Treat every result as suspect until you've checked it yourself.
-> - 📝 **Provenance is unusual.** Much of the design rationale lives in agent logs and commit history rather than in a human's head.
->
-> **Use entirely at your own risk.** No warranty, no guarantees of correctness, fitness, or scientific validity. If you build on this, verify everything.
+> [!IMPORTANT]
+> CLM.jl was produced primarily by AI coding agents, with human supervision at
+> the goal and validation level. The test and parity results below are real, but
+> they do not substitute for independent scientific review. Expect latent defects
+> outside the validated surface and do not use the model for consequential
+> scientific, operational, or policy decisions without additional verification.
 
-## Validation Against Fortran CLM5 *(ongoing)*
+## Project status
 
-CLM.jl is being checked against Fortran CLM5 (CTSM) across a growing suite of
-single-point sites chosen to span distinct biomes. Each site runs a full year in
-**PHS + LUNA** mode (plant hydraulic stress + photosynthetic acclimation),
-initialized from a Fortran-generated spun-up restart, and the two daily history
-series are compared variable-by-variable.
+Status at commit `32fd5ef` (2026-08-03):
 
-![Multi-biome parity scorecard — CLM.jl vs Fortran CLM5](scripts/parity_scorecard.png)
+| Layer | Result | Scope |
+|---|---:|---|
+| GitHub CI | 3/3 jobs passed | Julia 1.10, latest stable Julia, and a two-rank MPI bit-identity smoke test |
+| Strict-data CPU suite | 27,537 passed, 0 failed, 3 hardware-skipped | 27,540 runtime checks; all external data gates enabled |
+| Annual domain runs | Passed | Aripuanã: 8,784/8,784 steps; Stillwater: 8,760/8,760 steps with strict balance checks |
+| Multi-biome annual parity | 1,102/1,104 variables in tolerance | 16 biomes × 69 variables against Fortran histories |
+| Per-timestep Fortran parity | 35 harnesses passed | Instrumented CTSM references across physics and biogeochemistry; documented exceptions remain |
+| Apple Metal fleet | 128 device harnesses passed | Device-versus-CPU parity on Apple Silicon; Metal uses `Float32` |
 
-Current standing: across **20 biomes** and **69 output variables** (energy, water,
-snow, state, carbon), essentially all biome × variable combinations meet the
-coverage tolerance — **10 % relative** (or **0.5 K** for temperatures), with
-per-unit absolute floors for near-zero quantities — and most agree to under 1 %.
-The stricter scientific-parity gate (annual |Δ| ≤ 1 % / 0.05 K **and** daily
-nRMSE ≤ 0.10 / 0.2 K) stands at **1348 of 1380** cells (97.7 %), with **11 of 20**
-biomes fully strict, one documented exception (Baltimore `SNOW_DEPTH`, a small
-snow-covered-area depth diagnostic), and 31 residuals traced — by single-step
-oracle instrumentation — to coupled-solver floors or forcing-representation
-limits rather than model bugs.
+The three `Broken` results in the strict CPU suite are explicit optional-device
+skips for CUDA, AMDGPU, and Metal. They are not failed tests or missing fixtures.
+The complete validation record and reproduction notes are in
+[`docs/HANDOFF_2026-07-24.md`](docs/HANDOFF_2026-07-24.md).
 
-The heatmap collapses each variable to a single annual-mean error. To show what
-the agreement looks like day-by-day, here is one site's full-year daily series —
-Bow at Banff (alpine), with Fortran and CLM.jl overlaid across the snow
-accumulation and melt cycle:
+### What these results establish
 
-![Daily timeseries, CLM.jl vs Fortran CLM5 — Bow at Banff](scripts/parity_timeseries.png)
+- The tested single-point and single-column CLM5 configurations run through full
+  annual cycles without fatal water-balance failures.
+- The validated CPU implementation agrees closely with instrumented Fortran CTSM
+  at matched timesteps and across annual multi-biome history variables.
+- The tested GPU kernels and composite driver paths agree with same-precision CPU
+  references on real hardware.
+- Forward-mode and reverse-mode AD paths are exercised through substantial model
+  components and driver workflows.
 
-- This is agreement within 10 % (0.5 K for temperatures), **not bit-for-bit or
-  machine-precision parity.** True numerical parity is a separate, harder goal
-  and is not claimed here.
-- These numbers are a **snapshot of ongoing work.** Several recent fixes were
-  found by widening this comparison — a CO₂ partial-pressure bug, a wind-stress
-  decomposition bug, a 1000× snow-compaction parameter — and more bugs likely
-  remain.
-- Each site is **one year, one configuration, a selected set of variables.**
-  Whole subsystems (notably biogeochemistry) are not exercised by this suite.
+### What they do not establish
 
-Biomes covered so far: alpine (Bow at Banff), semi-arid prairie (Stillwater),
-hot desert (Walnut Gulch), tropical rainforest (Aripuanã), tropical savanna
-(Donga), larch permafrost taiga (Yakutia), temperate peat bog (Mer Bleue),
-continental steppe (Kherlen), temperate deciduous forest (Hubbard Brook), Pacific
-maritime conifer (HJ Andrews), boreal forest (Krycklan), Mediterranean (Tagus),
-arctic tundra (Abisko), alpine glacier (Massa Aletsch), urban (Baltimore),
-glacier outwash (Iceland), temperate broadleaf-evergreen (Eucalyptus/Tumbarumba),
-boreal aspen (BOREAS), tropical páramo (Antisana), and cropland (Mead). The suite
-(`scripts/parity_run_domain.jl` + scorecard)
-is expanded as references are generated, so these numbers are a snapshot, not a
-final result. See also [the warning above](#️-read-this-first-an-agentic-engineering-experiment).
+- Universal parity for every flag combination, land unit, forcing product, or
+  transient multi-century simulation.
+- Scientific validity of configurations that have not been compared against CTSM
+  or observations.
+- Bit identity between Julia and Fortran. Compiler, solver, precision, and
+  operation-order differences make that an inappropriate general target.
+- Production readiness of every optional FATES, crop, dynamic-land-use, methane,
+  or coupled ice-sheet path.
 
-## Features
+## Capabilities
 
-### Biogeophysics (Validated)
-- Surface albedo with two-stream canopy radiative transfer
-- Snow radiative transfer (SNICAR) with aerosol-snow interactions
-- Turbulent fluxes via Monin-Obukhov similarity (bare ground, canopy, lake, urban)
-- Photosynthesis (Farquhar/Collatz) with Ball-Berry and Medlyn stomatal conductance
-- LUNA photosynthetic optimization (Vcmax/Jmax acclimation)
-- Plant hydraulic stress (PHS)
-- Snow hydrology (12 layers, compaction, grain-size evolution)
-- Soil hydrology (Richards equation, Clapp-Hornberger / van Genuchten)
-- Soil temperature with phase change
-- Lake temperature and hydrology
-- Urban canyon energy balance (CLMU)
-- Irrigation, hillslope lateral flow
+| Area | Implemented scope | Validation posture |
+|---|---|---|
+| Surface physics | Canopy and bare-ground radiation, turbulence, photosynthesis, LUNA, plant hydraulics | Broad unit, annual, and Fortran-parity coverage |
+| Hydrology | Infiltration, runoff, drainage, water table, aquifer/bedrock options, hillslope routing | Annual and process-level parity coverage; some coupled modes remain opt-in |
+| Snow and ice | Multilayer snow hydrology, compaction, phase change, SNICAR, glaciers | Seasonal and per-timestep parity coverage |
+| Lakes and urban | Lake thermodynamics/hydrology and CLMU canyon energy balance | Dedicated strict-data fixtures and robustness gates |
+| Biogeochemistry | CN pools and fluxes, CENTURY and MIMICS decomposition, N cycle, isotopes | CN and subsystem parity harnesses; coverage varies by process and site |
+| Disturbance and trace gases | Li fire families, methane, VOC/MEGAN, dry deposition, dust | Major branches exercised against Fortran; see subsystem reports for residuals |
+| Vegetation | Satellite phenology, crop lifecycle, CNDV, transient subgrid, FATES | Core paths run; deep optional and long-timescale configurations are less mature |
+| Differentiation | ForwardDiff and Enzyme support, calibration framework, smoothed physics alternatives | Gradient and driver-level validation in tested configurations |
+| Parallel execution | KernelAbstractions CPU/GPU kernels, MPI domain split, multi-GPU plumbing | CPU/MPI CI plus real-hardware Metal validation; CUDA/AMDGPU are optional extensions |
 
-### Biogeochemistry (Implemented; CN core validated at ONE site. Fire/CH4 diffed for the first time — and they FAILED)
-- Carbon-nitrogen cycling (CN mode) with allocation, respiration
-- Decomposition (Century cascade and MIMICS)
-- Nitrification-denitrification, nitrogen leaching
-- Fire (Li 2014 / **2016** / 2021 / 2024), gap mortality, dynamic vegetation (CNDV)
-- Methane (CH4), VOC emissions, dust emission
+The source preserves CTSM variable names where practical, making routines such as
+`h2osoi_liq`, `t_soisno`, and `qflx_*` traceable back to the Fortran model.
 
-**What is actually validated** (see [`docs/BGC_PARITY_SCORECARD.md`](docs/BGC_PARITY_SCORECARD.md)):
-the **CN core** — allocation, phenology, litterfall, decomposition, mineral N — is diffed
-against the instrumented Fortran CTSM at the **Bow-at-Banff single column only** (3 patches:
-bare, needleleaf evergreen tree, C3 arctic grass), from a converged BGC spinup:
+## Installation
 
-| | result |
-|---|---|
-| Single-step parity, winter / summer / **autumn leaf-offset** windows | worst CN `max\|rel\|` **5.9e-05 / 2.2e-03 / 2.2e-03** |
-| Leaf-offset litterfall flux through the 15-day senescence ramp | Julia/Fortran ratio **1.0000** at every step |
-| Multi-step drift (inject once, free-run 480 steps through senescence) | **bounded, near-linear**; leafc rel 4e-05 → 2e-02 |
-| `use_cn` cold start vs a Fortran CN cold start | **bit-exact** (worst rel 0.0) |
+CLM.jl supports Julia 1.10 and later. Until the package is registered, install it
+directly from GitHub:
 
-Generating the **autumn / leaf-offset window** — which had never existed, and which a
-summer-only window is structurally blind to (`offset_flag == 0` all summer) — exposed and
-fixed four real bugs, including a wiped litterfall-ramp memory that made leaf senescence
-~2–7% of its correct rate, and a cold start that gave evergreen PFTs **no canopy at all**.
+```julia
+using Pkg
+Pkg.add(url = "https://github.com/DarriEy/CLM.jl")
+```
 
-#### Fire and methane — first-ever Fortran diff (see [`docs/CH4_FIRE_PARITY.md`](docs/CH4_FIRE_PARITY.md))
+For development:
 
-Fire and methane had **never** been compared to Fortran — not because it was hard, but
-because the reference run had `use_lch4=.false.` and `fire_method='nofire'`, so **neither
-subsystem ever ran in Fortran either**. A new reference (`use_lch4=.true.`,
-`fire_method='li2016crufrc'`) and two new dump boundaries (`after_ch4`, `after_fire`) now
-exist. Turning the lights on found, and this PR fixed, **ten real bugs** — including three
-that were silently corrupting **every** CLM.jl run, fire or not:
+```bash
+git clone https://github.com/DarriEy/CLM.jl.git
+cd CLM.jl
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+```
 
-- **`forc_rh_grc` was identically ZERO in every run, ever.** The forcing reader never wrote
-  `forc_q_not_downscaled_grc`, the sole input to `atm2lnd_update_rh!`. Relative humidity was
-  dead model-wide (Bow: 0 → **44.9 %**).
-- **`soil_bgc_carbon_flux_summary!` was never called** — so **all heterotrophic respiration
-  (`somhr`/`lithr`/`hr_vr`) was identically ZERO**, which in turn made CH4 production zero.
-- **`cnveg_carbon_state_summary!`'s column `p2c` was stubbed** → `totvegc_col` was
-  allocate-NaN forever (and is a live input to the fire fuel load).
-- **`rgasm` was 1000× too small** (a `/1000` applied twice) — *every* CH4/O2/CO2 atmospheric
-  boundary concentration was **1000× too large**.
-- **`finundated` was frozen at 0.1 forever** — CTSM's `CalcFinundated` was never ported.
-- **Three `CH4VarCon` defaults were the OPPOSITE of CTSM's** (`anoxicmicrosites`,
-  `ch4rmcnlim`, `use_aereoxid_prog`) — the Julia methane model was a *different model*.
-- **The entire Li fire chain was dead**: `_fire_active` was structurally unreachable, the
-  seven fire structs were never instantiated, and lightning/popdens/GDP/peat had no reader.
-  Now wired (default `:nofire` stays bit-identical). Plus an `fd_pft` **off-by-one** and
-  NaN-initialised `prec10/30/60`/`rh30` accumulators.
+The committed `Project.toml` declares the supported dependency ranges. Manifests
+are intentionally not committed, so each Julia version resolves a compatible
+environment.
 
-**Status after the fixes — honest:**
+## Input data
 
-| | |
-|---|---|
-| **Fire — Li2016 formula** | `LGDP`, `LGDP1`, `LPOP`, `FSR`, `FD`, `WTLF` **EXACT (0.0)**; `FUELC` 2e-06. The whole fire C/N combustion chain is exact **up to `farea_burned`** (every flux carries its error identically). **19/29 fields exact.** |
-| **Fire — `NFIRE`/`FAREA_BURNED`** | **DIVERGE** (rel 1.2 / 4.8). Localized to `fire_m`, whose `rh30` input cannot be reproduced because **CLM.jl's accumulator restart I/O is unported**. NOT validated. |
-| **Methane** | **NOT validated.** Production and the O2 boundary now agree to the right order (from 1000× out / identically zero); the **transport + aerenchyma half is still badly wrong** (`grnd_ch4_cond` is stuck at its cold-start 0.01 — the driver passes a placeholder). **11/33 within 1e-9, 8 of those vacuous.** |
-| **Methane as a SOURCE** | **UNTESTED.** Bow is dry: `finundated ≡ 0`, so the column is a net CH4 *sink*. The wetland regime — the one that matters — needs a peatland site. |
+An offline run requires CTSM-compatible NetCDF inputs:
 
-**NOT validated against Fortran:** any site other than Bow; **isotopes, CNDV, MIMICS, and VOC
-(never diffed at all)**; crop BGC; multi-year trajectories; and — per the table above — fire's
-burned area and methane's transport.
+- surface data (`fsurdat`);
+- CLM parameter data (`paramfile`);
+- atmospheric forcing (`fforcing`);
+- optional snow optics, snow aging, restart, fire, methane, crop, or transient
+  land-use inputs for the corresponding configurations.
 
-### FATES Ecosystem Demography (Ported and Running — Parity NOT Established)
-[FATES](https://github.com/NGEET/fates) (size- and age-structured cohort
-demography — the alternative vegetation model to CN) is ported and runs live
-through the timestep driver under `use_fates`: cohorts photosynthesize, grow,
-compete for light, and are recruited and killed, on the official FATES parameter
-file. Treat this as the **least validated** part of the codebase:
+These large upstream datasets are not distributed in the Git repository. The
+test harnesses locate the project data archive through `SYMFLUENCE_DATA`:
 
-- **No Fortran-FATES bit-parity.** Nothing here has been compared against a
-  Fortran FATES run — that reference is blocked on staging DATM forcing for a
-  FATES-enabled Fortran case. What exists is internal consistency plus
-  multi-site equilibrium behaviour checks (`scripts/fates_multisite_validation.jl`,
-  `scripts/fates_fortran_parity.jl` is a scaffold awaiting the reference).
-- Some FATES paths remain gated off (notably plant hydraulics), and the
-  numbers it produces have not been checked against anything authoritative.
+```bash
+export SYMFLUENCE_DATA=/absolute/path/to/SYMFLUENCE_data
+```
 
-If the caveats at the top of this README apply anywhere, they apply here.
+Without the external archive, self-contained tests still run and data-dependent
+tests report their gates explicitly. For strict release validation, stage the
+fixtures described in [`docs/HANDOFF_2026-07-24.md`](docs/HANDOFF_2026-07-24.md).
 
-### AD & Calibration
-- All 50+ data structs parameterized on `{FT<:Real}` for dual-number propagation
-- ~520 smoothed discontinuities (`smooth_max`, `smooth_min`, `smooth_heaviside`)
-- Pure-Julia LU fallback for banded matrix solves with Dual numbers
-- Built-in `CalibrationProblem` framework with ForwardDiff gradients
-- 7 tunable parameters: `vcmax25_scale`, `medlyn_slope`, `csoilc`, `jmax25top_sf`, `baseflow_scalar`, `fff`, `ksat_scale`
+## Running an offline simulation
 
-## Quick Start
+The high-level API is currently namespaced rather than exported:
+
+```julia
+using CLM
+using Dates
+
+state = CLM.clm_run!(
+    fsurdat = "/path/to/surfdata.nc",
+    paramfile = "/path/to/clm5_params.nc",
+    fforcing = "/path/to/clmforc.2003.nc",
+    fhistory = "clm_history.nc",
+    start_date = DateTime(2003, 1, 1),
+    end_date = DateTime(2004, 1, 1),
+    dtime = 1800,
+    use_cn = false,
+)
+```
+
+`CLM.clm_run!` returns the final `CLMInstances` state and writes the requested
+history file. Important defaults follow the CLM5 configuration where available:
+LUNA and plant hydraulic stress resolve conditionally, the CLM5 zero-flux lower
+boundary is used, and balance violations are fatal by default.
+
+For lower-level experiments, initialize the state tree directly:
+
+```julia
+inst, bounds, filters, time_manager = CLM.clm_initialize!(
+    fsurdat = "/path/to/surfdata.nc",
+    paramfile = "/path/to/clm5_params.nc",
+    use_cn = true,
+)
+```
+
+The driver and initialization keyword documentation in
+[`src/driver/clm_run.jl`](src/driver/clm_run.jl) and
+[`src/driver/clm_initialize.jl`](src/driver/clm_initialize.jl) is the authoritative
+API reference while a Documenter site is being prepared.
+
+## GPU execution
+
+The base package has no hard GPU dependency. CUDA and AMDGPU register through
+package extensions; Metal is carried by the dedicated script environment and
+uses `Float32` because Apple GPUs do not support `Float64` compute.
+
+To validate the available GPU on a machine:
+
+```bash
+julia --project=scripts -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia --project=scripts scripts/gpu_validate.jl
+```
+
+On Apple Silicon, do **not** apply the CTSM/MPI
+`HWLOC_COMPONENTS=-opencl` workaround to Julia Metal processes; it can make
+`Metal.functional()` return `false`.
+
+The repository contains component and end-to-end harnesses named
+`scripts/gpu_validate_*`. GPU speedups require enough independent columns to
+amortize kernel-launch and host/device transfer overhead; single-point workloads
+usually belong on the CPU.
+
+## Automatic differentiation and calibration
+
+State and parameter structures are generally parameterized by `FT<:Real`, and
+the codebase provides ForwardDiff and Enzyme paths plus a calibration framework.
+A typical workflow constructs `CalibrationParameter` and `CalibrationTarget`
+objects, then calls the namespaced optimizer:
 
 ```julia
 using CLM
 
-# Run a full simulation
-clm_run!(
-    fsurdat  = "path/to/surfdata.nc",
-    paramfile = "path/to/params.nc",
-    fforcing  = "path/to/forcing/",
-    fhistory  = "output/history.nc"
+problem = CLM.CalibrationProblem(
+    params = parameters,
+    targets = targets,
+    fsurdat = "/path/to/surfdata.nc",
+    paramfile = "/path/to/clm5_params.nc",
 )
 
-# Or initialize and step manually
-inst, bounds, filt, tm = clm_initialize!(
-    fsurdat  = "path/to/surfdata.nc",
-    paramfile = "path/to/params.nc"
-)
-clm_drv!(config, inst, filt, filt_ia, bounds, ...)
+result = CLM.calibrate(problem; maxiter = 20)
 ```
 
-## Gradient-Based Calibration
+The concrete setters, getters, bounds, and observation data are application
+specific. See `src/calibration/` and the `scripts/calibrate_*` examples before
+building a new workflow. Differentiability is configuration-dependent: discrete
+events and optional process branches may require the supplied smoothing or
+compositional reverse-mode paths.
 
-```julia
-using CLM, ForwardDiff
+## Testing and validation
 
-prob = CalibrationProblem(
-    params = [
-        CalibrationParameter("vcmax25_scale", 1.0, setter!, (0.5, 2.0)),
-        CalibrationParameter("medlyn_slope", 4.1, setter!, (1.0, 10.0)),
-    ],
-    targets = [CalibrationTarget("LH", getter, obs_LH, 1.0)],
-    fsurdat = "surfdata.nc",
-    paramfile = "params.nc",
-    fforcing = "forcing/"
-)
-
-# AD gradients + Armijo line search
-result = calibrate(prob; maxiter=20)
-```
-
-## Architecture
-
-```
-src/
-  constants/       Physical constants, control flags, PFT parameters
-  types/           50+ mutable structs (SoA layout, {FT<:Real} parameterized)
-  infrastructure/  Solvers, I/O, initialization, filters, subgrid
-  biogeophys/      Radiation, turbulence, hydrology, snow, soil, photosynthesis
-  biogeochem/      Phenology, decomposition, nutrient cycling, fire, CH4, VOC
-  driver/          Timestep driver, initialization, top-level run
-  calibration/     AD-based calibration framework
-```
-
-**Key design decisions:**
-- **SoA (Structure of Arrays)** layout matching Fortran CLM for GPU compatibility
-- **BitVector masks** replace Fortran integer filter arrays — no dynamic rebuild, GPU-ready
-- **Fortran variable names preserved** for line-by-line traceability (`h2osoi_liq`, `t_soisno`, etc.)
-- **Fixed-size snow arrays** padded to `nlevsno=12` — no dynamic resizing
-
-## Performance
-
-| Configuration | Wall-clock (1 year, single-point) |
-|---|---|
-| Fortran CLM5 (ifort -O2) | ~2 s |
-| CLM.jl (Float64) | ~4 s |
-| CLM.jl + ForwardDiff (1 param) | ~8 s |
-| CLM.jl + ForwardDiff (7 params) | ~28 s |
-
-### GPU (Metal) — where it helps
-
-The `clm_drv!` timestep also runs on Apple Metal (Float32), and a full annual single-point
-run reproduces the Fortran reference to the same tolerance as the CPU path (69/69 variables).
-For point-scale work like the parity runs above, though, the CPU is far faster: a single
-column is the GPU's worst case — hundreds of tiny kernel launches with no parallel work to
-hide the overhead. The GPU only earns its keep once there are enough columns to fill it.
-
-![clm_drv! CPU vs Metal scaling](scripts/gpu_scaling.png)
-
-Timing one `clm_drv!` biogeophysics step as the column count grows, CPU time scales linearly
-while the GPU sits near a fixed launch/marshaling floor until it saturates — crossing over
-around **~1,150 columns** and reaching **~130×** by 260k columns (trending toward a ~280×
-per-column ceiling). So single points belong on the CPU; grid- to continental-scale runs are
-where on-device execution pays off. This is an early, indicative measurement — Apple M-series
-laptop, Float32, min-of-trials — not a tuned benchmark. (`scripts/gpu_scaling_bench.jl`)
-
-## Testing
+Run the ordinary package test suite with:
 
 ```bash
-julia --project=. -e 'using Test; include("test/runtests.jl")'
+julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-15,528 tests: unit tests, end-to-end SP simulation, AD gradient verification (6 climate scenarios), calibration framework, parameter recovery, CN integration, and Enzyme feasibility.
+The direct form used during release validation is:
 
-## Requirements
+```bash
+julia --project=. --check-bounds=yes \
+    -e 'using Test; include("test/runtests.jl")'
+```
 
-- Julia 1.10+
-- NCDatasets.jl, ForwardDiff.jl, JSON.jl
-- CLM5 surface data and parameter files (NetCDF)
+With the external data archive:
 
-## How This Was Built — The Ralph Loop
+```bash
+SYMFLUENCE_DATA=/absolute/path/to/SYMFLUENCE_data \
+    julia --project=. --check-bounds=yes \
+    -e 'using Test; include("test/runtests.jl")'
+```
 
-CLM.jl is, first and foremost, an experiment in **agentic software engineering**. The porting work was driven by a [Ralph-style loop](https://ghuntley.com/ralph/): an AI coding agent run repeatedly against a standing set of instructions, each iteration picking up the next unit of work, reading the original Fortran, writing the Julia translation, adding tests, validating, and committing — with a human steering goals and priorities rather than authoring code.
+Validation is layered rather than represented by a single coverage number:
 
-The working pattern, roughly:
+1. Unit and analytic-oracle tests exercise translated routines and invariants.
+2. Integration tests drive initialization, complete timesteps, restarts, AD, and
+   optional process configurations.
+3. Strict-data tests exercise official urban, lake, snow, glacier, and multisite
+   fixtures.
+4. Fortran-parity harnesses compare against instrumented CTSM state boundaries.
+5. Annual domain runs compare free-running Julia and Fortran history variables.
+6. Real-device GPU harnesses compare device and same-precision CPU results.
 
-1. **Read the Fortran completely** for the target module (`/installs/clm/`).
-2. **Translate** to Julia following the conventions in [`CLAUDE.md`](CLAUDE.md) (SoA layout, preserved variable names, BitVector masks).
-3. **Test** — unit tests plus finite-difference derivative checks where applicable.
-4. **Validate** against reference Fortran output where a harness exists.
-5. **Iterate** until parity, then move to the next module. Repeat, autonomously, for a long time.
+CI intentionally resolves fresh environments for Julia 1.10 and latest stable
+Julia, then runs the package tests and a two-rank MPI bit-identity smoke test.
 
-Some of the larger pushes (GPU kernelization, reverse-mode AD, BGC subsystems) were run as multi-agent workflows — fan-out batches of agents working in parallel, with adversarial verification passes. The accumulated decisions, dead-ends, and lessons live in the commit history, [`PORTING_LOG.md`](PORTING_LOG.md), and the agents' own memory.
+## Repository layout
 
-**What this means for you:**
+```text
+src/
+  constants/       Physical constants, control flags, and precision policy
+  types/           Structure-of-arrays model state and parameter containers
+  infrastructure/  I/O, solvers, kernels, backends, MPI, and subgrid machinery
+  biogeophys/      Radiation, turbulence, hydrology, snow, soil, and photosynthesis
+  biogeochem/      Carbon, nitrogen, decomposition, fire, methane, and vegetation
+  fates/            FATES ecosystem-demography port and CLM coupling
+  driver/           Initialization, timestep orchestration, and offline runs
+  calibration/      AD rules, parameter injection, objectives, and optimization
+test/               Unit, integration, strict-data, AD, backend, and MPI tests
+scripts/            Parity, diagnostics, calibration, GPU, and validation tools
+docs/               Validation reports, audits, residual analyses, and handoff notes
+test_inputs/        Small redistributable fixtures
+```
 
-- The code is **idiomatic and traceable** because the loop was told to keep it that way — but consistency is not correctness.
-- Coverage is **broad but uneven.** Biogeophysics is the most exercised; biogeochemistry is implemented but largely unvalidated.
-- If you find a bug, you are likely the **first human to look at that code closely.** Issues and fixes are very welcome (see [Contributing](#contributing)).
+## Known limitations
 
-This is shared in the spirit of finding out what is possible. Calibrate your trust accordingly.
+- The package is unreleased and its public API is not yet stabilized.
+- Large CTSM inputs and instrumented Fortran references must be staged separately.
+- Validation breadth is uneven: biogeophysics and core CN have the strongest
+  coverage; deep FATES toggles and some crop/transient/coupled paths have less.
+- Apple Metal uses `Float32`; CPU, CUDA, and AMDGPU configurations generally use
+  `Float64`. Cross-precision results should be assessed scientifically, not only
+  by device-versus-CPU parity.
+- Some historical reports under `docs/` are explicitly marked as snapshots and
+  may describe issues fixed by later commits. Start with the current handoff.
+- This is a source port of CTSM, not an official CESM or NCAR product.
 
-## Citation
+The detailed remaining validation tail is tracked in
+[`docs/HANDOFF_2026-07-24.md`](docs/HANDOFF_2026-07-24.md) and
+[`docs/FORTRAN_VALIDATION_BACKLOG.md`](docs/FORTRAN_VALIDATION_BACKLOG.md).
 
-If you use CLM.jl, please cite the repository:
+## Provenance
 
-> Eythorsson, D. (2026). *CLM.jl: A differentiable Julia port of the Community Land Model.* https://github.com/DarriEy/CLM.jl
+The port was developed through a long-running, agentic workflow: coding agents
+read the upstream Fortran, translated modules, added tests, generated parity
+harnesses, and iterated against CTSM references. Human direction focused on scope,
+validation targets, and release decisions rather than line-by-line authorship.
+
+For traceability, the repository preserves upstream naming, porting notes,
+instrumented-reference recipes, and a detailed commit history. Useful starting
+points are:
+
+- [`PORTING_LOG.md`](PORTING_LOG.md) — translation history and conventions;
+- [`PRD_CLM_JULIA_PORT.md`](PRD_CLM_JULIA_PORT.md) — original project scope;
+- [`docs/HANDOFF_2026-07-24.md`](docs/HANDOFF_2026-07-24.md) — current validation record;
+- [`docs/MULTISITE_PARITY_MATRIX.md`](docs/MULTISITE_PARITY_MATRIX.md) — annual biome matrix;
+- [`docs/CH4_FIRE_PARITY.md`](docs/CH4_FIRE_PARITY.md) — methane and fire oracle work;
+- [`docs/GPU_PORT_GAP.md`](docs/GPU_PORT_GAP.md) — accelerator scope and limitations.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run the full test suite before submitting changes:
+Issues and pull requests are welcome. A useful contribution should:
 
-```bash
-julia --project=. -e 'using Test; include("test/runtests.jl")'
-```
+- name the CTSM configuration and upstream routine being matched;
+- include a focused regression test or parity oracle;
+- distinguish self-consistency from comparison against external ground truth;
+- preserve default-path results unless an intentional scientific correction is
+  documented;
+- pass Julia 1.10, latest stable Julia, and the MPI smoke test.
 
-## License
+Run `git diff --check` and the relevant targeted tests before the full suite. Do
+not commit machine-specific manifests, generated parity output, or proprietary/
+large upstream datasets.
 
-The original contributions in this repository (the Julia translation, AD/GPU
-work, test and parity harnesses) are licensed under the [MIT License](LICENSE).
+## Citation
 
-CLM.jl is a port — and therefore a derivative work — of the Fortran CTSM/CLM5
-source, which is distributed by UCAR/NCAR under a BSD 3-Clause license. That
-upstream copyright notice and license are retained in the [NOTICE](NOTICE) file
-and continue to govern the portions of this work derived from CTSM.
+Until a versioned release and `CITATION.cff` are published, cite the repository:
 
-## Acknowledgements
+> Eythorsson, D. (2026). *CLM.jl: A differentiable Julia port of the Community
+> Land Model* (version 0.1.0, research software). GitHub.
+> https://github.com/DarriEy/CLM.jl
 
-CLM.jl is based on the [Community Land Model](https://github.com/ESCOMP/CTSM) developed by the National Center for Atmospheric Research (NCAR) and the broader CESM community. The original Fortran CLM5 is described in Lawrence et al. (2019).
+For scientific descriptions of CLM5, also cite the appropriate CTSM/CLM papers
+for the configuration and processes used.
+
+## License and upstream attribution
+
+The original Julia contributions in this repository are licensed under the
+[MIT License](LICENSE). CLM.jl is a derivative port of CTSM/CLM5; the upstream
+copyright and BSD 3-Clause terms retained in [`NOTICE`](NOTICE) continue to apply
+to derived portions of the work.
+
+CLM.jl is based on the Community Land Model developed by NCAR and the broader
+CESM community. It is not affiliated with or endorsed by NCAR, CESM, or the CTSM
+development team.
