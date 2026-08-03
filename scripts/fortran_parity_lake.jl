@@ -60,6 +60,8 @@
 #
 # Usage: julia +1.12 --project=. scripts/fortran_parity_lake.jl [NSTEPS] [--all]
 # =============================================================================
+Base.include(@__MODULE__, joinpath(@__DIR__, "..", "test", "testdata.jl"))
+
 using CLM, NCDatasets, Dates, Printf
 
 const SHOWALL = any(==("--all"), ARGS)
@@ -76,12 +78,13 @@ const LAKE_FORC_EXACT = get(ENV, "LAKE_FORC_EXACT", "") == "1"
 # every Julia step against the Fortran state ONE STEP BEHIND it.
 const LAKE_REC_SHIFT = parse(Int, get(ENV, "LAKE_REC_SHIFT", "1"))
 
-const LAKE   = "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/clm_ports/CLM.jl/test_inputs/lake/surfdata_lake100.nc"
-const FP     = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters/clm5_params.nc"
-const FFORC  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2003.nc"
-const H0     = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_lake_run/Bow_at_Banff_lumped.clm2.h0.2003-01-01-00000.nc"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const LAKE   = joinpath(@__DIR__, "..", "test_inputs", "lake", "surfdata_lake100.nc")
+const FP     = joinpath(domain_params_dir("domain_Bow_at_Banff_lumped"), "clm5_params.nc")
+const FFORC  = bow_forcing("clmforc.2003.nc")
+const H0     = get(ENV, "CLM_LAKE_H0", symfluence_path("clm_lake_run",
+    "Bow_at_Banff_lumped.clm2.h0.2003-01-01-00000.nc"))
+const SNOWOPT = snicar_optics()
+const SNOWAGE = snicar_aging()
 
 # NaN/missing-aware relative diff used throughout (rel to 1+|fortran|, like the
 # other parity harnesses).

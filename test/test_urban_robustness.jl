@@ -13,8 +13,10 @@
 # (building temperatures, albedo, AC/heat) and the urban building-thermal
 # band solve (incl. the standing-water "layer 0" decouple for roof/wall and
 # the band-solver partial-pivoting fix the roof columns first exposed).
-# GATED: inputs are machine-local; absent -> skip. Runs in an isolated
-# subprocess (the harness mutates module globals).
+# GATED: inputs are machine-local; absent -> one visible skipped/broken result.
+# Stage the CTSM testinput at its normal checkout path or set
+# CLM_URBAN_SURFDATA=/absolute/path/to/surfdata_1x1_mexicocityMEX_*.nc.
+# Runs in an isolated subprocess (the harness mutates module globals).
 # ==========================================================================
 using Test, CLM
 

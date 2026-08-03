@@ -29,8 +29,9 @@ const BOW_FS  = joinpath(BOW_CAL, "surfdata_clm.nc")
 const BOW_FP  = joinpath(BOW_CAL, "clm5_params.nc")
 const GLAC_FS = joinpath(@__DIR__, "..", "test_inputs", "glacier", "surfdata_glacier100.nc")
 const LAKE_FS = joinpath(@__DIR__, "..", "test_inputs", "lake", "surfdata_lake100.nc")
-const URB_FS  = symfluence_path("installs", "clm", "python", "ctsm", "test", "testinputs",
-                                "surfdata_1x1_mexicocityMEX_hist_16pfts_CMIP6_2000_c231103.nc")
+const URB_FS  = get(ENV, "CLM_URBAN_SURFDATA",
+    symfluence_path("installs", "clm", "python", "ctsm", "test", "testinputs",
+                    "surfdata_1x1_mexicocityMEX_hist_16pfts_CMIP6_2000_c231103.nc"))
 const SNOWOPT = snicar_optics()
 const SNOWAGE = snicar_aging()
 
