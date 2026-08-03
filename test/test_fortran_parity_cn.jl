@@ -66,7 +66,9 @@ include(joinpath(@__DIR__, "testdata.jl"))
         @test_skip have_dumps
     else
         Base.include(@__MODULE__, common)   # build_bow_inst / run_one_parity_step! / FFORCING / _dumpvar
-        forcing2002 = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
+        forcing_path = Base.invokelatest(getglobal, @__MODULE__, :FFORCING)
+        build_inst = Base.invokelatest(getglobal, @__MODULE__, :build_bow_inst)
+        forcing2002 = replace(forcing_path, "clmforc.2003.nc" => "clmforc.2002.nc")
 
         # --- per-layer mineral-N relative error vs a dump var (col 1, levdecomp) --
         # Inline the missing->NaN read (instead of calling common's _dumpvar) to
@@ -179,7 +181,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
         # --------------------------------------------------------------------
         @testset "multi-step drift (n$drift_n0 +$(drift_nsteps))" begin
             start_date = DateTime(2002,1,1) + Hour(drift_n0 - date_base)
-            (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600,
+            (inst, bounds, filt, tm) = Base.invokelatest(build_inst; dtime=3600,
                                                        start_date=start_date, use_cn=true, use_luna=true)
             if isempty(inst.photosyns.vcmx25_z_patch)
                 inst.photosyns.vcmx25_z_patch = fill(30.0, bounds.endp, CLM.NLEVCAN)

@@ -60,12 +60,14 @@ include(joinpath(@__DIR__, "testdata.jl"))
         @test_skip have_dumps
     else
         Base.include(@__MODULE__, common)   # build_bow_inst / run_one_parity_step! / FFORCING
-        forcing2002 = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
+        forcing_path = Base.invokelatest(getglobal, @__MODULE__, :FFORCING)
+        run_parity_step! = Base.invokelatest(getglobal, @__MODULE__, :run_one_parity_step!)
+        forcing2002 = replace(forcing_path, "clmforc.2003.nc" => "clmforc.2002.nc")
 
         # Run ONE use_cn step from the BGC IC (shared by both checks below).
         # invokelatest: run_one_parity_step! was just defined by Base.include
         # above, so it is newer than this method's world age — invoke the latest.
-        inst, bounds = Base.invokelatest(run_one_parity_step!, nstep; use_cn=true,
+        inst, bounds = Base.invokelatest(run_parity_step!, nstep; use_cn=true,
             dumpdir=dumpdir, use_hydrstress=true, use_luna=true,
             step_date=DateTime(2002, 1, 1) + Hour(nstep - date_base),
             forcing_file=forcing2002)

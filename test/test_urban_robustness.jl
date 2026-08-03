@@ -29,7 +29,8 @@ using Test, CLM
         mod = Module(:URB_SMOKE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
         Base.include(mod, script)   # no auto-run: PROGRAM_FILE guard
-        ok = Base.invokelatest(getfield(mod, :urban_smoke_ok); nsteps=6)
+        smoke_fn = Base.invokelatest(getfield, mod, :urban_smoke_ok)
+        ok = Base.invokelatest(smoke_fn; nsteps=6)
         if ok === missing
             @info "urban robustness: inputs absent, skipping"
             @test_skip ok === true

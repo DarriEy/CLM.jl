@@ -34,7 +34,8 @@ using Test, CLM
             mod = Module(Symbol("MS_", okfn))
             Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
             Base.include(mod, script)   # no auto-run: PROGRAM_FILE guard
-            ok = Base.invokelatest(getfield(mod, okfn); nsteps=6)
+            smoke_fn = Base.invokelatest(getfield, mod, okfn)
+            ok = Base.invokelatest(smoke_fn; nsteps=6)
             if ok === missing
                 @info "multisite robustness: site data absent, skipping" label
                 @test_skip ok === true
