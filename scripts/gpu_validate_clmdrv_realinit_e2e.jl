@@ -1,21 +1,68 @@
 # ==========================================================================
 # gpu_validate_clmdrv_realinit_e2e.jl — whole-clm_drv! GPU parity on a REAL
-# cold-start state (clm_initialize! from the Bow-at-Banff surfdata/params NetCDF).
+# cold-start state (`clm_initialize!` from a real surfdata/parameter NetCDF pair).
 #
 # Unlike the synthetic gpu_validate_clmdrv_e2e.jl, this uses the real cold-start,
 # which produces a consistent initial albedo and hence FINITE surface-energy
 # fields (t_grnd/t_veg/eflx) — so the parity comparison covers the energy chain.
 #
-#   julia --project=scripts scripts/gpu_validate_clmdrv_realinit_e2e.jl
-# ==========================================================================
+# The checked-in mixed soil/lake surfdata is the portable default. The parameter
+# file is resolved from CLM_PARAMFILE, CLM_DOMAIN_DIR, SYMFLUENCE_DATA, or a local
+# Symfluence source checkout (in that order). Both inputs may be overridden:
+#
+#   CLM_FSURDAT=/path/surfdata.nc CLM_PARAMFILE=/path/clm5_params.nc \
+#     julia --project=scripts scripts/gpu_validate_clmdrv_realinit_e2e.jl
+# ===========================================================================
 using CLM, Printf
 include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
 mfm(x) = mf(device_array_type(), x)
-const FSURDAT = get(ENV, "CLM_FSURDAT",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
-const PARAMFILE = get(ENV, "CLM_PARAMFILE",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
+
+const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
+const DEFAULT_FSURDAT = joinpath(REPO_ROOT, "test_inputs", "lake", "surfdata_mixed.nc")
+
+_params_dir(root) = joinpath(root, "settings", "CLM", "parameters")
+_symfluence_resource_params(root) =
+    joinpath(root, "src", "symfluence", "resources", "base_settings", "CLM", "clm5_params.nc")
+
+function _explicit_input(var::String)
+    value = strip(get(ENV, var, ""))
+    isempty(value) && return nothing
+    path = abspath(value)
+    isfile(path) || error("$var points to a missing file: $path")
+    return path
+end
+
+function _first_existing(label::String, candidates)
+    paths = unique(abspath.(filter(x -> !isempty(x), candidates)))
+    found = findfirst(isfile, paths)
+    found === nothing && error("Could not locate $label. Tried:\n  " * join(paths, "\n  "))
+    return paths[found]
+end
+
+"Resolve a portable real-initialization surfdata/parameter pair."
+function resolve_realinit_inputs()
+    domain_dir = strip(get(ENV, "CLM_DOMAIN_DIR", ""))
+    symdata = strip(get(ENV, "SYMFLUENCE_DATA", ""))
+
+    fsurdat = _explicit_input("CLM_FSURDAT")
+    fsurdat === nothing && (fsurdat = _first_existing("surfdata NetCDF", [
+            isempty(domain_dir) ? "" : joinpath(_params_dir(domain_dir), "surfdata_clm.nc"),
+            isempty(symdata) ? "" : joinpath(_params_dir(joinpath(symdata, "domain_Bow_at_Banff_lumped")), "surfdata_clm.nc"),
+            DEFAULT_FSURDAT,
+        ]))
+
+    paramfile = _explicit_input("CLM_PARAMFILE")
+    paramfile === nothing && (paramfile = _first_existing("CLM parameter NetCDF (set CLM_PARAMFILE to override)", [
+            isempty(domain_dir) ? "" : joinpath(_params_dir(domain_dir), "clm5_params.nc"),
+            isempty(symdata) ? "" : joinpath(_params_dir(joinpath(symdata, "domain_Bow_at_Banff_lumped")), "clm5_params.nc"),
+            joinpath(dirname(fsurdat), "clm5_params.nc"),
+            joinpath(REPO_ROOT, "test_inputs", "clm5_params.nc"),
+            _symfluence_resource_params(joinpath(homedir(), "projects", "SYMFLUENCE")),
+            _symfluence_resource_params(joinpath(homedir(), "repos", "SYMFLUENCE")),
+        ]))
+    return (; fsurdat, paramfile)
+end
 
 function setup_forcing!(a2l, T0, ng)
     for g in 1:ng
@@ -31,8 +78,9 @@ function setup_forcing!(a2l, T0, ng)
     end
 end
 
-function build()
-    (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=PARAMFILE)
+function build(inputs)
+    (inst, bounds, filt, tm) = CLM.clm_initialize!(;
+        fsurdat=inputs.fsurdat, paramfile=inputs.paramfile)
     # Optional WARM START: inject a Fortran spun-up restart so the device-parity
     # check runs over a realistic spun-up state (snow layers + soil moisture
     # gradients), exercising the snow/SNICAR + hydrology GPU paths on real values.
@@ -64,10 +112,15 @@ reldiff(a,b) = begin
 end
 
 function main()
+    inputs = resolve_realinit_inputs()
+    println("real-init surfdata : ", inputs.fsurdat)
+    println("real-init params   : ", inputs.paramfile)
     if !gpu_functional(); println("No GPU backend detected"); return 0; end
-    instH, bounds, filtH = build()
+    backend_name, _, backend_ft = detect_backend()
+    println("GPU backend        : $backend_name ($backend_ft)")
+    instH, bounds, filtH = build(inputs)
     for n in 1:3; runstep!(instH, filtH, filt_ia, bounds, n; first=(n==1)); end   # CPU warmup
-    instB, boundsB, filtB = build()
+    instB, boundsB, filtB = build(inputs)
     for n in 1:3; runstep!(instB, filtB, filt_ia, boundsB, n; first=(n==1)); end
     inst_d = mfm(instB); filt_d = mfm(filtB); filt_ia_d = mfm(filt_ia)
     println("moved to device: ", inst_d.temperature.t_soisno_col isa device_array_type())
@@ -131,7 +184,7 @@ function main()
         ok || (nfail+=1)
     end
     @printf("\n  %d fields compared, %d finite entries; global max rel=%.3e; %s\n", ncmp, tot, gmax,
-            nfail==0 ? "MATCHES CPU on Metal" : "DIVERGENCE ($nfail)")
+            nfail==0 ? "MATCHES CPU on $backend_name" : "DIVERGENCE ($nfail)")
     return nfail
 end
 exit(main())

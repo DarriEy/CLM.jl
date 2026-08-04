@@ -20,6 +20,40 @@ import Enzyme.EnzymeRules: augmented_primal, reverse, AugmentedReturn, inactive_
 using Enzyme: Const, Active, Duplicated
 
 # --------------------------------------------------------------------------
+# scatter_add_1d! — launch-level atomic scatter adjoint.
+#
+# The primal resets `out`, then performs out[dest[p]] += values[p]. Its reverse
+# is the race-free gather dvalues[p] += dout[dest[p]]. Defining the rule around
+# the host-side launch is essential: a scalar rule for `_scatter_add!` would be
+# compiled into the differentiated GPU kernel, where Enzyme's rule thunk is not
+# GPU-lowerable and Atomix's CAS loop exposes an unsupported AtomicLoad.
+# --------------------------------------------------------------------------
+function augmented_primal(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT},
+                          out::Duplicated, values::Duplicated, dest::Const) where {RT}
+    func.val(out.val, values.val, dest.val)
+    return AugmentedReturn(nothing, nothing, nothing)
+end
+
+function reverse(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT}, tape,
+                 out::Duplicated, values::Duplicated, dest::Const) where {RT}
+    _scatter_add_1d_pullback!(values.dval, out.dval, dest.val)
+    fill!(out.dval, zero(eltype(out.dval)))
+    return (nothing, nothing, nothing)
+end
+
+function augmented_primal(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT},
+                          out::Duplicated, values::Const, dest::Const) where {RT}
+    func.val(out.val, values.val, dest.val)
+    return AugmentedReturn(nothing, nothing, nothing)
+end
+
+function reverse(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT}, tape,
+                 out::Duplicated, values::Const, dest::Const) where {RT}
+    fill!(out.dval, zero(eltype(out.dval)))
+    return (nothing, nothing, nothing)
+end
+
+# --------------------------------------------------------------------------
 # Constant parameter / control containers.
 #
 # These module-level structs hold physical constants and control flags that are

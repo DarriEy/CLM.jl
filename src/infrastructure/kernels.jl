@@ -121,6 +121,38 @@ end
     (Atomix.@atomic arr[i, j, k] += x; nothing)
 @inline _scatter_add!(arr, i, j, k, x) = (@inbounds arr[i, j, k] += x; nothing)
 
+# Launch-level 1-D scatter operation. Keeping the atomic update behind this
+# boundary lets reverse-mode AD replace the whole launch with a gather kernel;
+# Enzyme never has to differentiate Atomix's device CAS loop.
+@kernel function _scatter_add_1d_kernel!(out, @Const(values), @Const(dest))
+    p = @index(Global)
+    @inbounds _scatter_add!(out, dest[p], values[p])
+end
+
+@kernel function _scatter_add_1d_pullback_kernel!(dvalues, @Const(dout), @Const(dest))
+    p = @index(Global)
+    @inbounds dvalues[p] += dout[dest[p]]
+end
+
+"""
+    scatter_add_1d!(out, values, dest)
+
+Reset `out` and compute `out[dest[p]] += values[p]`. The primal is portable
+across KA backends (including Metal via Atomix); reverse-mode AD uses a
+launch-level gather rule defined in `enzyme_rules.jl`.
+"""
+function scatter_add_1d!(out, values, dest)
+    fill!(out, zero(eltype(out)))
+    _launch!(_scatter_add_1d_kernel!, out, values, dest; ndrange=length(values))
+    return nothing
+end
+
+function _scatter_add_1d_pullback!(dvalues, dout, dest)
+    _launch!(_scatter_add_1d_pullback_kernel!, dvalues, dout, dest;
+             ndrange=length(dvalues))
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # forc_q: column specific humidity from vapor pressure
 #   forc_q_col[c] = 0.622 * vp / max(pbot - 0.378*vp, 1)  (vp from the gridcell)

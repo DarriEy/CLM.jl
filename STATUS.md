@@ -5,7 +5,7 @@ An honest, current account of how complete and how *validated* the Julia port of
 and GPU**. The aim is to separate "done and verified" from "done but unproven" from
 "genuinely remaining," with no overclaiming.
 
-_Last updated: 2026-06-27._
+_Last updated: 2026-08-02._
 
 ---
 
@@ -15,7 +15,8 @@ A **functionally complete CLM5 port** with a working **layered-oracle validation
 **Fortran-parity-anchored** and **invariant-validated across 8 contrasting domains**,
 **forward- and reverse-differentiable** (whole-driver reverse incl. photosynthesis now
 FD-validated on **both Julia 1.10 and 1.12**), and **Metal-GPU-validated at 0.0 parity**. The
-honest asterisks: CUDA/AMD GPU is validated by CPU proxy but **not yet run on real silicon**;
+honest asterisks: CUDA is now validated on real NVIDIA silicon, while AMDGPU remains
+CPU-proxy-only;
 the PHS-coupled (`use_hydrstress`) reverse path and whole-*function* canopy autodiff remain
 1.12-blocked (the latter avoided by decomposition); and Fortran parity is anchored on Bow
 reference configs by design (full-cartesian parity is out of scope).
@@ -112,12 +113,26 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
 - **Apple Metal** — ✅ **validated at 0.0 parity** across the entire biogeophys/hydrology
   driver + BGC (decomposition, MIMICS, methane, fire, N-cycling, phenology, allocation).
   This is real hardware, not a proxy.
-- **CUDA (NVIDIA) / AMDGPU (ROCm)** — ⚠️ **CPU-proxy-validated only; never run on real
-  silicon.** The extension backends + `clm_set_backend(:cuda|:amdgpu)` registry exist and
-  pass the CPU-proxy path. A one-command validator `scripts/gpu_validate_cuda.jl` is ready;
-  the remaining step is to **run it on an actual NVIDIA GPU** (rented cloud box via SSH, or
-  the JuliaGPU Buildkite `juliagpu` queue). Until then, "CUDA-optimized" is unproven.
-- **Reverse-AD on GPU** — deferred (Enzyme has no Metal device support; CUDA path untried).
+- **CUDA (NVIDIA)** — ✅ **validated on real silicon** (2026-08-02, NVIDIA GeForce RTX
+  5070 Ti Laptop GPU, compute capability 12.0, Julia 1.12.6, CUDA.jl 5.11.3). Backend
+  registration/device transfer passed; core kernels passed at ≤1.11e-16 absolute CPU
+  difference; forward AD passed 15/15; the whole biogeophysics/hydrology `clm_drv!`
+  timestep matched over 410 finite outputs at ≤4.701e-08 relative; and the `use_cn=true`
+  composite matched over 754 finite outputs at ≤2.23e-08 relative. The synthetic driver
+  fixture still contains non-finite uninitialized fields, so those entries are explicitly
+  skipped rather than counted as parity. A portable real-NetCDF initialization gate now also
+  passes four timesteps over mixed soil/lake columns: 36 fields and 427 finite values compared,
+  with maximum relative difference 1.862e-03 (integration tolerance 1e-02).
+  `scripts/gpu_validate_cuda.jl` includes all three whole-driver gates.
+- **AMDGPU (ROCm)** — ⚠️ CPU-proxy-validated only; not yet run on real AMD silicon.
+- **Reverse-AD on GPU** — ✅ the CUDA kernel-shape suite passes **4/4**. Atomic scatter is
+  differentiated at the host launch boundary: `scatter_add_1d!` keeps the portable Atomix
+  primal, while its reverse rule launches a race-free gather kernel instead of asking Enzyme
+  to differentiate Atomix's CAS loop. Forward-vs-reverse and CUDA-vs-CPU errors are both
+  exactly 0 for scatter; the other probes remain at ≤2.22e-16 cross-AD and ≤1.11e-16 device
+  parity. Whole-driver CUDA reverse is still pending migration of embedded per-thread scatter
+  sites to launch-level operations and an end-to-end gradient gate. Enzyme has no Metal device
+  support; Metal's primal Atomix path is unchanged.
 
 ## 5. Fortran parity breadth
 
@@ -141,19 +156,21 @@ Re-run the README recipe once the CTSM case is restored.
 | Forward AD | ✅ validated | — |
 | Reverse AD | ✅ whole-driver incl. **photosynthesis** (`use_psn=1`) on 1.10 **and 1.12** | PHS-coupled (`use_hydrstress`) reverse + whole-*function* canopy still 1.12-blocked (latter avoided by decomposition) |
 | GPU Metal | ✅ validated 0.0 | — |
-| GPU CUDA/AMD | ⚠️ proxy only | **unrun on real hardware** — `gpu_validate_cuda.jl` ready for a GPU box |
+| GPU CUDA | ✅ real-hardware validated | synthetic + CN + portable real-NetCDF mixed soil/lake full-driver gates pass |
+| GPU AMD | ⚠️ proxy only | unrun on real AMD hardware |
 
 ## Concrete remaining work to claim "fully validated AD + GPU"
 
 1. **Reverse-AD on 1.12** — energy-balance AND photosynthesis-coupled (`use_psn=1`) whole-driver
    reverse are both FD-validated on 1.12 (done). Only the PHS-coupled path (`use_hydrstress`, its
    own `_psn_phs_*` KA kernels) remains — the same AD-mode host-loop transform extends to it.
-2. **Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware** (rented GPU over SSH, or
-   Buildkite `juliagpu`) — the one external dependency for "CUDA-validated".
+2. ~~Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware~~ — **done** (§4). Remaining
+   GPU breadth is real AMD hardware, multi-GPU/MPI execution, and CUDA reverse-mode AD.
 3. **Restore the CTSM case + run the pdump verify** → broaden T1 parity beyond the Bow anchor.
 4. ~~Multi-year T4 streamflow at depth~~ — **done** (§2.5: all 7 gauges, full multi-year
    windows, real uncalibrated KGE/NSE). Remaining there is *calibration* for real KGE skill
    (DDS/optimization over hydrology params + per-gauge `area_km2` overrides) — a separate
    Symfluence-pipeline effort, not a harness gap.
 
-Everything except (2) and (3)'s external dependencies is code that exists and runs today.
+Everything except the remaining hardware-dependent GPU breadth and (3)'s external CTSM case
+dependency is code that exists and runs today.
