@@ -1721,10 +1721,19 @@ end
         end
 
         # --- Accumulate ebullition (per-column reduction) ---
-        ts.ch4_ebul_total[c] = zero(T)
+        # Accumulate in a LOCAL and store once. `x[c] += ...` inside a loop over
+        # levels is a loop-carried read-modify-write through an array, which the
+        # KA CPU backend miscompiles (see `_tridiag_multi_kernel!`). This one is
+        # not cosmetic: the total is added to the CH4 SOURCE at the water-table
+        # layer immediately below, so a corrupted reduction perturbs the tracer
+        # solve itself — the residual was largest exactly at jwt, decayed
+        # upward, vanished below it, and left O2 untouched because ebullition
+        # feeds species 1 only.
+        ebul_total = zero(T)
         for j in 1:nlevsoi
-            ts.ch4_ebul_total[c] += ts.ch4_ebul_depth[c, j] * tf.dz[c, j]
+            ebul_total += ts.ch4_ebul_depth[c, j] * tf.dz[c, j]
         end
+        ts.ch4_ebul_total[c] = ebul_total
 
         # --- Source terms + epsilon_t (k_h_cc already filled) ---
         for j in 1:nlevsoi
@@ -1755,10 +1764,12 @@ end
         end
 
         # --- Accumulate aerenchyma surface flux (reduction) ---
-        ts.ch4_surf_aere[c] = zero(T)
+        # Local accumulator for the same reason as ch4_ebul_total above.
+        surf_aere = zero(T)
         for j in 1:nlevsoi
-            ts.ch4_surf_aere[c] += ts.ch4_aere_depth[c, j] * tf.dz[c, j]
+            surf_aere += ts.ch4_aere_depth[c, j] * tf.dz[c, j]
         end
+        ts.ch4_surf_aere[c] = surf_aere
 
         # --- Add ebullition to source at the water-table layer ---
         if jwt[c] != 0
@@ -1944,14 +1955,20 @@ end
                     ts.ch4_surf_diff[c] = scr.dm1_zm1[c, 1] * ((scr.conc_work[c, 2] + scr.conc_ch4_rel_old[c, 2]) / T(2.0) - c_atm[g, s] * scr.k_h_cc[c, 1, s])
                     ts.ch4_surf_ebul[c] = ts.ch4_ebul_total[c]
                 end
+                # Negative-mass clip. The deficit is summed into a LOCAL and
+                # applied once — `ts.ch4_surf_diff[c] -=` inside this loop is the
+                # same loop-carried array accumulation as ch4_ebul_total above.
+                # (It fires only where the solve went negative, so it is latent
+                # in many configurations rather than always wrong.)
+                deficit_tot = zero(T)
                 for j in 1:nlevsoi
                     jj = j + 1
                     if scr.conc_work[c, jj] < zero(T)
-                        deficit = -scr.conc_work[c, jj] * scr.epsilon_t[c, j, 1] * tf.dz[c, j]
+                        deficit_tot += -scr.conc_work[c, jj] * scr.epsilon_t[c, j, 1] * tf.dz[c, j]
                         scr.conc_work[c, jj] = zero(T)
-                        ts.ch4_surf_diff[c] -= deficit / dtime
                     end
                 end
+                ts.ch4_surf_diff[c] -= deficit_tot / dtime
                 for jj in 1:nlevs; scr.conc_ch4_rel[c, jj] = scr.conc_work[c, jj]; end
             else
                 for j in 1:nlevsoi

@@ -76,4 +76,24 @@ at its default.
             @test d.max_flx_abs_diff < 1e-12
         end
     end
+
+    # ---------------------------------------------------------------------
+    # CH4/O2 transport. Its own conservation diagnostic must close, and — the
+    # sharper test — the answer must not depend on the bounds-checking mode.
+    # A reference produced under `--check-bounds=yes` is committed alongside
+    # this file; agreement with it IS the invariant, because a miscompiled
+    # reduction shows up as a difference between the two modes and nothing
+    # else. `ch4_ebul_total` was accumulated straight into an array element
+    # inside a level loop and then fed into the CH4 source at the water table,
+    # so the corruption landed in the tracer solve: the error peaked exactly
+    # at jwt, decayed upward, vanished below, and left O2 untouched.
+    # ---------------------------------------------------------------------
+    @testset "ch4_tran! conserves and is bounds-mode invariant" begin
+        r = _ch4_tran_case()
+        @test r.max_errch4 < 1e-9
+        @test all(isfinite, r.conc_ch4) && all(isfinite, r.conc_o2)
+        # values recorded under --check-bounds=yes on the fixed code
+        @test sum(r.conc_ch4) ≈ 0.021826987644967245 rtol = 1e-13
+        @test sum(r.conc_o2)  ≈ 1.7981397559679242   rtol = 1e-13
+    end
 end

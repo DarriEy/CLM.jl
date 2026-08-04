@@ -143,3 +143,95 @@ function _snicar_host_vs_device(flg_slr_in::Int; ncols::Int = 12, nlevsno::Int =
         CLM.varctl.snicar_snw_shape  = old_shape
     end
 end
+
+"""
+    _ch4_tran_case()
+
+Drive `ch4_tran!` on a synthetic saturated column set (water table at level 7)
+and return its own CH4 balance residual plus the resulting concentrations.
+
+`jwt = 7` matters: ebullition is added to the CH4 source at the water-table
+layer, so that is where a corrupted `ch4_ebul_total` reduction enters the
+tracer solve.
+"""
+function _ch4_tran_case()
+    nc = 12; np = 12; ng = 2; nlevsoi = 15
+    params = CLM.CH4Params(); ch4vc = CLM.CH4VarCon()
+    z2(a...) = zeros(a...)
+    ch4 = CLM.CH4Data(
+        ch4_prod_depth_sat_col = fill(1e-8, nc, nlevsoi),
+        ch4_prod_depth_unsat_col = fill(1e-9, nc, nlevsoi),
+        ch4_prod_depth_lake_col = z2(nc, nlevsoi),
+        ch4_oxid_depth_sat_col = fill(1e-9, nc, nlevsoi),
+        ch4_oxid_depth_unsat_col = fill(1e-10, nc, nlevsoi),
+        ch4_oxid_depth_lake_col = z2(nc, nlevsoi),
+        ch4_aere_depth_sat_col = fill(1e-10, nc, nlevsoi),
+        ch4_aere_depth_unsat_col = fill(1e-10, nc, nlevsoi),
+        ch4_tran_depth_sat_col = z2(nc, nlevsoi), ch4_tran_depth_unsat_col = z2(nc, nlevsoi),
+        ch4_ebul_depth_sat_col = fill(1e-10, nc, nlevsoi), ch4_ebul_depth_unsat_col = z2(nc, nlevsoi),
+        o2_oxid_depth_sat_col = fill(2e-9, nc, nlevsoi), o2_oxid_depth_unsat_col = fill(2e-10, nc, nlevsoi),
+        o2_aere_depth_sat_col = fill(1e-9, nc, nlevsoi), o2_aere_depth_unsat_col = fill(1e-9, nc, nlevsoi),
+        co2_decomp_depth_sat_col = z2(nc, nlevsoi), co2_decomp_depth_unsat_col = z2(nc, nlevsoi),
+        co2_oxid_depth_sat_col = z2(nc, nlevsoi), co2_oxid_depth_unsat_col = z2(nc, nlevsoi),
+        co2_aere_depth_sat_col = z2(nc, nlevsoi), co2_aere_depth_unsat_col = z2(nc, nlevsoi),
+        ch4_ebul_total_sat_col = z2(nc), ch4_ebul_total_unsat_col = z2(nc),
+        ch4_surf_aere_sat_col = z2(nc), ch4_surf_aere_unsat_col = z2(nc),
+        ch4_surf_ebul_sat_col = z2(nc), ch4_surf_ebul_unsat_col = z2(nc), ch4_surf_ebul_lake_col = z2(nc),
+        ch4_surf_diff_sat_col = z2(nc), ch4_surf_diff_unsat_col = z2(nc), ch4_surf_diff_lake_col = z2(nc),
+        ch4_dfsat_flux_col = z2(nc), ch4_surf_flux_tot_col = z2(nc),
+        conc_ch4_sat_col = fill(1.0e-4, nc, nlevsoi), conc_ch4_unsat_col = fill(1.0e-5, nc, nlevsoi),
+        conc_ch4_lake_col = z2(nc, nlevsoi),
+        conc_o2_sat_col = fill(0.01, nc, nlevsoi), conc_o2_unsat_col = fill(0.05, nc, nlevsoi),
+        conc_o2_lake_col = z2(nc, nlevsoi),
+        o2_decomp_depth_sat_col = fill(1e-9, nc, nlevsoi), o2_decomp_depth_unsat_col = fill(1e-9, nc, nlevsoi),
+        o2stress_sat_col = ones(nc, nlevsoi), o2stress_unsat_col = ones(nc, nlevsoi),
+        ch4stress_sat_col = ones(nc, nlevsoi), ch4stress_unsat_col = ones(nc, nlevsoi),
+        zwt_ch4_unsat_col = z2(nc), lake_soilc_col = fill(100.0, nc, nlevsoi),
+        totcolch4_col = z2(nc), totcolch4_bef_col = z2(nc), annsum_counter_col = z2(nc),
+        tempavg_somhr_col = z2(nc), annavg_somhr_col = fill(1.0e-6, nc),
+        tempavg_finrw_col = z2(nc), annavg_finrw_col = fill(0.1, nc), sif_col = ones(nc),
+        qflx_surf_lag_col = z2(nc), finundated_col = fill(0.1, nc),
+        finundated_pre_snow_col = fill(0.1, nc), finundated_lag_col = fill(0.1, nc),
+        layer_sat_lag_col = fill(0.5, nc, nlevsoi), pH_col = fill(6.5, nc),
+        c_atm_grc = fill(0.03, ng, 3), ch4co2f_grc = z2(ng), ch4prodg_grc = z2(ng),
+        totcolch4_grc = z2(ng), totcolch4_bef_grc = z2(ng),
+        annavg_agnpp_patch = fill(1.0e-5, np), annavg_bgnpp_patch = fill(1.0e-5, np),
+        tempavg_agnpp_patch = fill(1.0e-6, np), tempavg_bgnpp_patch = fill(1.0e-6, np),
+        grnd_ch4_cond_patch = fill(0.01, np), grnd_ch4_cond_col = fill(0.01, nc),
+        ch4_first_time_grc = fill(true, ng))
+
+    watsat = fill(0.45, nc, nlevsoi); h2osoi_vol = fill(0.30, nc, nlevsoi)
+    h2osoi_liq = fill(30.0, nc, nlevsoi); h2osoi_ice = zeros(nc, nlevsoi)
+    bsw = fill(5.0, nc, nlevsoi); cellorg = fill(10.0, nc, nlevsoi)
+    t_soisno = fill(CLM.TFRZ + 15.0, nc, nlevsoi)
+    t_grnd = fill(CLM.TFRZ + 15.0, nc); t_h2osfc = fill(CLM.TFRZ + 15.0, nc)
+    frac_h2osfc = fill(0.1, nc); h2osfc = fill(1.0, nc); snow_depth = zeros(nc)
+    snl = zeros(Int, nc)
+    dz = fill(0.1, nc, nlevsoi); z = [(j-0.5)*0.1 for c in 1:nc, j in 1:nlevsoi]
+    zi = [j*0.1 for c in 1:nc, j in 1:nlevsoi]
+    jwt = fill(7, nc)
+    col_gridcell = [1 + (c-1) % ng for c in 1:nc]
+
+    conc_ch4_0 = copy(ch4.conc_ch4_sat_col)
+
+    CLM.ch4_tran!(ch4, params, ch4vc, trues(nc), col_gridcell, watsat, h2osoi_vol,
+        h2osoi_liq, h2osoi_ice, h2osfc, bsw, cellorg, t_soisno, t_grnd, t_h2osfc,
+        frac_h2osfc, snow_depth, snl, z, dz, zi, jwt, 1, false, nlevsoi, 5, 1800.0, 130.0)
+
+    dtime = 1800.0
+    worst = 0.0
+    for c in 1:nc
+        e = 0.0
+        for j in 1:nlevsoi
+            e += (ch4.conc_ch4_sat_col[c,j] - conc_ch4_0[c,j]) * dz[c,j]
+            e -= ch4.ch4_prod_depth_sat_col[c,j] * dz[c,j] * dtime
+            e += ch4.ch4_oxid_depth_sat_col[c,j] * dz[c,j] * dtime
+        end
+        e += (ch4.ch4_surf_aere_sat_col[c] + ch4.ch4_surf_ebul_sat_col[c] +
+              ch4.ch4_surf_diff_sat_col[c]) * dtime
+        worst = max(worst, abs(e))
+    end
+    return (max_errch4 = worst,
+            conc_ch4 = copy(ch4.conc_ch4_sat_col),
+            conc_o2 = copy(ch4.conc_o2_sat_col))
+end
