@@ -428,4 +428,52 @@ end
     rnan = run_downscale(4; set_weights = false)
     @test isfinite(rnan.pco2)
     @test rnan.pco2 / 367.0e-6 ≈ rnan.pbot_ds rtol = 1e-12
+
+    # ZERO weight is NOT the same as unset. A zero-area column is CTSM's
+    # "virtual" column — a glacier elevation-class column that exists only so an
+    # SMB can be computed at that class elevation — and it must contribute
+    # NOTHING to the gridcell mean. Treating zero like unset (weight 1) drags
+    # the mean up the whole elevation ladder and biases CO2 in gridcells that
+    # carry no glacier at all.
+    @testset "zero-area virtual columns do not pull the gridcell mean" begin
+        ncol = 6
+        inst = CLM.CLMInstances()
+        CLM.clm_instInit!(inst; ng = 1, nl = 1, nc = ncol, np = ncol,
+                          nlevdecomp_full = CLM.varpar.nlevdecomp_full)
+        col = inst.column; lun = inst.landunit; a = inst.atm2lnd
+        for k in 1:ncol
+            col.gridcell[k] = 1; col.landunit[k] = 1; col.active[k] = true
+            col.itype[k] = CLM.ISTSOIL
+            # column 1 is the whole gridcell; 2..ncol are virtual (zero area)
+            col.wtgcell[k] = (k == 1) ? 1.0 : 0.0
+            col.wtlunit[k] = col.wtgcell[k]
+        end
+        lun.itype[1] = CLM.ISTSOIL; lun.gridcell[1] = 1
+        lun.active[1] = true; lun.urbpoi[1] = false; lun.wtgcell[1] = 1.0
+
+        pbot = 9.9e4
+        a.forc_pbot_not_downscaled_grc[1] = pbot
+        a.forc_t_not_downscaled_grc[1]  = 288.0
+        a.forc_th_not_downscaled_grc[1] = 288.0
+        a.forc_q_not_downscaled_grc[1]  = 0.008
+        a.forc_topo_grc[1] = 0.0
+        a.forc_pco2_grc[1] = 367.0e-6 * pbot
+        a.forc_po2_grc[1]  = 0.209 * pbot
+        # the real column sits at the atmosphere's own height (no correction);
+        # the virtual ones are strung far up the elevation-class ladder
+        inst.topo.topo_col[1] = 0.0
+        for k in 2:ncol
+            inst.topo.topo_col[k] = 1000.0 * (k - 1)
+        end
+
+        bounds = CLM.BoundsType(begg = 1, endg = 1, begl = 1, endl = 1,
+                                begc = 1, endc = ncol, begp = 1, endp = ncol,
+                                begCohort = 0, endCohort = 0,
+                                level = CLM.BOUNDS_LEVEL_CLUMP, clump_index = 1)
+        CLM.downscale_forcings!(bounds, a, col, lun, inst.topo)
+
+        # zero elevation difference on the only column with area => no rescale
+        @test a.forc_pco2_grc[1] / 367.0e-6 ≈ pbot rtol = 1e-12
+        @test a.forc_po2_grc[1] / 0.209 ≈ pbot rtol = 1e-12
+    end
 end

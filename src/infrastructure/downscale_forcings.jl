@@ -87,13 +87,25 @@ end
 
 # Step 2b, pass 1: accumulate the gridcell mean of the downscaled column pbot.
 #
-# The weight is the column's area fraction, EXCEPT that a non-finite or
-# non-positive `wtgcell` contributes weight 1 instead. That is not defensive
-# noise: `column_init!` allocates `wtgcell` as NaN, and CLM.jl's hand-built
-# driver fixtures routinely leave it unset. Falling back to an unweighted mean
-# keeps those fixtures working, and for the single-column-per-gridcell domains
-# they use, the mean IS that column's pbot — bit-identical to the per-column
-# rescale this replaced.
+# The weight is the column's area fraction. Two cases need care, and they are
+# NOT the same case:
+#
+#   * NON-FINITE weight -> weight 1. `column_init!` allocates `wtgcell` as NaN
+#     and CLM.jl's hand-built driver fixtures routinely leave it unset; falling
+#     back to an unweighted mean keeps them working, and for their
+#     single-column-per-gridcell domains the mean IS that column's pbot, so the
+#     per-column rescale this replaced is reproduced exactly.
+#
+#   * ZERO weight -> weight 0, i.e. it contributes NOTHING. A zero-area column
+#     is CTSM's "virtual" column: a glacier elevation-class column that exists
+#     only so a surface mass balance can be computed at that class elevation.
+#     Lumping those in (an earlier version of this kernel treated zero like
+#     unset and gave them weight 1) drags the gridcell mean down to the mean
+#     CLASS elevation of the whole ladder — several km up — and drove the
+#     implied pco2 pressure ~10 kPa below the surface pressure in a gridcell
+#     that is not glaciated at all.
+#
+# If every weight in a gridcell is zero, wsum is 0 and the rescale is skipped.
 @kernel function _downscale_pbot_accum_kernel!(psum_grc, wsum_grc, @Const(col_gridcell),
         @Const(col_wtgcell), @Const(pbot_ds), cmin::Int, cmax::Int)
     c = @index(Global)
@@ -101,7 +113,7 @@ end
         T = eltype(psum_grc)
         g = col_gridcell[c]
         w = col_wtgcell[c]
-        w = (isfinite(w) && w > zero(T)) ? T(w) : one(T)
+        w = isfinite(w) ? max(T(w), zero(T)) : one(T)
         _scatter_add!(psum_grc, g, T(pbot_ds[c]) * w)
         _scatter_add!(wsum_grc, g, w)
     end
