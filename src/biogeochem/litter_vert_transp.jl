@@ -381,18 +381,38 @@ end
             end
 
             # In-thread Thomas solve over jj=1..nlevdecomp+2 (jtop=1), matching
-            # tridiagonal_solve! exactly (no singularity guard) for byte-identity.
+            # tridiagonal_solve! (no singularity guard) for byte-identity.
+            #
+            # The recurrence is carried in LOCALS; the arrays are written only for
+            # the back-substitution's benefit. Do NOT re-read cp[c,jj-1] /
+            # dp[c,jj-1] / conc_trcr[c,jj+1] here — see the same warning in
+            # `_tridiag_multi_kernel!` (infrastructure/tridiagonal.jl). KA's CPU
+            # backend emits `@simd ivdep` over workitems and the resulting
+            # parallel-loop metadata reaches these NESTED loops too, so LLVM
+            # vectorizes them and ignores the loop-carried dependency. It is not a
+            # thread race: it is wrong with a single column. The store-then-load
+            # form left this solve non-conservative — Σ(Δconc·dz) vs Σ(source·dz)
+            # was off by ~6 units (6% at nlevdecomp=20, 400% at nlevdecomp=5) with
+            # bounds checking at its DEFAULT, while `Pkg.test`/CI, which forces
+            # --check-bounds=yes, saw 1e-14 and stayed green.
             nlev_tri = nlevdecomp + 2
-            scr.cp[c, 1] = scr.c_tri[c, 1] / scr.b_tri[c, 1]
-            scr.dp[c, 1] = scr.r_tri[c, 1] / scr.b_tri[c, 1]
+            cp_prev = scr.c_tri[c, 1] / scr.b_tri[c, 1]
+            dp_prev = scr.r_tri[c, 1] / scr.b_tri[c, 1]
+            scr.cp[c, 1] = cp_prev
+            scr.dp[c, 1] = dp_prev
             for jj in 2:nlev_tri
-                denom = scr.b_tri[c, jj] - scr.a_tri[c, jj] * scr.cp[c, jj - 1]
-                scr.cp[c, jj] = scr.c_tri[c, jj] / denom
-                scr.dp[c, jj] = (scr.r_tri[c, jj] - scr.a_tri[c, jj] * scr.dp[c, jj - 1]) / denom
+                denom = scr.b_tri[c, jj] - scr.a_tri[c, jj] * cp_prev
+                cp_prev = scr.c_tri[c, jj] / denom
+                dp_prev = (scr.r_tri[c, jj] - scr.a_tri[c, jj] * dp_prev) / denom
+                scr.cp[c, jj] = cp_prev
+                scr.dp[c, jj] = dp_prev
             end
-            scr.conc_trcr[c, nlev_tri] = scr.dp[c, nlev_tri]
+            # dp_prev still holds dp[c, nlev_tri]
+            u_next = dp_prev
+            scr.conc_trcr[c, nlev_tri] = u_next
             for jj in (nlev_tri - 1):-1:1
-                scr.conc_trcr[c, jj] = scr.dp[c, jj] - scr.cp[c, jj] * scr.conc_trcr[c, jj + 1]
+                u_next = scr.dp[c, jj] - scr.cp[c, jj] * u_next
+                scr.conc_trcr[c, jj] = u_next
             end
 
             # Post-transport tendency.

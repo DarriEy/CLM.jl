@@ -1904,17 +1904,36 @@ end
                 end
             end
 
-            # In-thread Thomas solve (jtop=1), matching tridiagonal_solve! exactly.
-            scr.cp[c, 1] = scr.ct[c, 1] / scr.bt[c, 1]
-            scr.dp[c, 1] = scr.rt[c, 1] / scr.bt[c, 1]
+            # In-thread Thomas solve (jtop=1), matching tridiagonal_solve!.
+            #
+            # Recurrence carried in LOCALS — do NOT re-read cp[c,jj-1] /
+            # dp[c,jj-1] / conc_work[c,jj+1]. See the warning in
+            # `_tridiag_multi_kernel!` (infrastructure/tridiagonal.jl): KA's CPU
+            # backend lets `@simd ivdep` metadata reach this nested loop, LLVM
+            # vectorizes it and drops the loop-carried dependency. The
+            # store-then-load form shifted Σconc_ch4_sat by −7.2% and
+            # Σconc_o2_sat by −5.1% (and made this routine's own errch4 26×
+            # worse) with bounds checking at its DEFAULT, while CI's forced
+            # --check-bounds=yes hid it. The O2 error feeds o2stress, so it
+            # reached decomposition too. Runs twice per step (sat + unsat) and
+            # twice per column (the s = 1:2 species loop).
+            cp_prev = scr.ct[c, 1] / scr.bt[c, 1]
+            dp_prev = scr.rt[c, 1] / scr.bt[c, 1]
+            scr.cp[c, 1] = cp_prev
+            scr.dp[c, 1] = dp_prev
             for jj in 2:nlevs
-                denom = scr.bt[c, jj] - scr.at[c, jj] * scr.cp[c, jj-1]
-                scr.cp[c, jj] = scr.ct[c, jj] / denom
-                scr.dp[c, jj] = (scr.rt[c, jj] - scr.at[c, jj] * scr.dp[c, jj-1]) / denom
+                denom = scr.bt[c, jj] - scr.at[c, jj] * cp_prev
+                cp_prev = scr.ct[c, jj] / denom
+                dp_prev = (scr.rt[c, jj] - scr.at[c, jj] * dp_prev) / denom
+                scr.cp[c, jj] = cp_prev
+                scr.dp[c, jj] = dp_prev
             end
-            scr.conc_work[c, nlevs] = scr.dp[c, nlevs]
+            # dp_prev still holds dp[c, nlevs]
+            u_next = dp_prev
+            scr.conc_work[c, nlevs] = u_next
             for jj in (nlevs-1):-1:1
-                scr.conc_work[c, jj] = scr.dp[c, jj] - scr.cp[c, jj] * scr.conc_work[c, jj+1]
+                u_next = scr.dp[c, jj] - scr.cp[c, jj] * u_next
+                scr.conc_work[c, jj] = u_next
             end
 
             if s == 1
