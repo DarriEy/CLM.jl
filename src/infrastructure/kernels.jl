@@ -124,14 +124,36 @@ end
 # Launch-level 1-D scatter operation. Keeping the atomic update behind this
 # boundary lets reverse-mode AD replace the whole launch with a gather kernel;
 # Enzyme never has to differentiate Atomix's device CAS loop.
+#
+# The destination is VALIDATED, and that is load-bearing, not defensive noise.
+# The launch covers the whole `values` array (`ndrange = length(values)`), but
+# subgrid index arrays are allocated ISPVAL (-9999) and only filled in for the
+# patches/columns a run actually uses — `patch_init!` does exactly this, and any
+# hand-built fixture leaves its tail unset. Scattering into `dest[p] = -9999`
+# then writes outside `out`: `Atomix.@atomic` does its own `checkbounds`, which
+# `@inbounds` at this call site does NOT elide, so it throws under
+# `--check-bounds=yes` (CI) — but with bounds checking off it is a silent
+# out-of-bounds write into whatever follows `out` in memory. A patch that
+# belongs to no column contributes nothing, so skipping is also the physically
+# correct answer.
 @kernel function _scatter_add_1d_kernel!(out, @Const(values), @Const(dest))
     p = @index(Global)
-    @inbounds _scatter_add!(out, dest[p], values[p])
+    @inbounds begin
+        d = dest[p]
+        if 1 <= d <= length(out)
+            _scatter_add!(out, d, values[p])
+        end
+    end
 end
 
 @kernel function _scatter_add_1d_pullback_kernel!(dvalues, @Const(dout), @Const(dest))
     p = @index(Global)
-    @inbounds dvalues[p] += dout[dest[p]]
+    @inbounds begin
+        d = dest[p]
+        if 1 <= d <= length(dout)
+            dvalues[p] += dout[d]
+        end
+    end
 end
 
 """

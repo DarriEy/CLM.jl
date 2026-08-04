@@ -108,6 +108,16 @@ Base.@kwdef mutable struct Atm2LndData{FT<:Real,
     forc_snow_downscaled_col          ::V = Float64[]   # snow rate (mm H2O/s)
     forc_q_downscaled_col             ::V = Float64[]   # specific humidity (kg/kg)
 
+    # --- downscaling accumulators (gridcell-level, internal) ---
+    # `downscale_forcings!` rescales the CO2/O2 partial pressures — gridcell
+    # fields — onto the elevation-corrected pressure. That correction must be
+    # applied exactly once per gridcell, so the gridcell mean of the downscaled
+    # COLUMN pressure is accumulated here first: the mean is
+    # `pbot_downscaled_grc / pbot_downscale_wsum_grc`. Rebuilt from scratch every
+    # step; carries no state between steps.
+    pbot_downscaled_grc               ::V = Float64[]   # Σ w·pbot_downscaled_col (Pa)
+    pbot_downscale_wsum_grc           ::V = Float64[]   # Σ w
+
     # --- rof->lnd (gridcell-level) ---
     # Fortran carries these three on `wateratm2lndbulk_type` (Wateratm2lndType.F90
     # lines 30-33); they are the ONLY river->land feedback CTSM has. The coupler
@@ -344,6 +354,10 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
     a2l.forc_rain_downscaled_col      = fill(ival, nc)
     a2l.forc_snow_downscaled_col      = fill(ival, nc)
     a2l.forc_q_downscaled_col         = fill(ival, nc)
+
+    # downscaling accumulators (zeroed and rebuilt inside downscale_forcings!)
+    a2l.pbot_downscaled_grc           = fill(ival, ng)
+    a2l.pbot_downscale_wsum_grc       = fill(ival, ng)
 
     # rof->lnd (gridcell-level). Fortran `Wateratm2lndType.F90::InitAllocate` uses
     # `ival = 0`, so an uncoupled run sees zero river volume and zero flood.
@@ -872,6 +886,9 @@ function atm2lnd_clean!(a2l::Atm2LndData{FT}) where {FT}
     a2l.forc_rain_downscaled_col      = FT[]
     a2l.forc_snow_downscaled_col      = FT[]
     a2l.forc_q_downscaled_col         = FT[]
+
+    a2l.pbot_downscaled_grc           = FT[]
+    a2l.pbot_downscale_wsum_grc       = FT[]
 
     # rof->lnd
     a2l.volr_grc                      = FT[]

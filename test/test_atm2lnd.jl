@@ -350,3 +350,82 @@ end
     @test length(a.volrmch_grc) == 0
     @test length(a.forc_flood_grc) == 0
 end
+
+# ==========================================================================
+# downscale_forcings! rescales forc_pco2 / forc_po2 / forc_pc13o2 — GRIDCELL
+# fields — onto the elevation-corrected pressure. It is a read-modify-write, so
+# it must be applied exactly ONCE per gridcell however many columns the gridcell
+# has. A per-column version compounded the ratio: with n columns the implied
+# pressure came out as pbot*(pbot_ds/pbot_nd)^n (a ~50% CO2 error at the 11
+# columns of a glacier elevation-class subgrid), and the pco2/po2 molar-ratio
+# invariant did NOT catch it because both fields compound identically.
+# ==========================================================================
+@testset "downscale_forcings!: the pco2 rescale is once per gridcell" begin
+    CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+    CLM.varcon_init!()
+    CLM.varpar.nlevsno = 5; CLM.varpar.nlevsoi = 10
+    CLM.varpar.nlevgrnd = 10; CLM.varpar.nlevmaxurbgrnd = 10
+
+    # One gridcell; `ncol` columns, all at the same elevation so every column
+    # gets the same downscaled pressure and the correct answer is unambiguous.
+    function run_downscale(ncol::Int; set_weights::Bool = true, elev = 500.0)
+        inst = CLM.CLMInstances()
+        CLM.clm_instInit!(inst; ng = 1, nl = 1, nc = ncol, np = ncol,
+                          nlevdecomp_full = CLM.varpar.nlevdecomp_full)
+        col = inst.column; lun = inst.landunit; a = inst.atm2lnd
+        for k in 1:ncol
+            col.gridcell[k] = 1; col.landunit[k] = 1; col.active[k] = true
+            col.itype[k] = CLM.ISTSOIL
+            if set_weights
+                col.wtgcell[k] = 1 / ncol; col.wtlunit[k] = 1 / ncol
+            end
+        end
+        lun.itype[1] = CLM.ISTSOIL; lun.gridcell[1] = 1
+        lun.active[1] = true; lun.urbpoi[1] = false; lun.wtgcell[1] = 1.0
+
+        pbot = 9.9e4
+        a.forc_pbot_not_downscaled_grc[1] = pbot
+        a.forc_t_not_downscaled_grc[1]  = 288.0
+        a.forc_th_not_downscaled_grc[1] = 288.0
+        a.forc_q_not_downscaled_grc[1]  = 0.008
+        a.forc_topo_grc[1] = 0.0
+        a.forc_pco2_grc[1]   = 367.0e-6 * pbot
+        a.forc_po2_grc[1]    = 0.209 * pbot
+        a.forc_pc13o2_grc[1] = 367.0e-6 * pbot * 0.01
+        inst.topo.topo_col .= elev
+
+        bounds = CLM.BoundsType(begg = 1, endg = 1, begl = 1, endl = 1,
+                                begc = 1, endc = ncol, begp = 1, endp = ncol,
+                                begCohort = 0, endCohort = 0,
+                                level = CLM.BOUNDS_LEVEL_CLUMP, clump_index = 1)
+        CLM.downscale_forcings!(bounds, a, col, lun, inst.topo)
+        return (pbot = pbot, pbot_ds = a.forc_pbot_downscaled_col[1],
+                pco2 = a.forc_pco2_grc[1], po2 = a.forc_po2_grc[1],
+                pc13o2 = a.forc_pc13o2_grc[1])
+    end
+
+    r1 = run_downscale(1)
+    @test r1.pbot_ds < r1.pbot                       # 500 m up: lower pressure
+    @test r1.pco2 / 367.0e-6 ≈ r1.pbot_ds rtol = 1e-12
+
+    # The whole point: 11 columns (a glc_nec = 10 subgrid) must give the SAME
+    # gridcell CO2 as one column, not the ratio raised to the 11th power.
+    r11 = run_downscale(11)
+    @test r11.pco2 ≈ r1.pco2 rtol = 1e-12
+    @test r11.pco2 / 367.0e-6 ≈ r11.pbot_ds rtol = 1e-12
+    ratio = r11.pbot_ds / r11.pbot
+    @test !isapprox(r11.pco2 / 367.0e-6, r11.pbot * ratio^11; rtol = 1e-6)
+
+    # O2 and C13 ride the same single rescale.
+    @test r11.po2 / 0.209 ≈ r11.pbot_ds rtol = 1e-12
+    @test r11.pc13o2 / (367.0e-6 * 0.01) ≈ r11.pbot_ds rtol = 1e-12
+    # ...so the molar-ratio invariant holds too (it held before the fix as well,
+    # which is exactly why it cannot be the only assertion here).
+    @test r11.pco2 / r11.po2 ≈ 367.0e-6 / 0.209 rtol = 1e-12
+
+    # `column_init!` allocates wtgcell as NaN and CLM.jl's hand-built driver
+    # fixtures leave it unset; that must degrade to an unweighted mean, not NaN.
+    rnan = run_downscale(4; set_weights = false)
+    @test isfinite(rnan.pco2)
+    @test rnan.pco2 / 367.0e-6 ≈ rnan.pbot_ds rtol = 1e-12
+end

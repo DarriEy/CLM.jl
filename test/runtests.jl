@@ -158,6 +158,7 @@ using CLM
     include("test_flexiblecn.jl")
     include("test_flexiblecn_matrixcn_agsys.jl")
     include("test_vegetation_facade.jl")
+    include("test_kernels_scatter.jl")
     include("test_atm2lnd.jl")
     include("test_multigridcell_forcing.jl")
     include("test_lnd2atm.jl")
