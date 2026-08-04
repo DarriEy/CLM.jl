@@ -8,7 +8,8 @@
 # or the JuliaGPU Buildkite `juliagpu` queue) to assert the CUDA backend is
 # functional and matches the CPU reference across the kernel + AD parity suites.
 #
-#   julia --project=. scripts/gpu_validate_cuda.jl
+#   julia --project=scripts -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+#   julia --project=scripts scripts/gpu_validate_cuda.jl
 #
 # Exit code 0 = all CUDA validations passed; 1 = a divergence/failure; 2 = no
 # functional CUDA device (so CI can distinguish "no GPU" from "GPU mismatch").
@@ -16,13 +17,17 @@
 # What it runs:
 #   1. CUDA functional check + device report (name, compute capability, FP64).
 #   2. The backend registry round-trip — clm_set_backend(:cuda) + clm_device_array.
-#   3. scripts/gpu_validate.jl     — the full kernel-parity suite (backend-agnostic;
+#   3. scripts/gpu_validate.jl     — the core kernel-parity suite (backend-agnostic;
 #      detect_backend() selects CUDA on a CUDA box), CUDA arrays vs CPU.
 #   4. scripts/gpu_ad_validate.jl  — forward-mode AD parity on the device.
+#   5. scripts/gpu_validate_clmdrv_e2e.jl — full biogeophysics/hydrology timestep.
+#   6. scripts/gpu_validate_clmdrv_cn_e2e.jl — full timestep with CN enabled.
+#   7. scripts/gpu_validate_clmdrv_realinit_e2e.jl — multi-step real NetCDF init,
+#      including soil and lake columns (requires a discoverable CLM parameter file).
 #
 # (3) and (4) are the proven per-module validation harnesses — this driver just
 # asserts CUDA, points them at the device, and aggregates a single verdict, so
-# the rented box is exactly `git clone && julia --project=. scripts/gpu_validate_cuda.jl`.
+# the rented box only needs the scripts environment instantiated as shown above.
 # ==========================================================================
 
 using CLM
@@ -81,7 +86,7 @@ end
 # age cleanly before the kernels run.
 function run_suite(script)
     jl   = Base.julia_cmd()
-    proj = abspath(joinpath(@__DIR__, ".."))
+    proj = abspath(@__DIR__)
     path = joinpath(@__DIR__, script)
     buf  = IOBuffer()
     ok = try
@@ -95,17 +100,32 @@ end
 
 results = Tuple{String,Bool}[]
 
-println("=== [1/3] backend registry: clm_set_backend(:cuda) + device round-trip ===")
+const SUITES = (
+    "gpu_validate.jl",
+    "gpu_ad_validate.jl",
+    "gpu_validate_clmdrv_e2e.jl",
+    "gpu_validate_clmdrv_cn_e2e.jl",
+    "gpu_validate_clmdrv_realinit_e2e.jl",
+)
+const NVALIDATIONS = 1 + length(SUITES)
+
+println("=== [1/$NVALIDATIONS] backend registry: clm_set_backend(:cuda) + device round-trip ===")
 (rok, rmsg) = registry_check()
 println(rok ? "  [PASS] clm_set_backend(:cuda) + clm_device_array round-trip" :
               "  [FAIL] $rmsg")
 push!(results, ("backend-registry", rok))
 
-for (i, s) in enumerate(("gpu_validate.jl", "gpu_ad_validate.jl"))
-    println("\n=== [$(i+1)/3] $s on CUDA ===")
+for (i, s) in enumerate(SUITES)
+    println("\n=== [$(i+1)/$NVALIDATIONS] $s on CUDA ===")
     (ok, out) = run_suite(s)
-    for ln in split(out, '\n')
-        occursin(r"\b(passed|PASS|FAIL|MATCH|DIVERGED|ERROR)\b|✓", ln) && println("  ", strip(ln))
+    if ok
+        for ln in split(out, '\n')
+            occursin(r"\b(passed|PASS|FAIL|MATCH|DIVERGED|ERROR)\b|✓", ln) && println("  ", strip(ln))
+        end
+    else
+        # A failed CUDA compile commonly has the useful kernel/IR diagnosis on a
+        # line that does not match the summary regex. Never hide that evidence.
+        print(out)
     end
     push!(results, (s, ok))
 end

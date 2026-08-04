@@ -108,6 +108,37 @@ Base.@kwdef mutable struct Atm2LndData{FT<:Real,
     forc_snow_downscaled_col          ::V = Float64[]   # snow rate (mm H2O/s)
     forc_q_downscaled_col             ::V = Float64[]   # specific humidity (kg/kg)
 
+    # --- downscaling accumulators (gridcell-level, internal) ---
+    # `downscale_forcings!` rescales the CO2/O2 partial pressures — gridcell
+    # fields — onto the elevation-corrected pressure. That correction must be
+    # applied exactly once per gridcell, so the gridcell mean of the downscaled
+    # COLUMN pressure is accumulated here first: the mean is
+    # `pbot_downscaled_grc / pbot_downscale_wsum_grc`. Rebuilt from scratch every
+    # step; carries no state between steps.
+    pbot_downscaled_grc               ::V = Float64[]   # Σ w·pbot_downscaled_col (Pa)
+    pbot_downscale_wsum_grc           ::V = Float64[]   # Σ w
+
+    # --- rof->lnd (gridcell-level) ---
+    # Fortran carries these three on `wateratm2lndbulk_type` (Wateratm2lndType.F90
+    # lines 30-33); they are the ONLY river->land feedback CTSM has. The coupler
+    # writes them from the ROF export bundle (`Flrr_volr`, `Flrr_volrmch`,
+    # `Flrr_flood`) in `lnd_import_export.F90`. This port has no separate
+    # WaterAtm2Lnd type, so — like the wateratm2lndbulk accumulators below — they
+    # live on Atm2LndData, which is already the home of every atm/rof-side forcing
+    # field. In a standalone (no-rof) run they stay 0, which is exactly the Fortran
+    # `ival = 0` initialization and reproduces uncoupled CLM bit-for-bit.
+    #
+    # Consumers, wired in `clm_drv!`:
+    #   volr_grc       -> `calc_irrigation_needed!` (river-volume limit on surface
+    #                     irrigation withdrawal; IrrigationMod.F90 CalcDeficitVolrLimited)
+    #   forc_flood_grc -> `qflx_floodg` -> `set_floodc!` -> qflx_floodc_col, and the
+    #                     `forc_flood_grc` input term of the gridcell water balance
+    #                     (BalanceCheckMod.F90)
+    #   volrmch_grc    -> history output only in CTSM; no physics consumer.
+    volr_grc                      ::V = Float64[]   # rof volr total volume (m3)
+    volrmch_grc                   ::V = Float64[]   # rof volr main channel (m3)
+    forc_flood_grc                ::V = Float64[]   # rof flood water sent back to land (mm H2O/s)
+
     # --- relative humidity forcing (gridcell-level) ---
     # Fortran carries forc_rh as an atm->lnd import field on wateratm2lndbulk_type.
     # This port has no coupler import, so it is DERIVED from the (already present)
@@ -323,6 +354,16 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
     a2l.forc_rain_downscaled_col      = fill(ival, nc)
     a2l.forc_snow_downscaled_col      = fill(ival, nc)
     a2l.forc_q_downscaled_col         = fill(ival, nc)
+
+    # downscaling accumulators (zeroed and rebuilt inside downscale_forcings!)
+    a2l.pbot_downscaled_grc           = fill(ival, ng)
+    a2l.pbot_downscale_wsum_grc       = fill(ival, ng)
+
+    # rof->lnd (gridcell-level). Fortran `Wateratm2lndType.F90::InitAllocate` uses
+    # `ival = 0`, so an uncoupled run sees zero river volume and zero flood.
+    a2l.volr_grc                      = fill(ival, ng)
+    a2l.volrmch_grc                   = fill(ival, ng)
+    a2l.forc_flood_grc                = fill(ival, ng)
 
     # relative humidity (derived from q/T/pbot each step by atm2lnd_update_rh!)
     a2l.forc_rh_grc                   = fill(ival, ng)
@@ -845,6 +886,14 @@ function atm2lnd_clean!(a2l::Atm2LndData{FT}) where {FT}
     a2l.forc_rain_downscaled_col      = FT[]
     a2l.forc_snow_downscaled_col      = FT[]
     a2l.forc_q_downscaled_col         = FT[]
+
+    a2l.pbot_downscaled_grc           = FT[]
+    a2l.pbot_downscale_wsum_grc       = FT[]
+
+    # rof->lnd
+    a2l.volr_grc                      = FT[]
+    a2l.volrmch_grc                   = FT[]
+    a2l.forc_flood_grc                = FT[]
 
     a2l.forc_rh_grc                   = FT[]
 

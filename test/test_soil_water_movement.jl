@@ -258,6 +258,84 @@
     end
 
     # ------------------------------------------------------------------
+    # 8b. Moisture-form solver conserves mass (regression)
+    #
+    # With a BC_FLUX upper boundary, a BC_ZERO_FLUX lower boundary and no root
+    # sink, the ONLY water entering the soil column is qflx_infl, so
+    #     sum_j d(h2osoi_liq[j])  ==  qflx_infl * dtime   exactly.
+    # This failed by ~28% before the interface-flux / inflow-copy loop split in
+    # `_soilwm_moisture_form_kernel!`: fusing them created a loop-carried
+    # read-after-write on `qout` that the KernelAbstractions CPU backend
+    # vectorizes away, leaving qin[j] == 0 on most layers. Needs several columns
+    # (nc > SIMD width) to reproduce.
+    # ------------------------------------------------------------------
+    @testset "moisture form conserves mass" begin
+        nc = 12; nlev = 10
+        old_nlevsoi, old_nlevsno = CLM.varpar.nlevsoi, CLM.varpar.nlevsno
+        old_nlevgrnd = CLM.varpar.nlevgrnd
+        CLM.varpar.nlevsoi = nlev; CLM.varpar.nlevsno = 5; CLM.varpar.nlevgrnd = nlev
+        try
+            nlevsno = 5; joff = nlevsno; joff_zi = nlevsno + 1
+            dtime = 1800.0
+            dzv = 0.05
+            dz = zeros(nc, nlevsno + nlev); z = zeros(nc, nlevsno + nlev)
+            zi = zeros(nc, nlevsno + nlev + 1)
+            for c in 1:nc, j in 1:nlev
+                dz[c, joff + j] = dzv
+                z[c, joff + j]  = (j - 0.5) * dzv
+                zi[c, joff_zi + j] = j * dzv
+            end
+            watsat = fill(0.45, nc, nlev)
+            hksat  = fill(0.02, nc, nlev)
+            bsw    = fill(5.0, nc, nlev)
+            sucsat = fill(100.0, nc, nlev)
+            icefrac = zeros(nc, nlev)
+            zwt    = fill(nlev * dzv, nc)
+            h2osoi_liq = zeros(nc, nlevsno + nlev)
+            for c in 1:nc, j in 1:nlev
+                # a non-uniform profile so the interior fluxes are nonzero
+                h2osoi_liq[c, joff + j] = (0.30 + 0.01 * j) * watsat[c, j] * dzv * 1000.0
+            end
+            liq0 = copy(h2osoi_liq)
+            qflx_infl = fill(1.0e-5, nc)
+
+            scrow() = zeros(nc, nlev)
+            scr = CLM.MfScr(; hk = scrow(), smp = scrow(), dhkdw = scrow(),
+                dsmpdw = scrow(), imped = scrow(), s2 = scrow(), vwc_liq = scrow(),
+                dt_dz = scrow(), qin = scrow(), qout = scrow(), dqidw0 = scrow(),
+                dqidw1 = scrow(), dqodw1 = scrow(), dqodw2 = scrow(), dwat = scrow(),
+                amx = scrow(), bmx = scrow(), cmx = scrow(), rmx = scrow(),
+                gam = scrow(), fluxNet0 = scrow(), fluxNet1 = scrow())
+            st = CLM.MfState(; h2osoi_liq = h2osoi_liq, smp_l = zeros(nc, nlev),
+                hk_l = zeros(nc, nlev), qcharge = zeros(nc), nsubsteps = zeros(nc))
+            mfin = CLM.MfIn(; z = z, zi = zi, dz = dz,
+                qflx_rootsoi = zeros(nc, nlev), watsat = watsat, hksat = hksat,
+                bsw = bsw, sucsat = sucsat, icefrac = icefrac, zwt = zwt,
+                qflx_infl = qflx_infl)
+
+            cfg = CLM.SoilWaterMovementConfig(
+                soilwater_movement_method = CLM.MOISTURE_FORM,
+                lower_boundary_condition  = CLM.BC_ZERO_FLUX)
+            CLM.soilwm_moisture_form_solve!(st, scr, mfin, trues(nc), fill(nlev, nc),
+                joff, joff_zi, nlev, dtime, cfg)
+
+            for c in 1:nc
+                dliq = sum(h2osoi_liq[c, joff+1:joff+nlev]) - sum(liq0[c, joff+1:joff+nlev])
+                @test isapprox(dliq, qflx_infl[c] * dtime; rtol = 1e-10)
+                # and the interior inflow/outflow must telescope
+                for j in 2:nlev
+                    @test scr.qin[c, j] == scr.qout[c, j-1]
+                end
+                @test scr.qin[c, 1] == qflx_infl[c]
+            end
+        finally
+            CLM.varpar.nlevsoi = old_nlevsoi
+            CLM.varpar.nlevsno = old_nlevsno
+            CLM.varpar.nlevgrnd = old_nlevgrnd
+        end
+    end
+
+    # ------------------------------------------------------------------
     # 9. Constant values
     # ------------------------------------------------------------------
     @testset "Constants" begin

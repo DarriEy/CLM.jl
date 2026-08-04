@@ -26,6 +26,35 @@
 
 # Unified bundle: the differentiated inst + the canopy scratch arrays (so the canopy
 # block and the hydrology phases share one checkpointed object).
+function soiltemp_rev_scratch(inst)
+    t = inst.temperature; col = inst.column
+    pf = t.t_soisno_col; pi = col.snl
+    nc = size(pf, 1); np = length(inst.patch.column)
+    ns = varpar.nlevsno; nu = varpar.nlevmaxurbgrnd
+    nl = ns + nu; nt = ns + 1 + nu
+    z(d...) = fill!(similar(pf, d...), zero(eltype(pf)))
+    nanv(d...) = fill!(similar(pf, d...), eltype(pf)(NaN))
+    (; jtop=fill!(similar(pi, Int, nc), -9999), jbot=fill!(similar(pi, Int, nc), 0),
+       cv=z(nc,nl), tk=z(nc,nl), fn=z(nc,nl), fn1=z(nc,nl),
+       tk_h2osfc=nanv(nc), hs=z(nc), hs_top=z(nc), dhsdT=z(nc), hs_soil=z(nc),
+       hs_top_snow=z(nc), hs_h2osfc=z(nc), sabg_lyr_col=z(nc,ns+1),
+       lwrad_emit=z(nc), dlwrad_emit=z(nc), lwrad_emit_snow=z(nc),
+       lwrad_emit_soil=z(nc), lwrad_emit_h2osfc=z(nc),
+       hs_patch=z(np), dhsdT_patch=z(np), hs_soil_patch=z(np), hs_h2osfc_patch=z(np),
+       dz_h2osfc=z(nc), c_h2osfc=z(nc),
+       cool_on=fill!(similar(pf, Bool, length(inst.landunit.itype)), false),
+       heat_on=fill!(similar(pf, Bool, length(inst.landunit.itype)), false),
+       bmatrix=z(nc,5,nt), tvector=nanv(nc,nt), rvector=nanv(nc,nt))
+end
+
+function soiltemp_rev_bundle(inst)
+    sti = (; column=inst.column, landunit=inst.landunit, patch=inst.patch,
+        temperature=inst.temperature, energyflux=inst.energyflux, soilstate=inst.soilstate,
+        water=inst.water, solarabs=inst.solarabs, canopystate=inst.canopystate,
+        urbanparams=inst.urbanparams, atm2lnd=inst.atm2lnd)
+    (; inst=sti, soiltemp=soiltemp_rev_scratch(inst))
+end
+
 driver_rev_bundle(inst) =
     (; inst, scratch = cf_rev_scratch(Float64, length(inst.patch.column)))
 
@@ -147,12 +176,422 @@ soiltemp_rev_aux(bounds, filt; dtime = 1800.0) = (;
 
 function soiltemp_rev_phase!(b, aux)
     i = b.inst
+    # `urbantv` is a host-built constant in the reverse aux. Move it alongside
+    # the live state before a GPU launch (CUDA/Metal); this is a no-op on CPU.
+    urbantv = _to_backend_like(i.temperature.t_grnd_col,
+                               eltype(i.temperature.t_grnd_col), aux.urbantv)
     soil_temperature!(i.column, i.landunit, i.patch, i.temperature, i.energyflux,
         i.soilstate, i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
         i.water.waterfluxbulk_inst, i.solarabs, i.canopystate, i.urbanparams,
-        aux.urbantv, i.atm2lnd.forc_lwrad_downscaled_col, aux.nolakec, aux.nolakep,
+        urbantv, i.atm2lnd.forc_lwrad_downscaled_col, aux.nolakec, aux.nolakep,
         aux.urbanl, aux.urbanc, aux.bc_col, aux.bc_lun, aux.bc_patch, aux.dtime)
     return nothing
+end
+
+# GPU-reverse decomposition of soil_temperature!. The production routine remains
+# unchanged; these phases expose its existing launch boundaries to the
+# compositional checkpoint engine and keep all temporaries in `b.soiltemp`.
+function soiltemp_coeff_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno; nu=varpar.nlevurb
+    _launch!(_jtop_jbot_kernel!, s.jtop, s.jbot, aux.nolakec, i.column.snl,
+             i.column.itype, nu, varpar.nlevgrnd)
+    soil_therm_prop!(i.column, i.landunit, i.urbanparams, i.temperature,
+        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst, i.soilstate,
+        aux.nolakec, aux.urbanc, aux.bc_col, s.tk, s.cv, s.tk_h2osfc)
+    compute_ground_heat_flux_and_deriv!(i.column, i.landunit, i.patch, i.temperature,
+        i.energyflux, i.solarabs, i.canopystate, i.water.waterdiagnosticbulk_inst,
+        i.water.waterfluxbulk_inst, i.urbanparams, i.atm2lnd.forc_lwrad_downscaled_col,
+        aux.nolakec, aux.nolakep, aux.bc_col, aux.bc_patch,
+        s.hs_h2osfc, s.hs_top_snow, s.hs_soil, s.hs_top, s.dhsdT, s.sabg_lyr_col)
+    compute_heat_diff_flux_and_factor!(i.column, i.landunit, i.temperature, i.energyflux,
+        i.urbanparams, aux.nolakec, aux.bc_col, aux.dtime, s.tk, s.cv, s.fn,
+        i.temperature.fact_col)
+    _launch!(_h2osfc_thermprop_kernel!, i.temperature.c_h2osfc_col, s.dz_h2osfc,
+        aux.nolakec, i.water.waterstatebulk_inst.ws.h2osfc_col,
+        i.water.waterdiagnosticbulk_inst.frac_h2osfc_col)
+    nothing
+end
+
+function soiltemp_therm_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    _launch!(_jtop_jbot_kernel!, s.jtop, s.jbot, aux.nolakec, i.column.snl,
+             i.column.itype, varpar.nlevurb, varpar.nlevgrnd)
+    soil_therm_prop!(i.column, i.landunit, i.urbanparams, i.temperature,
+        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst, i.soilstate,
+        aux.nolakec, aux.urbanc, aux.bc_col, s.tk, s.cv, s.tk_h2osfc)
+    nothing
+end
+
+function soiltemp_tk_layers_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno
+    compute_soil_snow_tk!(i.soilstate.thk_col, i.water.waterdiagnosticbulk_inst.bw_col,
+        aux.nolakec, i.column.landunit, i.column.itype, i.landunit.itype,
+        i.urbanparams.nlev_improad, i.column.dz, i.column.nbedrock, i.column.snl,
+        i.temperature.t_soisno_col, i.water.waterstatebulk_inst.ws.h2osoi_liq_col,
+        i.water.waterstatebulk_inst.ws.h2osoi_ice_col,
+        i.water.waterstatebulk_inst.ws.excess_ice_col, i.soilstate.watsat_col,
+        i.soilstate.tkmg_col, i.soilstate.tkdry_col,
+        i.water.waterdiagnosticbulk_inst.frac_sno_eff_col, ns, varpar.nlevgrnd,
+        varpar.nlevsoi, varctl.snow_thermal_cond_method)
+    compute_urban_tk!(i.soilstate.thk_col, aux.urbanc, i.column.itype,
+        i.column.landunit, i.urbanparams.tk_wall, i.urbanparams.tk_roof,
+        i.urbanparams.tk_improad, i.urbanparams.nlev_improad, ns, varpar.nlevurb)
+    nothing
+end
+
+# Array-level activity view for the conductivity phase. Every field aliases the
+# shared driver bundle (and the corresponding shadow view aliases `db`), but
+# Enzyme no longer has to analyze the full Column/Water/Urban structs.
+soiltemp_tk_layers_view(b) = let i=b.inst
+    (; thk=i.soilstate.thk_col, bw=i.water.waterdiagnosticbulk_inst.bw_col,
+       col_landunit=i.column.landunit, col_itype=i.column.itype,
+       lun_itype=i.landunit.itype, nlev_improad=i.urbanparams.nlev_improad,
+       dz=i.column.dz, nbedrock=i.column.nbedrock, snl=i.column.snl,
+       t_soisno=i.temperature.t_soisno_col,
+       h2osoi_liq=i.water.waterstatebulk_inst.ws.h2osoi_liq_col,
+       h2osoi_ice=i.water.waterstatebulk_inst.ws.h2osoi_ice_col,
+       excess_ice=i.water.waterstatebulk_inst.ws.excess_ice_col,
+       watsat=i.soilstate.watsat_col, tkmg=i.soilstate.tkmg_col,
+       tkdry=i.soilstate.tkdry_col,
+       frac_sno=i.water.waterdiagnosticbulk_inst.frac_sno_eff_col,
+       tk_wall=i.urbanparams.tk_wall, tk_roof=i.urbanparams.tk_roof,
+       tk_improad=i.urbanparams.tk_improad)
+end
+
+function soiltemp_tk_layers_array_phase!(x, aux)
+    ns=varpar.nlevsno
+    compute_soil_snow_tk!(x.thk, x.bw, aux.nolakec, x.col_landunit,
+        x.col_itype, x.lun_itype, x.nlev_improad, x.dz, x.nbedrock, x.snl,
+        x.t_soisno, x.h2osoi_liq, x.h2osoi_ice, x.excess_ice, x.watsat,
+        x.tkmg, x.tkdry, x.frac_sno, ns, varpar.nlevgrnd, varpar.nlevsoi,
+        varctl.snow_thermal_cond_method)
+    compute_urban_tk!(x.thk, aux.urbanc, x.col_itype, x.col_landunit,
+        x.tk_wall, x.tk_roof, x.tk_improad, x.nlev_improad, ns, varpar.nlevurb)
+    nothing
+end
+
+function soiltemp_tk_interface_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno
+    compute_soil_tk_interface!(s.tk, aux.nolakec, i.column.itype, i.column.snl,
+        i.column.z, i.column.zi, i.soilstate.thk_col, ns, varpar.nlevurb,
+        varpar.nlevgrnd, ns+varpar.nlevmaxurbgrnd)
+    compute_tk_h2osfc!(s.tk_h2osfc, aux.nolakec,
+        i.water.waterstatebulk_inst.ws.h2osfc_col, i.column.z,
+        i.soilstate.thk_col, ns)
+    nothing
+end
+
+soiltemp_tk_interface_view(b) = let i=b.inst, s=b.soiltemp
+    (; tk=s.tk, tk_h2osfc=s.tk_h2osfc, col_itype=i.column.itype,
+       snl=i.column.snl, z=i.column.z, zi=i.column.zi,
+       thk=i.soilstate.thk_col,
+       h2osfc=i.water.waterstatebulk_inst.ws.h2osfc_col)
+end
+
+function soiltemp_tk_interface_array_phase!(x, aux)
+    ns=varpar.nlevsno
+    compute_soil_tk_interface!(x.tk, aux.nolakec, x.col_itype, x.snl,
+        x.z, x.zi, x.thk, ns, varpar.nlevurb, varpar.nlevgrnd,
+        ns+varpar.nlevmaxurbgrnd)
+    compute_tk_h2osfc!(x.tk_h2osfc, aux.nolakec, x.h2osfc, x.z, x.thk, ns)
+    nothing
+end
+
+function soiltemp_cv_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno
+    ws=i.water.waterstatebulk_inst.ws
+    compute_soil_cv!(s.cv, aux.nolakec, i.column.landunit, i.column.itype,
+        i.landunit.itype, i.urbanparams.nlev_improad, i.soilstate.csol_col,
+        i.soilstate.watsat_col, i.column.dz, ws.h2osoi_ice_col,
+        ws.h2osoi_liq_col, ws.excess_ice_col, i.column.nbedrock, ns, varpar.nlevgrnd)
+    compute_urban_cv!(s.cv, aux.urbanc, i.column.itype, i.column.landunit,
+        i.urbanparams.cv_wall, i.urbanparams.cv_roof, i.urbanparams.cv_improad,
+        i.urbanparams.nlev_improad, i.column.dz, ns, varpar.nlevurb)
+    add_unresolved_snow_cv!(s.cv, aux.nolakec, ws.h2osno_no_layers_col, ns)
+    compute_snow_cv!(s.cv, aux.nolakec, i.column.snl,
+        i.water.waterdiagnosticbulk_inst.frac_sno_eff_col, ws.h2osoi_liq_col,
+        ws.h2osoi_ice_col, ns)
+    nothing
+end
+
+soiltemp_cv_view(b) = let i=b.inst, s=b.soiltemp, ws=i.water.waterstatebulk_inst.ws
+    (; cv=s.cv, col_landunit=i.column.landunit, col_itype=i.column.itype,
+       lun_itype=i.landunit.itype, nlev_improad=i.urbanparams.nlev_improad,
+       csol=i.soilstate.csol_col, watsat=i.soilstate.watsat_col, dz=i.column.dz,
+       h2osoi_ice=ws.h2osoi_ice_col, h2osoi_liq=ws.h2osoi_liq_col,
+       excess_ice=ws.excess_ice_col, nbedrock=i.column.nbedrock,
+       cv_wall=i.urbanparams.cv_wall, cv_roof=i.urbanparams.cv_roof,
+       cv_improad=i.urbanparams.cv_improad,
+       h2osno_no_layers=ws.h2osno_no_layers_col, snl=i.column.snl,
+       frac_sno=i.water.waterdiagnosticbulk_inst.frac_sno_eff_col)
+end
+
+function soiltemp_cv_array_phase!(x, aux)
+    ns=varpar.nlevsno
+    compute_soil_cv!(x.cv, aux.nolakec, x.col_landunit, x.col_itype,
+        x.lun_itype, x.nlev_improad, x.csol, x.watsat, x.dz,
+        x.h2osoi_ice, x.h2osoi_liq, x.excess_ice, x.nbedrock,
+        ns, varpar.nlevgrnd)
+    compute_urban_cv!(x.cv, aux.urbanc, x.col_itype, x.col_landunit,
+        x.cv_wall, x.cv_roof, x.cv_improad, x.nlev_improad,
+        x.dz, ns, varpar.nlevurb)
+    add_unresolved_snow_cv!(x.cv, aux.nolakec, x.h2osno_no_layers, ns)
+    compute_snow_cv!(x.cv, aux.nolakec, x.snl, x.frac_sno,
+        x.h2osoi_liq, x.h2osoi_ice, ns)
+    nothing
+end
+
+function soiltemp_gnet_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    compute_ground_heat_flux_and_deriv!(i.column, i.landunit, i.patch, i.temperature,
+        i.energyflux, i.solarabs, i.canopystate, i.water.waterdiagnosticbulk_inst,
+        i.water.waterfluxbulk_inst, i.urbanparams, i.atm2lnd.forc_lwrad_downscaled_col,
+        aux.nolakec, aux.nolakep, aux.bc_col, aux.bc_patch,
+        s.hs_h2osfc, s.hs_top_snow, s.hs_soil, s.hs_top, s.dhsdT, s.sabg_lyr_col)
+    nothing
+end
+
+function soiltemp_lwrad_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    compute_ground_lwrad_emit!(s.lwrad_emit, s.dlwrad_emit, s.lwrad_emit_snow,
+        s.lwrad_emit_soil, s.lwrad_emit_h2osfc, aux.nolakec, i.temperature.emg_col,
+        i.temperature.t_grnd_col, i.temperature.t_soisno_col,
+        i.temperature.t_h2osfc_col, i.column.snl, varpar.nlevsno)
+    _zero_all!(s.hs_soil); _zero_all!(s.hs_h2osfc); _zero_all!(s.hs)
+    _zero_all!(s.dhsdT)
+    nothing
+end
+
+soiltemp_lwrad_view(b) = let i=b.inst, s=b.soiltemp
+    (; lwrad_emit=s.lwrad_emit, dlwrad_emit=s.dlwrad_emit,
+       lwrad_emit_snow=s.lwrad_emit_snow, lwrad_emit_soil=s.lwrad_emit_soil,
+       lwrad_emit_h2osfc=s.lwrad_emit_h2osfc, emg=i.temperature.emg_col,
+       t_grnd=i.temperature.t_grnd_col, t_soisno=i.temperature.t_soisno_col,
+       t_h2osfc=i.temperature.t_h2osfc_col, snl=i.column.snl,
+       hs=s.hs, dhsdT=s.dhsdT, hs_soil=s.hs_soil, hs_h2osfc=s.hs_h2osfc)
+end
+
+function soiltemp_lwrad_array_phase!(x, aux)
+    compute_ground_lwrad_emit!(x.lwrad_emit, x.dlwrad_emit, x.lwrad_emit_snow,
+        x.lwrad_emit_soil, x.lwrad_emit_h2osfc, aux.nolakec, x.emg,
+        x.t_grnd, x.t_soisno, x.t_h2osfc, x.snl, varpar.nlevsno)
+    _zero_all!(x.hs); _zero_all!(x.dhsdT)
+    _zero_all!(x.hs_soil); _zero_all!(x.hs_h2osfc)
+    nothing
+end
+
+function soiltemp_gnet_patch_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    compute_gnet_patch!(i.energyflux, i.solarabs, i.canopystate,
+        i.water.waterfluxbulk_inst, i.column, i.landunit, i.patch, aux.nolakep,
+        s.lwrad_emit, s.dlwrad_emit, s.lwrad_emit_snow, s.lwrad_emit_soil,
+        s.lwrad_emit_h2osfc, i.temperature.emg_col,
+        i.atm2lnd.forc_lwrad_downscaled_col, i.energyflux.htvp_col,
+        i.water.waterdiagnosticbulk_inst.frac_sno_eff_col, s.hs, s.dhsdT,
+        s.hs_soil, s.hs_h2osfc, is_simple_build_temp(), is_prog_build_temp())
+    nothing
+end
+
+soiltemp_gnet_patch_view(b) = let i=b.inst, s=b.soiltemp
+    pin=GnetPatchIn(; sabg=i.solarabs.sabg_patch,
+        sabg_soil=i.solarabs.sabg_soil_patch, sabg_snow=i.solarabs.sabg_snow_patch,
+        dlrad=i.energyflux.dlrad_patch, cgrnd=i.energyflux.cgrnd_patch,
+        eflx_sh_grnd=i.energyflux.eflx_sh_grnd_patch,
+        eflx_sh_snow=i.energyflux.eflx_sh_snow_patch,
+        eflx_sh_soil=i.energyflux.eflx_sh_soil_patch,
+        eflx_sh_h2osfc=i.energyflux.eflx_sh_h2osfc_patch,
+        qflx_evap_soi=i.water.waterfluxbulk_inst.wf.qflx_evap_soi_patch,
+        qflx_ev_snow=i.water.waterfluxbulk_inst.qflx_ev_snow_patch,
+        qflx_ev_soil=i.water.waterfluxbulk_inst.qflx_ev_soil_patch,
+        qflx_ev_h2osfc=i.water.waterfluxbulk_inst.qflx_ev_h2osfc_patch,
+        eflx_lwrad_net=i.energyflux.eflx_lwrad_net_patch,
+        qflx_tran_veg=i.water.waterfluxbulk_inst.wf.qflx_tran_veg_patch,
+        wtcol=i.patch.wtcol)
+    cin=GnetColIn(; lwrad_emit=s.lwrad_emit, lwrad_emit_snow=s.lwrad_emit_snow,
+        lwrad_emit_soil=s.lwrad_emit_soil, lwrad_emit_h2osfc=s.lwrad_emit_h2osfc,
+        dlwrad_emit=s.dlwrad_emit, emg=i.temperature.emg_col,
+        forc_lwrad=i.atm2lnd.forc_lwrad_downscaled_col,
+        htvp=i.energyflux.htvp_col,
+        frac_sno_eff=i.water.waterdiagnosticbulk_inst.frac_sno_eff_col)
+    lin=GnetLunIn(; eflx_wasteheat_lun=i.energyflux.eflx_wasteheat_lun,
+        eflx_ventilation_lun=i.energyflux.eflx_ventilation_lun,
+        eflx_heat_from_ac_lun=i.energyflux.eflx_heat_from_ac_lun,
+        eflx_traffic_lun=i.energyflux.eflx_traffic_lun,
+        wtlunit_roof=i.landunit.wtlunit_roof)
+    out=GnetOut(; eflx_gnet=i.energyflux.eflx_gnet_patch,
+        dgnetdT=i.energyflux.dgnetdT_patch, sabg_chk=i.solarabs.sabg_chk_patch,
+        eflx_wasteheat=i.energyflux.eflx_wasteheat_patch,
+        eflx_ventilation=i.energyflux.eflx_ventilation_patch,
+        eflx_heat_from_ac=i.energyflux.eflx_heat_from_ac_patch,
+        eflx_traffic=i.energyflux.eflx_traffic_patch,
+        eflx_anthro=i.energyflux.eflx_anthro_patch,
+        hs_patch=s.hs_patch, dhsdT_patch=s.dhsdT_patch,
+        hs_soil_patch=s.hs_soil_patch, hs_h2osfc_patch=s.hs_h2osfc_patch)
+    (; pin, cin, lin, out, column=i.patch.column, landunit=i.patch.landunit,
+       itype=i.column.itype, urbpoi=i.landunit.urbpoi,
+       frac_veg_nosno=i.canopystate.frac_veg_nosno_patch,
+       hs=s.hs, dhsdT=s.dhsdT, hs_soil=s.hs_soil, hs_h2osfc=s.hs_h2osfc)
+end
+
+function soiltemp_gnet_patch_rural_array_phase!(x, aux)
+    np=length(x.column); np == 0 && return nothing
+    backend=_kernel_backend(x.out.eflx_gnet)
+    _gnet_patch_rural_kernel!(backend)(x.out, x.pin, x.cin, aux.nolakep,
+        x.column, x.landunit, x.urbpoi, x.frac_veg_nosno; ndrange=np)
+    KernelAbstractions.synchronize(backend)
+    nothing
+end
+
+function soiltemp_gnet_patch_rural_contrib_array_phase!(x, aux)
+    np=length(x.column); np == 0 && return nothing
+    backend=_kernel_backend(x.out.hs_patch)
+    _gnet_patch_rural_contrib_kernel!(backend)(x.out, x.pin, x.cin, aux.nolakep,
+        x.column, x.landunit, x.urbpoi, x.frac_veg_nosno; ndrange=np)
+    KernelAbstractions.synchronize(backend)
+    nothing
+end
+
+function soiltemp_gnet_patch_urban_array_phase!(x, aux)
+    np=length(x.column); np == 0 && return nothing
+    backend=_kernel_backend(x.hs)
+    _gnet_patch_urban_kernel!(backend)(x.out, x.pin, x.cin, x.lin, aux.nolakep,
+        x.column, x.landunit, x.itype, x.urbpoi,
+        is_simple_build_temp(), is_prog_build_temp(); ndrange=np)
+    KernelAbstractions.synchronize(backend)
+    nothing
+end
+
+function soiltemp_gnet_patch_reduce_array_phase!(x, aux)
+    scatter_add_1d!(x.hs, x.out.hs_patch, x.column)
+    scatter_add_1d!(x.dhsdT, x.out.dhsdT_patch, x.column)
+    scatter_add_1d!(x.hs_soil, x.out.hs_soil_patch, x.column)
+    scatter_add_1d!(x.hs_h2osfc, x.out.hs_h2osfc_patch, x.column)
+    nothing
+end
+
+function soiltemp_gnet_patch_array_phase!(x, aux)
+    soiltemp_gnet_patch_rural_array_phase!(x, aux)
+    soiltemp_gnet_patch_rural_contrib_array_phase!(x, aux)
+    soiltemp_gnet_patch_urban_array_phase!(x, aux)
+    soiltemp_gnet_patch_reduce_array_phase!(x, aux)
+end
+
+function soiltemp_gnet_patch_rural_view(b)
+    x=soiltemp_gnet_patch_view(b)
+    pin=(; sabg=x.pin.sabg, dlrad=x.pin.dlrad,
+        eflx_sh_grnd=x.pin.eflx_sh_grnd, qflx_evap_soi=x.pin.qflx_evap_soi,
+        sabg_snow=x.pin.sabg_snow, sabg_soil=x.pin.sabg_soil,
+        cgrnd=x.pin.cgrnd)
+    cin=(; emg=x.cin.emg, forc_lwrad=x.cin.forc_lwrad,
+        lwrad_emit=x.cin.lwrad_emit, htvp=x.cin.htvp,
+        frac_sno_eff=x.cin.frac_sno_eff, dlwrad_emit=x.cin.dlwrad_emit)
+    out=(; eflx_gnet=x.out.eflx_gnet, sabg_chk=x.out.sabg_chk,
+        dgnetdT=x.out.dgnetdT)
+    (; pin, cin, out, column=x.column, landunit=x.landunit,
+       urbpoi=x.urbpoi, frac_veg_nosno=x.frac_veg_nosno)
+end
+
+function soiltemp_gnet_patch_rural_contrib_view(b)
+    x=soiltemp_gnet_patch_view(b)
+    pin=(; wtcol=x.pin.wtcol, sabg_soil=x.pin.sabg_soil,
+        dlrad=x.pin.dlrad, eflx_sh_soil=x.pin.eflx_sh_soil,
+        qflx_ev_soil=x.pin.qflx_ev_soil,
+        eflx_sh_h2osfc=x.pin.eflx_sh_h2osfc,
+        qflx_ev_h2osfc=x.pin.qflx_ev_h2osfc)
+    cin=(; emg=x.cin.emg, forc_lwrad=x.cin.forc_lwrad,
+        lwrad_emit_soil=x.cin.lwrad_emit_soil, htvp=x.cin.htvp,
+        lwrad_emit_h2osfc=x.cin.lwrad_emit_h2osfc)
+    out=(; eflx_gnet=x.out.eflx_gnet, dgnetdT=x.out.dgnetdT,
+        hs_patch=x.out.hs_patch, dhsdT_patch=x.out.dhsdT_patch,
+        hs_soil_patch=x.out.hs_soil_patch,
+        hs_h2osfc_patch=x.out.hs_h2osfc_patch)
+    (; pin, cin, out, column=x.column, landunit=x.landunit,
+       urbpoi=x.urbpoi, frac_veg_nosno=x.frac_veg_nosno)
+end
+
+function soiltemp_gnet_snicar_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    _zero_all!(s.sabg_lyr_col); _zero_all!(s.hs_top); _zero_all!(s.hs_top_snow)
+    compute_gnet_snicar!(i.energyflux, i.solarabs, i.canopystate,
+        i.water.waterfluxbulk_inst, i.column, i.landunit, i.patch, aux.nolakep,
+        s.lwrad_emit, s.dlwrad_emit, s.lwrad_emit_snow, s.lwrad_emit_soil,
+        s.lwrad_emit_h2osfc, i.temperature.emg_col,
+        i.atm2lnd.forc_lwrad_downscaled_col, i.energyflux.htvp_col,
+        i.water.waterdiagnosticbulk_inst.frac_sno_eff_col, s.hs_top, s.hs_top_snow,
+        s.sabg_lyr_col, varpar.nlevsno)
+    nothing
+end
+
+function soiltemp_heatdiff_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    compute_heat_diff_flux_and_factor!(i.column, i.landunit, i.temperature, i.energyflux,
+        i.urbanparams, aux.nolakec, aux.bc_col, aux.dtime, s.tk, s.cv, s.fn,
+        i.temperature.fact_col)
+    _launch!(_h2osfc_thermprop_kernel!, i.temperature.c_h2osfc_col, s.dz_h2osfc,
+        aux.nolakec, i.water.waterstatebulk_inst.ws.h2osfc_col,
+        i.water.waterdiagnosticbulk_inst.frac_h2osfc_col)
+    nothing
+end
+
+function soiltemp_solve_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno; nu=varpar.nlevmaxurbgrnd
+    set_rhs_vec!(i.column, i.landunit, i.temperature, i.water.waterdiagnosticbulk_inst,
+        aux.nolakec, aux.bc_col, aux.dtime, s.hs_h2osfc, s.hs_top_snow, s.hs_soil,
+        s.hs_top, s.dhsdT, s.sabg_lyr_col, s.tk, s.tk_h2osfc,
+        i.temperature.fact_col, s.fn, i.temperature.c_h2osfc_col, s.dz_h2osfc, s.rvector)
+    set_matrix!(i.column, i.landunit, i.water.waterdiagnosticbulk_inst, aux.nolakec,
+        aux.bc_col, aux.dtime, 5, s.dhsdT, s.tk, s.tk_h2osfc,
+        i.temperature.fact_col, i.temperature.c_h2osfc_col, s.dz_h2osfc, s.bmatrix)
+    _launch!(_tvector_init_kernel!, s.tvector, aux.nolakec, i.column.snl,
+        i.temperature.t_soisno_col, i.temperature.t_h2osfc_col, ns, nu;
+        ndrange=size(s.tvector,1))
+    batched_band_solve!(s.tvector, s.bmatrix, s.rvector, s.jtop, s.jbot,
+        aux.nolakec, 2, 2, ns)
+    _launch!(_tvector_extract_kernel!, i.temperature.t_soisno_col,
+        i.temperature.t_h2osfc_col, aux.nolakec, i.column.snl, s.tvector,
+        i.water.waterdiagnosticbulk_inst.frac_h2osfc_col, ns, nu;
+        ndrange=size(i.temperature.t_soisno_col,1))
+    nothing
+end
+
+function soiltemp_post_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno
+    _launch!(_fn1_kernel!, s.fn1, s.fn, aux.nolakec, i.column.itype, i.column.snl,
+        i.column.landunit, i.temperature.t_soisno_col, i.temperature.t_ssbef_col,
+        s.tk, i.column.z, i.column.zi, i.temperature.t_building_lun,
+        i.temperature.t_sunw_inner_lun, i.temperature.t_shdw_inner_lun,
+        i.temperature.t_roof_inner_lun, ns, varpar.nlevurb, varpar.nlevgrnd,
+        is_simple_build_temp(); ndrange=(size(s.fn1,1), ns+varpar.nlevmaxurbgrnd))
+    _launch!(_urban_building_heat_kernel!, i.energyflux.eflx_building_heat_errsoi_col,
+        i.energyflux.eflx_urban_ac_col, i.energyflux.eflx_urban_heat_col, aux.nolakec,
+        i.column.itype, i.column.landunit, i.landunit.urbpoi, s.cool_on, s.heat_on,
+        s.fn, s.fn1, ns, varpar.nlevurb, is_simple_build_temp())
+    _launch!(_mask_zero_kernel!, i.temperature.xmf_h2osfc_col, aux.nolakec)
+    phase_change_h2osfc!(i.column, i.temperature, i.energyflux,
+        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
+        i.water.waterfluxbulk_inst, aux.nolakec, aux.bc_col, aux.dtime, s.dhsdT)
+    phase_change_beta!(i.column, i.landunit, i.temperature, i.energyflux, i.soilstate,
+        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
+        i.water.waterfluxbulk_inst, aux.nolakec, aux.bc_col, aux.dtime, s.dhsdT)
+    urbantv = _to_backend_like(i.temperature.t_grnd_col,
+                               eltype(i.temperature.t_grnd_col), aux.urbantv)
+    if is_prog_build_temp()
+        pac=fill!(similar(i.temperature.t_grnd_col, eltype(i.temperature.t_grnd_col),
+                          length(aux.bc_lun)), one(eltype(i.temperature.t_grnd_col)))
+        building_temperature!(i.column, i.landunit, i.temperature, i.energyflux,
+            i.urbanparams, urbantv, pac, s.tk, aux.urbanl, aux.nolakec,
+            aux.bc_lun, aux.dtime)
+    end
+    _launch!(_tgrnd_kernel!, i.temperature.t_grnd_col, aux.nolakec, i.column.snl,
+        i.temperature.t_soisno_col, i.temperature.t_h2osfc_col,
+        i.water.waterdiagnosticbulk_inst.frac_sno_eff_col,
+        i.water.waterdiagnosticbulk_inst.frac_h2osfc_col, ns)
+    _launch!(_mask_zero_kernel!, i.energyflux.eflx_fgr12_col, aux.nolakec)
+    _launch!(_eflx_fgr_kernel!, i.energyflux.eflx_fgr_col,
+        i.energyflux.eflx_fgr12_col, aux.nolakec, i.column.landunit,
+        i.landunit.itype, s.fn, s.fn1, ns, varpar.nlevgrnd;
+        ndrange=(size(i.energyflux.eflx_fgr_col,1),varpar.nlevgrnd))
+    nothing
 end
 
 # --------------------------------------------------------------------------

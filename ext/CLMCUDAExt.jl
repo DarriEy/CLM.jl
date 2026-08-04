@@ -14,11 +14,10 @@
 #   device_count()   = length(CUDA.devices())           # multi-GPU
 #   bind_device(idx) = CUDA.device!(idx)                 # one-GPU-per-rank bind
 #
-# NOTE (hardware honesty): authored on a Metal-only machine. The closures are the
-# documented CUDA.jl API but have NOT been executed on real NVIDIA hardware here.
-# Once `import CUDA` succeeds on a CUDA box, `CLM.clm_set_backend(:cuda)` +
-# `CLM.clm_device_array(...)` + `CLM.clm_run_multigpu!(...)` light up through this
-# seam with no base-package changes.
+# Hardware validation: exercised on an NVIDIA GeForce RTX 5070 Ti Laptop GPU
+# (compute capability 12.0) on 2026-08-02. Backend registration/device transfer,
+# focused kernels, forward AD, and full-driver biogeophysics + CN composite parity
+# passed. Multi-GPU execution remains a separate, unvalidated boundary.
 # ==========================================================================
 module CLMCUDAExt
 

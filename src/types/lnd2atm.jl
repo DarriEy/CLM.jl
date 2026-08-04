@@ -72,6 +72,23 @@ Base.@kwdef mutable struct Lnd2AtmData{FT<:Real,
     qflx_ice_runoff_col            ::V = Float64[]   # total column-level ice runoff (mm H2O/s)
     qflx_liq_from_ice_col          ::V = Float64[]   # liquid runoff from converted ice runoff (mm H2O/s)
     eflx_sh_ice_to_liq_col         ::V = Float64[]   # sensible HF from ice runoff to liquid conversion (W/m**2) [+ to atm]
+
+    # --- lnd->rof / lnd->atm water (gridcell-level) ---
+    # The rest of `waterlnd2atm_type` (Waterlnd2atmType.F90 lines 26-38). These are
+    # the fields the river model is forced with: CMEPS/MCT maps them onto
+    # `Flrl_rofsur` / `Flrl_rofsub` / `Flrl_rofgwl` / `Flrl_rofi` / `Flrl_irrig`.
+    # Populated by [`lnd2atm_rof!`](@ref) from the column-level runoff terms with
+    # the SAME `c2l_scale_type='urbanf'` weighting `BalanceCheckMod` uses, so the
+    # exported gridcell fluxes and the gridcell water-balance check see one number.
+    qflx_rofliq_grc                ::V = Float64[]   # total liquid runoff to rof (mm H2O/s)
+    qflx_rofliq_qsur_grc           ::V = Float64[]   # rof liq -- surface runoff component
+    qflx_rofliq_qsub_grc           ::V = Float64[]   # rof liq -- subsurface (drainage) component
+    qflx_rofliq_qgwl_grc           ::V = Float64[]   # rof liq -- glacier/wetland/lake balance residual
+    qflx_rofliq_drain_perched_grc  ::V = Float64[]   # rof liq -- perched water table runoff component
+    qflx_rofliq_stream_grc         ::V = Float64[]   # rof liq -- hillslope stream channel component
+    qflx_rofice_grc                ::V = Float64[]   # rof ice forcing (mm H2O/s)
+    qirrig_grc                     ::V = Float64[]   # surface irrigation withdrawal from rof (mm H2O/s)
+    qflx_evap_tot_grc              ::V = Float64[]   # qflx_evap_soi + qflx_evap_can + qflx_tran_veg (mm H2O/s)
 end
 
 Lnd2AtmData{FT}(; kwargs...) where {FT<:Real} =
@@ -146,6 +163,17 @@ function lnd2atm_init!(l2a::Lnd2AtmData, ng::Int, nc::Int;
     l2a.qflx_ice_runoff_col           = fill(ival, nc)
     l2a.qflx_liq_from_ice_col         = fill(ival, nc)
     l2a.eflx_sh_ice_to_liq_col        = fill(ival, nc)
+
+    # lnd->rof (gridcell-level)
+    l2a.qflx_rofliq_grc               = fill(ival, ng)
+    l2a.qflx_rofliq_qsur_grc          = fill(ival, ng)
+    l2a.qflx_rofliq_qsub_grc          = fill(ival, ng)
+    l2a.qflx_rofliq_qgwl_grc          = fill(ival, ng)
+    l2a.qflx_rofliq_drain_perched_grc = fill(ival, ng)
+    l2a.qflx_rofliq_stream_grc        = fill(ival, ng)
+    l2a.qflx_rofice_grc               = fill(ival, ng)
+    l2a.qirrig_grc                    = fill(ival, ng)
+    l2a.qflx_evap_tot_grc             = fill(ival, ng)
 
     # conditional allocations
     if n_megan_comps > 0
@@ -231,6 +259,15 @@ function lnd2atm_clean!(l2a::Lnd2AtmData{FT}) where {FT}
     l2a.qflx_ice_runoff_col           = FT[]
     l2a.qflx_liq_from_ice_col         = FT[]
     l2a.eflx_sh_ice_to_liq_col        = FT[]
+    l2a.qflx_rofliq_grc               = FT[]
+    l2a.qflx_rofliq_qsur_grc          = FT[]
+    l2a.qflx_rofliq_qsub_grc          = FT[]
+    l2a.qflx_rofliq_qgwl_grc          = FT[]
+    l2a.qflx_rofliq_drain_perched_grc = FT[]
+    l2a.qflx_rofliq_stream_grc        = FT[]
+    l2a.qflx_rofice_grc               = FT[]
+    l2a.qirrig_grc                    = FT[]
+    l2a.qflx_evap_tot_grc             = FT[]
     nothing
 end
 

@@ -1721,10 +1721,19 @@ end
         end
 
         # --- Accumulate ebullition (per-column reduction) ---
-        ts.ch4_ebul_total[c] = zero(T)
+        # Accumulate in a LOCAL and store once. `x[c] += ...` inside a loop over
+        # levels is a loop-carried read-modify-write through an array, which the
+        # KA CPU backend miscompiles (see `_tridiag_multi_kernel!`). This one is
+        # not cosmetic: the total is added to the CH4 SOURCE at the water-table
+        # layer immediately below, so a corrupted reduction perturbs the tracer
+        # solve itself — the residual was largest exactly at jwt, decayed
+        # upward, vanished below it, and left O2 untouched because ebullition
+        # feeds species 1 only.
+        ebul_total = zero(T)
         for j in 1:nlevsoi
-            ts.ch4_ebul_total[c] += ts.ch4_ebul_depth[c, j] * tf.dz[c, j]
+            ebul_total += ts.ch4_ebul_depth[c, j] * tf.dz[c, j]
         end
+        ts.ch4_ebul_total[c] = ebul_total
 
         # --- Source terms + epsilon_t (k_h_cc already filled) ---
         for j in 1:nlevsoi
@@ -1755,10 +1764,12 @@ end
         end
 
         # --- Accumulate aerenchyma surface flux (reduction) ---
-        ts.ch4_surf_aere[c] = zero(T)
+        # Local accumulator for the same reason as ch4_ebul_total above.
+        surf_aere = zero(T)
         for j in 1:nlevsoi
-            ts.ch4_surf_aere[c] += ts.ch4_aere_depth[c, j] * tf.dz[c, j]
+            surf_aere += ts.ch4_aere_depth[c, j] * tf.dz[c, j]
         end
+        ts.ch4_surf_aere[c] = surf_aere
 
         # --- Add ebullition to source at the water-table layer ---
         if jwt[c] != 0
@@ -1904,17 +1915,36 @@ end
                 end
             end
 
-            # In-thread Thomas solve (jtop=1), matching tridiagonal_solve! exactly.
-            scr.cp[c, 1] = scr.ct[c, 1] / scr.bt[c, 1]
-            scr.dp[c, 1] = scr.rt[c, 1] / scr.bt[c, 1]
+            # In-thread Thomas solve (jtop=1), matching tridiagonal_solve!.
+            #
+            # Recurrence carried in LOCALS — do NOT re-read cp[c,jj-1] /
+            # dp[c,jj-1] / conc_work[c,jj+1]. See the warning in
+            # `_tridiag_multi_kernel!` (infrastructure/tridiagonal.jl): KA's CPU
+            # backend lets `@simd ivdep` metadata reach this nested loop, LLVM
+            # vectorizes it and drops the loop-carried dependency. The
+            # store-then-load form shifted Σconc_ch4_sat by −7.2% and
+            # Σconc_o2_sat by −5.1% (and made this routine's own errch4 26×
+            # worse) with bounds checking at its DEFAULT, while CI's forced
+            # --check-bounds=yes hid it. The O2 error feeds o2stress, so it
+            # reached decomposition too. Runs twice per step (sat + unsat) and
+            # twice per column (the s = 1:2 species loop).
+            cp_prev = scr.ct[c, 1] / scr.bt[c, 1]
+            dp_prev = scr.rt[c, 1] / scr.bt[c, 1]
+            scr.cp[c, 1] = cp_prev
+            scr.dp[c, 1] = dp_prev
             for jj in 2:nlevs
-                denom = scr.bt[c, jj] - scr.at[c, jj] * scr.cp[c, jj-1]
-                scr.cp[c, jj] = scr.ct[c, jj] / denom
-                scr.dp[c, jj] = (scr.rt[c, jj] - scr.at[c, jj] * scr.dp[c, jj-1]) / denom
+                denom = scr.bt[c, jj] - scr.at[c, jj] * cp_prev
+                cp_prev = scr.ct[c, jj] / denom
+                dp_prev = (scr.rt[c, jj] - scr.at[c, jj] * dp_prev) / denom
+                scr.cp[c, jj] = cp_prev
+                scr.dp[c, jj] = dp_prev
             end
-            scr.conc_work[c, nlevs] = scr.dp[c, nlevs]
+            # dp_prev still holds dp[c, nlevs]
+            u_next = dp_prev
+            scr.conc_work[c, nlevs] = u_next
             for jj in (nlevs-1):-1:1
-                scr.conc_work[c, jj] = scr.dp[c, jj] - scr.cp[c, jj] * scr.conc_work[c, jj+1]
+                u_next = scr.dp[c, jj] - scr.cp[c, jj] * u_next
+                scr.conc_work[c, jj] = u_next
             end
 
             if s == 1
@@ -1925,14 +1955,20 @@ end
                     ts.ch4_surf_diff[c] = scr.dm1_zm1[c, 1] * ((scr.conc_work[c, 2] + scr.conc_ch4_rel_old[c, 2]) / T(2.0) - c_atm[g, s] * scr.k_h_cc[c, 1, s])
                     ts.ch4_surf_ebul[c] = ts.ch4_ebul_total[c]
                 end
+                # Negative-mass clip. The deficit is summed into a LOCAL and
+                # applied once — `ts.ch4_surf_diff[c] -=` inside this loop is the
+                # same loop-carried array accumulation as ch4_ebul_total above.
+                # (It fires only where the solve went negative, so it is latent
+                # in many configurations rather than always wrong.)
+                deficit_tot = zero(T)
                 for j in 1:nlevsoi
                     jj = j + 1
                     if scr.conc_work[c, jj] < zero(T)
-                        deficit = -scr.conc_work[c, jj] * scr.epsilon_t[c, j, 1] * tf.dz[c, j]
+                        deficit_tot += -scr.conc_work[c, jj] * scr.epsilon_t[c, j, 1] * tf.dz[c, j]
                         scr.conc_work[c, jj] = zero(T)
-                        ts.ch4_surf_diff[c] -= deficit / dtime
                     end
                 end
+                ts.ch4_surf_diff[c] -= deficit_tot / dtime
                 for jj in 1:nlevs; scr.conc_ch4_rel[c, jj] = scr.conc_work[c, jj]; end
             else
                 for j in 1:nlevsoi

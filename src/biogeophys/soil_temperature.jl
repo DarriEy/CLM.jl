@@ -213,6 +213,13 @@ end
     end
 end
 
+@kernel function _zero_all_kernel!(out)
+    i = @index(Global)
+    @inbounds out[i] = zero(eltype(out))
+end
+
+_zero_all!(out) = _launch!(_zero_all_kernel!, out; ndrange=length(out))
+
 # Ground temperature from snow/soil/surface-water blend.
 @kernel function _tgrnd_kernel!(t_grnd, @Const(mask), @Const(snl), @Const(t_soisno),
         @Const(t_h2osfc), @Const(frac_sno_eff), @Const(frac_h2osfc), nlevsno::Int)
@@ -983,6 +990,7 @@ end
 Base.@kwdef struct GnetOut{V}          # per-patch float outputs
     eflx_gnet::V; dgnetdT::V; sabg_chk::V
     eflx_wasteheat::V; eflx_ventilation::V; eflx_heat_from_ac::V; eflx_traffic::V; eflx_anthro::V
+    hs_patch::V; dhsdT_patch::V; hs_soil_patch::V; hs_h2osfc_patch::V
 end
 Adapt.@adapt_structure GnetPatchIn
 Adapt.@adapt_structure GnetColIn
@@ -992,63 +1000,88 @@ Adapt.@adapt_structure GnetOut
 # Per-patch ground net heat flux + atomic scatter of hs/dhsdT/hs_soil/hs_h2osfc into
 # columns. One thread per patch; c = column[p], l = landunit[p]. HVAP converted to the
 # working type. `simple_build`/`prog_build`: building-temperature config resolved on host.
-@kernel function _gnet_patch_kernel!(out::GnetOut, pin::GnetPatchIn, cin::GnetColIn,
-        lin::GnetLunIn, @Const(mask), @Const(column), @Const(landunit), @Const(itype),
-        @Const(urbpoi), @Const(frac_veg_nosno), hs, dhsdT, hs_soil, hs_h2osfc,
-        simple_build::Bool, prog_build::Bool)
+@kernel function _gnet_patch_rural_kernel!(out, pin, cin,
+        @Const(mask), @Const(column), @Const(landunit),
+        @Const(urbpoi), @Const(frac_veg_nosno))
     p = @index(Global)
-    @inbounds if mask[p]
-        T = eltype(hs)
-        c = column[p]; l = landunit[p]; wt = pin.wtcol[p]
-        local eflx_gnet_soil, eflx_gnet_h2osfc
-        if !urbpoi[l]
-            base = pin.dlrad[p] + (one(T) - frac_veg_nosno[p]) * cin.emg[c] * cin.forc_lwrad[c]
-            out.eflx_gnet[p] = pin.sabg[p] + base - cin.lwrad_emit[c] -
-                (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c])
-            out.sabg_chk[p] = cin.frac_sno_eff[c] * pin.sabg_snow[p] +
-                (one(T) - cin.frac_sno_eff[c]) * pin.sabg_soil[p]
-            eflx_gnet_soil = pin.sabg_soil[p] + base - cin.lwrad_emit_soil[c] -
-                (pin.eflx_sh_soil[p] + pin.qflx_ev_soil[p] * cin.htvp[c])
-            eflx_gnet_h2osfc = pin.sabg_soil[p] + base - cin.lwrad_emit_h2osfc[c] -
-                (pin.eflx_sh_h2osfc[p] + pin.qflx_ev_h2osfc[p] * cin.htvp[c])
-        else
-            it = itype[c]
-            denom = one(T) - lin.wtlunit_roof[l]
-            if it == ICOL_ROAD_PERV || it == ICOL_ROAD_IMPERV
-                out.eflx_wasteheat[p] = lin.eflx_wasteheat_lun[l] / denom
-                if simple_build
-                    out.eflx_ventilation[p] = zero(T)
-                elseif prog_build
-                    out.eflx_ventilation[p] = lin.eflx_ventilation_lun[l] / denom
-                end
-                out.eflx_heat_from_ac[p] = lin.eflx_heat_from_ac_lun[l] / denom
-                out.eflx_traffic[p] = lin.eflx_traffic_lun[l] / denom
-            else
-                out.eflx_wasteheat[p] = zero(T)
-                out.eflx_ventilation[p] = zero(T)
-                out.eflx_heat_from_ac[p] = zero(T)
-                out.eflx_traffic[p] = zero(T)
-            end
-            out.eflx_gnet[p] = pin.sabg[p] + pin.dlrad[p] - pin.eflx_lwrad_net[p] -
-                (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c] +
-                 pin.qflx_tran_veg[p] * T(HVAP)) +
-                out.eflx_wasteheat[p] + out.eflx_heat_from_ac[p] +
-                out.eflx_traffic[p] + out.eflx_ventilation[p]
-            if simple_build
-                out.eflx_anthro[p] = out.eflx_wasteheat[p] + out.eflx_traffic[p]
-            end
-            eflx_gnet_soil = out.eflx_gnet[p]
-            eflx_gnet_h2osfc = out.eflx_gnet[p]
-        end
+    @inbounds if mask[p] && !urbpoi[landunit[p]]
+        T = eltype(out.eflx_gnet)
+        c = column[p]
+        base = pin.dlrad[p] + (one(T) - frac_veg_nosno[p]) * cin.emg[c] * cin.forc_lwrad[c]
+        out.eflx_gnet[p] = pin.sabg[p] + base - cin.lwrad_emit[c] -
+            (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c])
+        out.sabg_chk[p] = cin.frac_sno_eff[c] * pin.sabg_snow[p] +
+            (one(T) - cin.frac_sno_eff[c]) * pin.sabg_soil[p]
         out.dgnetdT[p] = -pin.cgrnd[p] - cin.dlwrad_emit[c]
+    end
+end
+
+@kernel function _gnet_patch_rural_contrib_kernel!(out, pin, cin,
+        @Const(mask), @Const(column), @Const(landunit),
+        @Const(urbpoi), @Const(frac_veg_nosno))
+    p = @index(Global)
+    @inbounds if mask[p] && !urbpoi[landunit[p]]
+        T = eltype(out.hs_patch)
+        c = column[p]; wt = pin.wtcol[p]
+        base = pin.dlrad[p] + (one(T) - frac_veg_nosno[p]) * cin.emg[c] * cin.forc_lwrad[c]
+        eflx_gnet_soil = pin.sabg_soil[p] + base - cin.lwrad_emit_soil[c] -
+            (pin.eflx_sh_soil[p] + pin.qflx_ev_soil[p] * cin.htvp[c])
+        eflx_gnet_h2osfc = pin.sabg_soil[p] + base - cin.lwrad_emit_h2osfc[c] -
+            (pin.eflx_sh_h2osfc[p] + pin.qflx_ev_h2osfc[p] * cin.htvp[c])
         # Zero-weight (inactive) patches may carry uninitialized (NaN) flux state; their
         # contribution is physically zero, but `0 * NaN = NaN` would poison the column
         # heat-flux sums (and hence the whole tridiagonal solve). Contribute exactly 0.
         wnz = wt != zero(T)
-        _scatter_add!(hs,        c, wnz ? out.eflx_gnet[p] * wt : zero(T))
-        _scatter_add!(dhsdT,     c, wnz ? out.dgnetdT[p]   * wt : zero(T))
-        _scatter_add!(hs_soil,   c, wnz ? eflx_gnet_soil   * wt : zero(T))
-        _scatter_add!(hs_h2osfc, c, wnz ? eflx_gnet_h2osfc * wt : zero(T))
+        out.hs_patch[p]        = wnz ? out.eflx_gnet[p] * wt : zero(T)
+        out.dhsdT_patch[p]     = wnz ? out.dgnetdT[p] * wt : zero(T)
+        out.hs_soil_patch[p]   = wnz ? eflx_gnet_soil * wt : zero(T)
+        out.hs_h2osfc_patch[p] = wnz ? eflx_gnet_h2osfc * wt : zero(T)
+    else
+        T = eltype(out.hs_patch)
+        out.hs_patch[p] = zero(T); out.dhsdT_patch[p] = zero(T)
+        out.hs_soil_patch[p] = zero(T); out.hs_h2osfc_patch[p] = zero(T)
+    end
+end
+
+@kernel function _gnet_patch_urban_kernel!(out::GnetOut, pin::GnetPatchIn,
+        cin::GnetColIn, lin::GnetLunIn, @Const(mask), @Const(column),
+        @Const(landunit), @Const(itype), @Const(urbpoi),
+        simple_build::Bool, prog_build::Bool)
+    p = @index(Global)
+    @inbounds if mask[p] && urbpoi[landunit[p]]
+        T = eltype(out.hs_patch)
+        c = column[p]; l = landunit[p]; wt = pin.wtcol[p]
+        it = itype[c]
+        denom = one(T) - lin.wtlunit_roof[l]
+        if it == ICOL_ROAD_PERV || it == ICOL_ROAD_IMPERV
+            out.eflx_wasteheat[p] = lin.eflx_wasteheat_lun[l] / denom
+            if simple_build
+                out.eflx_ventilation[p] = zero(T)
+            elseif prog_build
+                out.eflx_ventilation[p] = lin.eflx_ventilation_lun[l] / denom
+            end
+            out.eflx_heat_from_ac[p] = lin.eflx_heat_from_ac_lun[l] / denom
+            out.eflx_traffic[p] = lin.eflx_traffic_lun[l] / denom
+        else
+            out.eflx_wasteheat[p] = zero(T)
+            out.eflx_ventilation[p] = zero(T)
+            out.eflx_heat_from_ac[p] = zero(T)
+            out.eflx_traffic[p] = zero(T)
+        end
+        out.eflx_gnet[p] = pin.sabg[p] + pin.dlrad[p] - pin.eflx_lwrad_net[p] -
+            (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c] +
+             pin.qflx_tran_veg[p] * T(HVAP)) +
+            out.eflx_wasteheat[p] + out.eflx_heat_from_ac[p] +
+            out.eflx_traffic[p] + out.eflx_ventilation[p]
+        if simple_build
+            out.eflx_anthro[p] = out.eflx_wasteheat[p] + out.eflx_traffic[p]
+        end
+        out.dgnetdT[p] = -pin.cgrnd[p] - cin.dlwrad_emit[c]
+        wnz = wt != zero(T)
+        out.hs_patch[p]        = wnz ? out.eflx_gnet[p] * wt : zero(T)
+        out.dhsdT_patch[p]     = wnz ? out.dgnetdT[p] * wt : zero(T)
+        out.hs_soil_patch[p]   = wnz ? out.eflx_gnet[p] * wt : zero(T)
+        out.hs_h2osfc_patch[p] = wnz ? out.eflx_gnet[p] * wt : zero(T)
     end
 end
 
@@ -1073,18 +1106,30 @@ function compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, c
         eflx_ventilation_lun = energyflux.eflx_ventilation_lun,
         eflx_heat_from_ac_lun = energyflux.eflx_heat_from_ac_lun,
         eflx_traffic_lun = energyflux.eflx_traffic_lun, wtlunit_roof = lun.wtlunit_roof)
+    np = length(mask_nolakep)
+    np == 0 && return nothing
+    hs_patch=similar(hs,np); dhsdT_patch=similar(dhsdT,np)
+    hs_soil_patch=similar(hs_soil,np); hs_h2osfc_patch=similar(hs_h2osfc,np)
     out = GnetOut(; eflx_gnet = energyflux.eflx_gnet_patch, dgnetdT = energyflux.dgnetdT_patch,
         sabg_chk = solarabs.sabg_chk_patch, eflx_wasteheat = energyflux.eflx_wasteheat_patch,
         eflx_ventilation = energyflux.eflx_ventilation_patch,
         eflx_heat_from_ac = energyflux.eflx_heat_from_ac_patch,
-        eflx_traffic = energyflux.eflx_traffic_patch, eflx_anthro = energyflux.eflx_anthro_patch)
+        eflx_traffic = energyflux.eflx_traffic_patch, eflx_anthro = energyflux.eflx_anthro_patch,
+        hs_patch, dhsdT_patch, hs_soil_patch, hs_h2osfc_patch)
     backend = _kernel_backend(hs)
-    np = length(mask_nolakep)
-    np == 0 && return nothing
-    _gnet_patch_kernel!(backend)(out, pin, cin, lin, mask_nolakep, patch_data.column,
-        patch_data.landunit, col.itype, lun.urbpoi, canopystate.frac_veg_nosno_patch,
-        hs, dhsdT, hs_soil, hs_h2osfc, simple_build, prog_build; ndrange = np)
+    _gnet_patch_rural_kernel!(backend)(out, pin, cin, mask_nolakep, patch_data.column,
+        patch_data.landunit, lun.urbpoi, canopystate.frac_veg_nosno_patch; ndrange = np)
+    _gnet_patch_rural_contrib_kernel!(backend)(out, pin, cin, mask_nolakep,
+        patch_data.column, patch_data.landunit, lun.urbpoi,
+        canopystate.frac_veg_nosno_patch; ndrange = np)
+    _gnet_patch_urban_kernel!(backend)(out, pin, cin, lin, mask_nolakep,
+        patch_data.column, patch_data.landunit, col.itype, lun.urbpoi,
+        simple_build, prog_build; ndrange = np)
     KernelAbstractions.synchronize(backend)
+    scatter_add_1d!(hs, hs_patch, patch_data.column)
+    scatter_add_1d!(dhsdT, dhsdT_patch, patch_data.column)
+    scatter_add_1d!(hs_soil, hs_soil_patch, patch_data.column)
+    scatter_add_1d!(hs_h2osfc, hs_h2osfc_patch, patch_data.column)
     return nothing
 end
 
@@ -1192,10 +1237,10 @@ function compute_ground_heat_flux_and_deriv!(
                                lwrad_emit_h2osfc_arr, mask_nolakec, emg, t_grnd, t_soisno,
                                t_h2osfc, snl, joff)
 
-    hs_soil .= zero(FT)
-    hs_h2osfc .= zero(FT)
-    hs .= zero(FT)
-    dhsdT .= zero(FT)
+    _zero_all!(hs_soil)
+    _zero_all!(hs_h2osfc)
+    _zero_all!(hs)
+    _zero_all!(dhsdT)
 
     # Per-patch ground net heat flux + atomic patch→column scatter (kernelized).
     compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,
@@ -1204,9 +1249,9 @@ function compute_ground_heat_flux_and_deriv!(
         hs_h2osfc, is_simple_build_temp(), is_prog_build_temp())
 
     # SNICAR: sabg_lyr_col and hs_top
-    sabg_lyr_col .= zero(FT)
-    hs_top .= zero(FT)
-    hs_top_snow .= zero(FT)
+    _zero_all!(sabg_lyr_col)
+    _zero_all!(hs_top)
+    _zero_all!(hs_top_snow)
 
     # SNICAR top-layer net heat flux + per-layer solar (kernelized; atomic scatter).
     compute_gnet_snicar!(energyflux, solarabs, canopystate, waterfluxbulk, col, lun,

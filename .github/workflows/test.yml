@@ -42,6 +42,35 @@ jobs:
         env:
           JULIA_NUM_THREADS: '2'
 
+  conservation-default-bounds:
+    name: Conservation (default bounds checking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: julia-actions/setup-julia@fa02766e078afaaf09b14210362cee14137e6a32 # v3.0.2
+        with:
+          version: '1'    # latest stable
+      - uses: julia-actions/cache@b7788abd52452d5bc033d69796e110d9906af4ab # v3.2.0
+      - uses: julia-actions/julia-buildpkg@e3eb439fad4f9aba7da2667e7510e4a46ebc46e1 # v1
+      # The `test` job above runs via julia-runtest, which forces
+      # --check-bounds=yes. That is not neutral: disabling @inbounds also
+      # blocks the LLVM vectorization that miscompiles a loop-carried
+      # read-after-write inside a @kernel body, so the whole suite is
+      # STRUCTURALLY BLIND to that bug class. Three confirmed instances
+      # (Richards fluxes, litter vertical transport, CH4/O2 transport) were all
+      # silently non-conservative in production while CI stayed green.
+      #
+      # This job therefore runs WITHOUT that flag. Do not "fix" it by folding
+      # these tests into runtests.jl — that would restore the blind spot. The
+      # script asserts it was not started with --check-bounds=yes.
+      - name: Run conservation checks with bounds checking at its default
+        run: julia --project=. test/conservation/run_default_bounds.jl
+        env:
+          JULIA_NUM_THREADS: '2'
+
   mpi-smoke:
     name: MPI 2-rank smoke (bit-identity)
     runs-on: ubuntu-latest

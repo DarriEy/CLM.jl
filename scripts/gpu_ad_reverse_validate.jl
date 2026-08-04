@@ -55,6 +55,7 @@ using ForwardDiff
 import Enzyme
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index, @Const
+import CUDA
 const Adapt = CLM.Adapt   # CLM depends on Adapt; reuse it (not a direct scripts dep)
 
 # Reverse-mode with runtime activity — REQUIRED for the grouped-struct probe (mixed
@@ -68,9 +69,7 @@ const PARITY_TOL = 1e-9   # device-reverse vs CPU-reverse (CUDA carries Float64)
 # --- optional CUDA backend (device-reverse leg only; CPU leg always runs) --------
 function _cuda_or_nothing()
     try
-        @eval using CUDA
-        mod = Base.invokelatest(getfield, @__MODULE__, :CUDA)
-        Base.invokelatest(() -> mod.functional()) ? mod : nothing
+        CUDA.functional() ? CUDA : nothing
     catch
         nothing
     end
@@ -99,16 +98,8 @@ function _probe_struct_run!(out, x, y)
     nothing
 end
 
-@kernel function _probe_scatter_kernel!(col_out, @Const(val), @Const(p2c))
-    p = @index(Global)
-    @inbounds CLM._scatter_add!(col_out, p2c[p], val[p])
-end
 function _probe_scatter_run!(col_out, val, p2c)
-    backend = CLM._kernel_backend(col_out)
-    fill!(col_out, zero(eltype(col_out)))
-    _probe_scatter_kernel!(backend)(col_out, val, p2c; ndrange = length(val))
-    KA.synchronize(backend)
-    nothing
+    CLM.scatter_add_1d!(col_out, val, p2c)
 end
 
 # ==========================================================================
@@ -169,7 +160,7 @@ function probe_tridiagonal(cu)
     _finish("tridiagonal_multi! (∂/∂r)", dev -> vec(rev(dev)), fwd, cu)
 end
 
-# -- Probe 3: _scatter_add! — atomic patch→column scatter ---------------------
+# -- Probe 3: launch-level atomic patch→column scatter -------------------------
 function probe_scatter(cu)
     rng = MersenneTwister(3); np = 24; ncol = 5
     p2c = rand(rng, 1:ncol, np)
@@ -183,7 +174,7 @@ function probe_scatter(cu)
         Array(dv)
     end
     fwd = ForwardDiff.gradient(v -> (c = zeros(eltype(v), ncol); _probe_scatter_run!(c, v, p2c); sum(c)), val)
-    _finish("_scatter_add! (∂/∂val, atomic)", rev, fwd, cu)
+    _finish("scatter_add_1d! (∂/∂val, atomic)", rev, fwd, cu)
 end
 
 # -- Probe 4: grouped device-view struct kernel -------------------------------
@@ -209,7 +200,10 @@ function _finish(name, rev, fwd, cu)
     cross = maxabs(cpu .- fwd)
     parity = NaN
     if cu !== nothing
-        cu_xfer(x) = Base.invokelatest(() -> cu.cu(x))
+        # `CUDA.cu(x)` intentionally demotes Float64 arrays to Float32. CLM's
+        # CUDA path is Float64, so preserve element types for a meaningful
+        # device-vs-CPU reverse-gradient comparison.
+        cu_xfer(x) = cu.CuArray(x)
         dev = rev(cu_xfer)
         parity = maxabs(dev .- cpu)
     end
@@ -231,6 +225,11 @@ function main()
     println("=" ^ 78)
 
     probes = (probe_forc_q, probe_tridiagonal, probe_scatter, probe_struct)
+    requested = get(ENV, "CLM_AD_PROBE", "")
+    if !isempty(requested)
+        probes = Tuple(p for p in probes if occursin(requested, string(p)))
+        isempty(probes) && error("CLM_AD_PROBE=$(repr(requested)) matched no probe")
+    end
     results = Any[]
     for p in probes
         try
