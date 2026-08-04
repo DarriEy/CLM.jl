@@ -470,6 +470,16 @@ end
 end
 
 # 3. Seeding fluxes: per-patch value + patch->gridcell accumulation.
+#
+# `gridcell[p]` is VALIDATED before the scatter for the same reason
+# `_scatter_add_1d_kernel!` validates its destination: this kernel is launched
+# with no `ndrange`, so it covers the whole patch array, and `patch_init!`
+# allocates `pch.gridcell` as ISPVAL (-9999) and fills in only the patches a run
+# actually uses. Scattering into -9999 writes outside the gridcell array —
+# `Atomix.@atomic` does its own `checkbounds`, which the `@inbounds` here does
+# NOT elide, so it throws under `--check-bounds=yes` and is a silent
+# out-of-bounds write with bounds checking off. The per-patch stores are
+# thread-owned and need no guard.
 @kernel function _dcp_seed_kernel!(sc_leaf_p, sc_leaf_g, sc_ds_p, sc_ds_g,
         sn_leaf_p, sn_leaf_g, sn_ds_p, sn_ds_g,
         @Const(dwt_leafc_seed), @Const(dwt_deadstemc_seed),
@@ -477,10 +487,11 @@ end
     p = @index(Global)
     @inbounds begin
         g = gridcell[p]
-        v1 = dwt_leafc_seed[p] / dt;     sc_leaf_p[p] = v1; _scatter_add!(sc_leaf_g, g, v1)
-        v2 = dwt_deadstemc_seed[p] / dt; sc_ds_p[p]   = v2; _scatter_add!(sc_ds_g, g, v2)
-        v3 = dwt_leafn_seed[p] / dt;     sn_leaf_p[p] = v3; _scatter_add!(sn_leaf_g, g, v3)
-        v4 = dwt_deadstemn_seed[p] / dt; sn_ds_p[p]   = v4; _scatter_add!(sn_ds_g, g, v4)
+        ok = 1 <= g <= length(sc_leaf_g)
+        v1 = dwt_leafc_seed[p] / dt;     sc_leaf_p[p] = v1; ok && _scatter_add!(sc_leaf_g, g, v1)
+        v2 = dwt_deadstemc_seed[p] / dt; sc_ds_p[p]   = v2; ok && _scatter_add!(sc_ds_g, g, v2)
+        v3 = dwt_leafn_seed[p] / dt;     sn_leaf_p[p] = v3; ok && _scatter_add!(sn_leaf_g, g, v3)
+        v4 = dwt_deadstemn_seed[p] / dt; sn_ds_p[p]   = v4; ok && _scatter_add!(sn_ds_g, g, v4)
     end
 end
 
@@ -530,9 +541,10 @@ end
         @Const(conv_cflux), @Const(conv_nflux), @Const(gridcell), dt)
     p = @index(Global)
     @inbounds begin
-        g = gridcell[p]
-        vc = -conv_cflux[p] / dt; conv_c_p[p] = vc; _scatter_add!(conv_c_g, g, vc)
-        vn = -conv_nflux[p] / dt; conv_n_p[p] = vn; _scatter_add!(conv_n_g, g, vn)
+        g = gridcell[p]                       # ISPVAL for unused patches — see _dcp_seed_kernel!
+        ok = 1 <= g <= length(conv_c_g)
+        vc = -conv_cflux[p] / dt; conv_c_p[p] = vc; ok && _scatter_add!(conv_c_g, g, vc)
+        vn = -conv_nflux[p] / dt; conv_n_p[p] = vn; ok && _scatter_add!(conv_n_g, g, vn)
     end
 end
 
@@ -542,10 +554,11 @@ end
         @Const(dwt_deadcrootc_to_litter), @Const(gridcell), dt)
     p = @index(Global)
     @inbounds begin
-        g = gridcell[p]
+        g = gridcell[p]                       # ISPVAL for unused patches — see _dcp_seed_kernel!
         v = dwt_frootc_to_litter[p] / dt + dwt_livecrootc_to_litter[p] / dt +
             dwt_deadcrootc_to_litter[p] / dt
-        slash_c_p[p] = v; _scatter_add!(slash_c_g, g, v)
+        slash_c_p[p] = v
+        (1 <= g <= length(slash_c_g)) && _scatter_add!(slash_c_g, g, v)
     end
 end
 
