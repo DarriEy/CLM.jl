@@ -88,6 +88,21 @@ at its default.
     # so the corruption landed in the tracer solve: the error peaked exactly
     # at jwt, decayed upward, vanished below, and left O2 untouched.
     # ---------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # The moisture-form Richards solve. This is where the class was first
+    # found (518648f): the fused interface-flux loop left qin[j] == 0 on most
+    # layers and the soil absorbed only ~72% of infiltration. The in-thread
+    # Thomas sweep beside it kept the same store-then-load shape until it was
+    # hardened; it was producing correct answers, but only because the scalar
+    # `bet` carry happened to stop LLVM vectorizing the loop. Guard it.
+    # ---------------------------------------------------------------------
+    @testset "moisture-form Richards solve conserves infiltration" begin
+        r = _soilwm_conservation_case()
+        @test r.max_mass_err < 1e-12       # sum(dliq) == qflx_infl*dtime
+        @test r.max_telescope_err == 0.0   # qin[j] == qout[j-1] exactly
+        @test all(isfinite, r.dwat) && all(isfinite, r.liq)
+    end
+
     @testset "ch4_tran! conserves and is bounds-mode invariant" begin
         r = _ch4_tran_case()
         @test r.max_errch4 < 1e-9

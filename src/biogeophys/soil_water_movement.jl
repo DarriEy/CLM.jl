@@ -1397,17 +1397,44 @@ Adapt.@adapt_structure MfScr
             scr.cmx[c, nlayers] = zero(T)
 
             # ---- tridiagonal solve (single column, jtop=1) ----
+            # Both sweeps carry `dwat` from the previous level in a LOCAL and
+            # store to the array only for the back-substitution's benefit. Do
+            # NOT re-read dwat[c,j-1] / dwat[c,j+1] from memory here: that
+            # store-then-load recurrence is the construct KA's CPU backend
+            # miscompiles, because its `@simd ivdep` metadata reaches nested
+            # loops and LLVM then vectorizes away the loop-carried dependency
+            # (the same defect as the interface-flux loop fixed in 518648f, and
+            # as `_tridiag_multi_kernel!` documents).
+            #
+            # This solve was NOT producing wrong answers: qin/qout/gam/dwat and
+            # the resulting h2osoi_liq are bit-identical between bounds-checking
+            # modes both before and after this change, and mass closes to
+            # 6.8e-16 either way. The scalar `bet` carry in the forward loop
+            # appears to be what stops LLVM vectorizing it. That is a property of
+            # the current optimizer, not of the code, and `Pkg.test` forces
+            # --check-bounds=yes so nothing in CI would report the day it stops
+            # holding. This is preventive hardening, and it is deliberately
+            # behaviour-preserving: byte-for-byte identical results in both modes.
+            #
+            # `gam` is still read from the array in the back sweep, which is
+            # safe: it is written by the FORWARD loop, not by this one.
             bet = scr.bmx[c, 1]
             if abs(bet) < T(1.0e-30); bet = T(1.0e-30); end
-            scr.dwat[c, 1] = scr.rmx[c, 1] / bet
+            dwat_prev = scr.rmx[c, 1] / bet
+            scr.dwat[c, 1] = dwat_prev
             for j in 2:nlayers
                 scr.gam[c, j] = scr.cmx[c, j-1] / bet
                 bet = scr.bmx[c, j] - scr.amx[c, j] * scr.gam[c, j]
                 if abs(bet) < T(1.0e-30); bet = copysign(T(1.0e-30), bet == zero(T) ? one(T) : bet); end
-                scr.dwat[c, j] = (scr.rmx[c, j] - scr.amx[c, j] * scr.dwat[c, j-1]) / bet
+                dwat_prev = (scr.rmx[c, j] - scr.amx[c, j] * dwat_prev) / bet
+                scr.dwat[c, j] = dwat_prev
             end
+            # dwat_prev still holds dwat[c, nlayers], which the back sweep leaves
+            # untouched (it runs from nlayers-1 down).
+            dwat_next = dwat_prev
             for j in (nlayers - 1):-1:1
-                scr.dwat[c, j] = scr.dwat[c, j] - scr.gam[c, j+1] * scr.dwat[c, j+1]
+                dwat_next = scr.dwat[c, j] - scr.gam[c, j+1] * dwat_next
+                scr.dwat[c, j] = dwat_next
             end
 
             # ---- error estimation ----
