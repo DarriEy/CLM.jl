@@ -235,3 +235,70 @@ function _ch4_tran_case()
             conc_ch4 = copy(ch4.conc_ch4_sat_col),
             conc_o2 = copy(ch4.conc_o2_sat_col))
 end
+
+"""
+    _soilwm_conservation_case()
+
+Drive the moisture-form Richards solve with a BC_FLUX upper boundary, a
+BC_ZERO_FLUX lower boundary and no root sink, so the ONLY water entering the
+column is `qflx_infl` and
+
+    sum_j d(h2osoi_liq[j]) == qflx_infl * dtime     exactly,
+
+with the interior fluxes telescoping (`qin[j] == qout[j-1]`). This is the
+identity that the pre-518648f interface-flux loop broke by ~28%. Twelve columns
+so the column loop exceeds the SIMD width.
+"""
+function _soilwm_conservation_case()
+    nc = 12; nlev = 10
+    CLM.varpar.nlevsoi = nlev; CLM.varpar.nlevsno = 5; CLM.varpar.nlevgrnd = nlev
+    nlevsno = 5; joff = nlevsno; joff_zi = nlevsno + 1
+    dtime = 1800.0; dzv = 0.05
+    dz = zeros(nc, nlevsno + nlev); z = zeros(nc, nlevsno + nlev)
+    zi = zeros(nc, nlevsno + nlev + 1)
+    for c in 1:nc, j in 1:nlev
+        dz[c, joff + j] = dzv
+        z[c, joff + j]  = (j - 0.5) * dzv
+        zi[c, joff_zi + j] = j * dzv
+    end
+    watsat = fill(0.45, nc, nlev); hksat = fill(0.02, nc, nlev)
+    bsw = fill(5.0, nc, nlev); sucsat = fill(100.0, nc, nlev)
+    icefrac = zeros(nc, nlev); zwt = fill(nlev * dzv, nc)
+    h2osoi_liq = zeros(nc, nlevsno + nlev)
+    for c in 1:nc, j in 1:nlev
+        h2osoi_liq[c, joff + j] = (0.30 + 0.01 * j) * watsat[c, j] * dzv * 1000.0
+    end
+    liq0 = copy(h2osoi_liq)
+    qflx_infl = fill(1.0e-5, nc)
+
+    scrow() = zeros(nc, nlev)
+    scr = CLM.MfScr(; hk = scrow(), smp = scrow(), dhkdw = scrow(),
+        dsmpdw = scrow(), imped = scrow(), s2 = scrow(), vwc_liq = scrow(),
+        dt_dz = scrow(), qin = scrow(), qout = scrow(), dqidw0 = scrow(),
+        dqidw1 = scrow(), dqodw1 = scrow(), dqodw2 = scrow(), dwat = scrow(),
+        amx = scrow(), bmx = scrow(), cmx = scrow(), rmx = scrow(),
+        gam = scrow(), fluxNet0 = scrow(), fluxNet1 = scrow())
+    st = CLM.MfState(; h2osoi_liq = h2osoi_liq, smp_l = zeros(nc, nlev),
+        hk_l = zeros(nc, nlev), qcharge = zeros(nc), nsubsteps = zeros(nc))
+    mfin = CLM.MfIn(; z = z, zi = zi, dz = dz,
+        qflx_rootsoi = zeros(nc, nlev), watsat = watsat, hksat = hksat,
+        bsw = bsw, sucsat = sucsat, icefrac = icefrac, zwt = zwt,
+        qflx_infl = qflx_infl)
+    cfg = CLM.SoilWaterMovementConfig(
+        soilwater_movement_method = CLM.MOISTURE_FORM,
+        lower_boundary_condition  = CLM.BC_ZERO_FLUX)
+    CLM.soilwm_moisture_form_solve!(st, scr, mfin, trues(nc), fill(nlev, nc),
+        joff, joff_zi, nlev, dtime, cfg)
+
+    worst = 0.0; telescope = 0.0
+    for c in 1:nc
+        dliq = sum(h2osoi_liq[c, joff+1:joff+nlev]) - sum(liq0[c, joff+1:joff+nlev])
+        worst = max(worst, abs(dliq - qflx_infl[c] * dtime))
+        for j in 2:nlev
+            telescope = max(telescope, abs(scr.qin[c, j] - scr.qout[c, j-1]))
+        end
+    end
+    return (liq = copy(h2osoi_liq), dwat = copy(scr.dwat), gam = copy(scr.gam),
+            qin = copy(scr.qin), qout = copy(scr.qout),
+            max_mass_err = worst, max_telescope_err = telescope)
+end
