@@ -82,9 +82,11 @@ Result on Julia 1.12.6 / macOS 26.5 / Apple M1:
 - 27,503 passed, 0 failed, 16 broken, 27,519 total;
 - all 16 broken results were external-data gates because `SYMFLUENCE_DATA` was not set.
 
-This is the clean-source/no-data baseline, not strict release qualification. A second run
-with `SYMFLUENCE_DATA` set and `CLM_REQUIRE_TESTDATA=1` is required so every missing fixture
-is fatal. The generated Julia 1.12.6 Manifest used for this qualification has SHA-256
+This is the clean-source/no-data baseline, not strict release qualification. The second run
+with `SYMFLUENCE_DATA` set and `CLM_REQUIRE_TESTDATA=1` completed with 27,766 passes, one
+failure, three broken tests, and exit status 1 after 49 min 06.9 s. Strict mode did not make
+every missing fixture fatal. The complete interpretation and closure requirements are in
+`strict_suite_2026-08-25.md`. The generated Julia 1.12.6 Manifest used for this qualification has SHA-256
 `94ea12b7e1a720df91489ef969b3a9ef6f1ecd485a1563998043618726d258b3`.
 
 The exact base commit previously completed GitHub Actions run

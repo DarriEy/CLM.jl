@@ -25,7 +25,8 @@ that satisfies the same evidence requirements.
 - [x] Clean clone outside a cloud-synced directory.
 - [x] Submission branch created from current public `main`.
 - [ ] Full CPU suite passes from a clean environment.
-- [ ] Exact upstream CTSM source tag/commit and configuration identified.
+- [x] Exact upstream CTSM source tag/commit identified.
+- [ ] Exact upstream CTSM build and run configuration reproduced and archived.
 - [ ] Experiment protocol reviewed and frozen.
 - [x] Three-site annual qualification runs complete without disabled conservation checks.
 - [ ] Three-site strict scientific-parity gate passes (currently 204/207 cells).
@@ -72,3 +73,7 @@ Large inputs and outputs will live in a DOI-backed experiment archive rather tha
 
 Audit status: the upstream CTSM tag and commit are now verified, but configuration and
 reference-generation provenance remain open; see `reference_audit.md`.
+
+The strict external-data suite currently fails (27,766 pass, 1 fail, 3 broken); see
+`strict_suite_2026-08-25.md`. In particular, strict-mode coverage, derivative acceptance,
+and synthetic parameter-recovery criteria must be repaired before they support claims.
