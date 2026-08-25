@@ -23,7 +23,10 @@ import numpy as np
 import cftime
 
 _D = os.environ.get("SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "paper", "data")
+DATA_DIR = os.environ.get(
+    "CLM_PARITY_DATA",
+    os.path.join(os.path.dirname(__file__), "..", "paper", "data"),
+)
 
 # (key, fortran_h0, julia_nc, short label, biome descriptor)
 DOMAINS = [
@@ -48,6 +51,18 @@ DOMAINS = [
     ("Baltimore",  f"{_D}/domain_Urban_DeadRun_Baltimore/simulations/clm_urban/CLM/Urban_DeadRun_Baltimore.clm2.h0.2012-12-30-00000.nc", "julia_clm_baltimore_phs_2013.nc", "Baltimore", "Urban (USA)"),
     ("Iceland",    f"{_D}/domain_Iceland_Jokulsa_Fjollum/simulations/clm_glacier/CLM/Iceland_Jokulsa_Fjollum.clm2.h0.2016-12-31-00000.nc", "julia_clm_iceland_phs_2017.nc", "Iceland Jökulsá", "Glacier outwash (Iceland)"),
 ]
+
+# A release qualification can score a frozen subset without pretending that absent
+# out-of-scope domains are pending. Example: CLM_PARITY_DOMAINS=Bow,Aripuana,Stillwater.
+_selected_domains = {
+    item.strip() for item in os.environ.get("CLM_PARITY_DOMAINS", "").split(",")
+    if item.strip()
+}
+if _selected_domains:
+    _unknown = _selected_domains - {row[0] for row in DOMAINS}
+    if _unknown:
+        raise ValueError(f"Unknown CLM_PARITY_DOMAINS entries: {sorted(_unknown)}")
+    DOMAINS = [row for row in DOMAINS if row[0] in _selected_domains]
 
 # (julia, fortran, label, group, unit-floor).
 VARS = [

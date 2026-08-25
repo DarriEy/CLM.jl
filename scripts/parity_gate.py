@@ -12,6 +12,10 @@ skipped and reported as pending.
 
   python3 scripts/parity_gate.py            # full report
   python3 scripts/parity_gate.py --brief    # one-line status + undocumented list
+  python3 scripts/parity_gate.py --check    # return nonzero unless parity is achieved
+
+Set CLM_PARITY_DATA to the directory containing Julia result files and
+CLM_PARITY_DOMAINS to a comma-separated frozen subset when running a qualification gate.
 """
 import os, sys
 import numpy as np
@@ -21,6 +25,7 @@ from parity_config import (DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series, gat
                            TEMP_VARS, DOCUMENTED_EXCEPTIONS)
 
 BRIEF = "--brief" in sys.argv
+CHECK = "--check" in sys.argv
 
 pending, per_dom = [], []
 undocumented, documented_hit = [], []
@@ -111,4 +116,4 @@ else:
     print("SCIENTIFIC PARITY: NOT YET — " + "; ".join(reason) + ".")
     print("(The 10% coverage scorecard remains green; that is breadth, not the parity bar.)")
 print("=" * 78)
-sys.exit(0)
+sys.exit(0 if achieved or not CHECK else 1)

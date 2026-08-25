@@ -69,15 +69,23 @@ which is insufficient for publication.
 
 ## Validation ledger
 
-The initial clean-clone full CPU test is running at the time this file was created. Its
-command is:
+The initial clean-clone full CPU test used this command:
 
 ```sh
 julia --project=. --check-bounds=yes -e 'using Test; include("test/runtests.jl")'
 ```
 
-Record completion, duration, complete summary, environment lock checksum, and log checksum
-here only after the run finishes. Historic pass totals are not release evidence.
+Result on Julia 1.12.6 / macOS 26.5 / Apple M1:
+
+- exit status: 0;
+- elapsed test time reported by Julia: 12 min 14.2 s;
+- 27,503 passed, 0 failed, 16 broken, 27,519 total;
+- all 16 broken results were external-data gates because `SYMFLUENCE_DATA` was not set.
+
+This is the clean-source/no-data baseline, not strict release qualification. A second run
+with `SYMFLUENCE_DATA` set and `CLM_REQUIRE_TESTDATA=1` is required so every missing fixture
+is fatal. The generated Julia 1.12.6 Manifest used for this qualification has SHA-256
+`94ea12b7e1a720df91489ef969b3a9ef6f1ecd485a1563998043618726d258b3`.
 
 The exact base commit previously completed GitHub Actions run
 [`30999270755`](https://github.com/DarriEy/CLM.jl/actions/runs/30999270755) successfully

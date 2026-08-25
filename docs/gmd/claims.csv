@@ -1,6 +1,6 @@
 claim_id,proposed_claim,status,required_experiment,evidence_artifact,scope_notes
-C01,Scoped Julia CPU implementation agrees with declared Fortran CLM5 reference,TBD,E1-E4,TBD,Single-column biogeophysics only
-C02,Annual simulations complete with conservation checks active,TBD,E3-E4,TBD,All reported sites must complete
+C01,Scoped Julia CPU implementation agrees with declared Fortran CLM5 reference,FAIL-QUALIFICATION,E1-E4,docs/gmd/qualification_2026-08-25.md,204/207 strict cells; three unexplained failures
+C02,Annual simulations complete with conservation checks active,PASS-QUALIFICATION,E3-E4,docs/gmd/qualification_2026-08-25.md,Three sites complete; archive provenance still required
 C03,Differentiable formulation has verified derivatives,TBD,E5-E6,TBD,Only prespecified parameters and states
 C04,Smoothing introduces quantified acceptable bias,TBD,E5,TBD,Threshold requires scientific review
 C05,Gradient calibration recovers synthetic parameters,TBD,E7,TBD,Synthetic twin minimum

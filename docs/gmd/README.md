@@ -27,7 +27,8 @@ that satisfies the same evidence requirements.
 - [ ] Full CPU suite passes from a clean environment.
 - [ ] Exact upstream CTSM source tag/commit and configuration identified.
 - [ ] Experiment protocol reviewed and frozen.
-- [ ] Annual qualification runs complete without disabled conservation checks.
+- [x] Three-site annual qualification runs complete without disabled conservation checks.
+- [ ] Three-site strict scientific-parity gate passes (currently 204/207 cells).
 - [ ] One machine-readable results index drives all paper claims.
 - [ ] Clean-room reproduction succeeds on Linux.
 - [ ] Code, inputs, outputs, and analysis have licence/redistribution clearance.
