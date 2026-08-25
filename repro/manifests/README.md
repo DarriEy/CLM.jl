@@ -1,0 +1,9 @@
+# Artifact manifests
+
+The definitive campaign will place SHA-256 manifests here for configuration, input,
+reference, result, analysis, and figure artifacts. Large artifacts belong in the linked
+persistent experiment archive, not in Git.
+
+Each manifest row must include an artifact ID, role, relative archive path, byte count,
+SHA-256 digest, licence/redistribution status, source citation, and producing run ID where
+applicable.
