@@ -61,8 +61,8 @@ end
     have_inputs = isfile(_BOW_FS) && isfile(_BOW_FP) && isfile(_BOW_FORC) &&
                   isfile(_SNOWOPT) && isfile(_SNOWAGE)
     if !have_inputs
-        @info "run_clm!: Bow inputs absent — skipping" _BOW_FS _BOW_FORC
-        @test_skip have_inputs
+        testdata_missing("run_clm! standalone harness", _BOW_FS, _BOW_FP, _BOW_FORC,
+                         _SNOWOPT, _SNOWAGE)
     else
         tmp = mktempdir()
         hist1 = joinpath(tmp, "run1.clm2.h0.nc")

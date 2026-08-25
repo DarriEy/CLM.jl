@@ -182,11 +182,11 @@ using Test, CLM
     # GATED: the reference h0 and the forcing/param files are machine-local.
     # Runs in its own module (the harness mutates module globals).
     # ------------------------------------------------------------------
+    include(joinpath(@__DIR__, "testdata.jl"))
     @testset "lake TSA matches Fortran per step (gated)" begin
         script = joinpath(@__DIR__, "..", "scripts", "fortran_parity_lake.jl")
         if !isfile(script)
-            @info "lake parity harness absent, skipping"
-            @test_skip isfile(script)
+            testdata_missing("lake reference-temperature parity harness", script)
         else
             mod = Module(:LAKE_REF2M)
             Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -194,8 +194,7 @@ using Test, CLM
             main_fn = Base.invokelatest(getfield, mod, :main)
             rep = Base.invokelatest(main_fn; nsteps=24)
             if rep === missing
-                @info "lake reference inputs absent, skipping"
-                @test_skip rep === true
+                testdata_unavailable("lake reference-temperature Fortran parity")
             else
                 jt = rep.jv["TSA"]; ft = rep.fv["TSA"]
                 @test length(jt) == 24

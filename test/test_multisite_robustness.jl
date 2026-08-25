@@ -17,6 +17,8 @@
 # ==========================================================================
 using Test, CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Multi-site driver robustness (gated)" begin
     sites = [
         ("Aripuanã (tropical)",  "multisite_smoke.jl",            :multisite_smoke_ok),
@@ -26,8 +28,7 @@ using Test, CLM
         script = joinpath(@__DIR__, "..", "scripts", fname)
         @testset "$label" begin
             if !isfile(script)
-                @info "multisite robustness: harness absent, skipping" label script
-                @test_skip isfile(script)
+                testdata_missing("multisite robustness harness ($label)", script)
                 continue
             end
             # fresh module: each harness has its own `main`/`set_*_forcing!`
@@ -37,8 +38,7 @@ using Test, CLM
             smoke_fn = Base.invokelatest(getfield, mod, okfn)
             ok = Base.invokelatest(smoke_fn; nsteps=6)
             if ok === missing
-                @info "multisite robustness: site data absent, skipping" label
-                @test_skip ok === true
+                testdata_unavailable("multisite robustness ($label)")
             else
                 @test ok === true   # both use_cn=false and use_cn=true ran with no NaN/Inf
             end

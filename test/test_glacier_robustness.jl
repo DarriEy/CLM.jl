@@ -27,11 +27,12 @@
 # ==========================================================================
 using Test, CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Glacier (istice) driver robustness (gated)" begin
     script = joinpath(@__DIR__, "..", "scripts", "glacier_smoke.jl")
     if !isfile(script)
-        @info "glacier robustness: harness absent, skipping" script
-        @test_skip isfile(script)
+        testdata_missing("glacier robustness harness", script)
     else
         mod = Module(:GLAC_SMOKE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -39,8 +40,7 @@ using Test, CLM
         smoke_fn = Base.invokelatest(getfield, mod, :glacier_smoke_result)
         r = Base.invokelatest(smoke_fn; nsteps=24)
         if r === missing
-            @info "glacier robustness: inputs absent, skipping"
-            @test_skip r !== missing
+            testdata_unavailable("glacier robustness")
         else
             # The gate is only meaningful if the snow-layer path was exercised.
             @test r.layers_formed          # snl went negative at least once

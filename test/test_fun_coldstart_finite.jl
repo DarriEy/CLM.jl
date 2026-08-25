@@ -104,8 +104,8 @@ end
 
     if !isfile(FSURDAT) || !isfile(FPARAM) || !isfile(FFORCING) ||
        !isfile(FSNOWOPT) || !isfile(FSNOWAGE)
-        @info "FUN cold-start finiteness: Bow data absent, skipping" FSURDAT FFORCING
-        @test_skip isfile(FSURDAT)
+        testdata_missing("FUN cold-start finiteness", FSURDAT, FPARAM, FFORCING,
+                         FSNOWOPT, FSNOWAGE)
     else
         # --- real forcing: FUN cold start must stay finite and photosynthesize ---
         av, npg, lc, psn, lai = Base.invokelatest(_fun_coldstart_run;

@@ -34,6 +34,7 @@
 # against a real daylit stand.
 # ==========================================================================
 using Test
+include(joinpath(@__DIR__, "testdata.jl"))
 
 # Brings in CLM, `const _C = CLM`, `const DATA`, and build() + the census /
 # total_site_carbon / max_dbh helpers. The script guards its own entrypoint
@@ -50,8 +51,7 @@ include(joinpath(@__DIR__, "..", "scripts", "fates_longhorizon.jl"))
 
     if !(isfile(fsurdat) && isfile(paramfile) && isfile(forcing))
         # Data-dependent test; nothing to fake. Report clearly + skip.
-        @info "FATES photosynthesis test SKIPPED — Aripuana stand data not present" fsurdat paramfile forcing
-        @test_skip true
+        testdata_missing("FATES daytime photosynthesis", fsurdat, paramfile, forcing)
     else
         # ---- stand-level probes over the FATES site linked list ----
         stand_gpp(site) = begin           # Σ cohort gpp_tstep × n  [kgC/m2/step]

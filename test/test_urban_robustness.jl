@@ -20,11 +20,12 @@
 # ==========================================================================
 using Test, CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Urban (isturb) driver robustness (gated)" begin
     script = joinpath(@__DIR__, "..", "scripts", "urban_smoke.jl")
     if !isfile(script)
-        @info "urban robustness: harness absent, skipping" script
-        @test_skip isfile(script)
+        testdata_missing("urban robustness harness", script)
     else
         mod = Module(:URB_SMOKE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -32,8 +33,7 @@ using Test, CLM
         smoke_fn = Base.invokelatest(getfield, mod, :urban_smoke_ok)
         ok = Base.invokelatest(smoke_fn; nsteps=6)
         if ok === missing
-            @info "urban robustness: inputs absent, skipping"
-            @test_skip ok === true
+            testdata_unavailable("urban robustness")
         else
             @test ok === true   # driver ran 6 steps on urban land units, all finite
         end

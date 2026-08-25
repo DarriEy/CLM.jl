@@ -82,11 +82,11 @@ using Test, CLM
     # GATED: the reference h0 and the forcing/param files are machine-local.
     # Runs in its own module (the harness mutates module globals).
     # ------------------------------------------------------------------
+    include(joinpath(@__DIR__, "testdata.jl"))
     @testset "lake freezes and picks up z0frzlake, vs Fortran (gated)" begin
         script = joinpath(@__DIR__, "..", "scripts", "fortran_parity_lake.jl")
         if !isfile(script)
-            @info "lake parity harness absent, skipping"
-            @test_skip isfile(script)
+            testdata_missing("lake eddy-diffusivity parity harness", script)
         else
             mod = Module(:LAKE_EDDY_KS)
             Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -94,8 +94,7 @@ using Test, CLM
             main_fn = Base.invokelatest(getfield, mod, :main)
             rep = Base.invokelatest(main_fn; nsteps=16)
             if rep === missing
-                @info "lake reference inputs absent, skipping"
-                @test_skip rep === true
+                testdata_unavailable("lake eddy-diffusivity Fortran parity")
             else
                 # --- the fix itself, as a value in 1/m -------------------
                 # ks was IDENTICALLY ZERO at every step before this fix.

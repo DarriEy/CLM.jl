@@ -16,12 +16,12 @@
 # (the harness mutates module globals).
 # ==========================================================================
 using Test, CLM
+include(joinpath(@__DIR__, "testdata.jl"))
 
 @testset "Lake column water balance closes (gated)" begin
     script = joinpath(@__DIR__, "..", "scripts", "lake_water_balance.jl")
     if !isfile(script)
-        @info "lake water balance: harness absent, skipping" script
-        @test_skip isfile(script)
+        testdata_missing("lake water-balance harness", script)
     else
         mod = Module(:LAKE_WB)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -33,8 +33,7 @@ using Test, CLM
         report_fn = Base.invokelatest(getfield, mod, :lake_water_balance_report)
         rep = Base.invokelatest(report_fn; nsteps=168)
         if rep === missing
-            @info "lake water balance: inputs absent, skipping"
-            @test_skip rep === true
+            testdata_unavailable("lake water-balance closure")
         else
             @test rep.all_finite                       # errh2o is a number, not NaN
             @test rep.endwb_ne_begwb                   # endwb genuinely computed

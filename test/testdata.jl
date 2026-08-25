@@ -158,4 +158,22 @@ function testdata_missing(what::AbstractString, paths::AbstractString...)
     return true
 end
 
+"""
+    testdata_unavailable(what) -> Bool
+
+Record a data-dependent harness that returned no result when it cannot expose the
+individual missing paths. Strict mode turns this into a failure; normal development
+records a visible skip. Prefer `testdata_missing` whenever paths are known.
+"""
+function testdata_unavailable(what::AbstractString)
+    if require_testdata()
+        @error "CLM_REQUIRE_TESTDATA=1 but test data for $what is unavailable"
+        @test "test data available for $what" == "UNAVAILABLE"
+    else
+        @warn "Skipping $what: required input data unavailable (set CLM_REQUIRE_TESTDATA=1 to make this fatal)"
+        @test_skip "test data available for $what"
+    end
+    return true
+end
+
 end # isdefined guard

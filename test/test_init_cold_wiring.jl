@@ -162,11 +162,12 @@ end
 # urban / CN) live in scripts/initcold_nan_probe.jl, which prints the full
 # per-domain table.
 # ---------------------------------------------------------------------------
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "InitCold runtime: no NaN on active columns/patches (gated)" begin
     probe = joinpath(@__DIR__, "..", "scripts", "initcold_nan_probe.jl")
     if !isfile(probe)
-        @info "InitCold runtime: probe harness absent, skipping"
-        @test_skip isfile(probe)
+        testdata_missing("InitCold runtime probe", probe)
     else
         mod = Module(:INITCOLD_PROBE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -175,8 +176,7 @@ end
         BOW_FP = Base.invokelatest(getfield, mod, :BOW_FP)
 
         if !(isfile(BOW_FS) && isfile(BOW_FP))
-            @info "InitCold runtime: Bow inputs absent, skipping" BOW_FS BOW_FP
-            @test_skip isfile(BOW_FS)
+            testdata_missing("InitCold runtime Bow inputs", BOW_FS, BOW_FP)
         else
             run_domain_fn = Base.invokelatest(getfield, mod, :run_domain)
             r = Base.invokelatest(run_domain_fn, "BOW";

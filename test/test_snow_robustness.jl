@@ -11,11 +11,12 @@
 # ==========================================================================
 using Test, CLM
 
+include(joinpath(@__DIR__, "testdata.jl"))
+
 @testset "Snow / cold-soil driver robustness (gated)" begin
     script = joinpath(@__DIR__, "..", "scripts", "snow_smoke.jl")
     if !isfile(script)
-        @info "snow robustness: harness absent, skipping" script
-        @test_skip isfile(script)
+        testdata_missing("snow robustness harness", script)
     else
         mod = Module(:SNOW_SMOKE)
         Core.eval(mod, :(using Test, CLM, NCDatasets, Dates, Printf))
@@ -23,8 +24,7 @@ using Test, CLM
         smoke_fn = Base.invokelatest(getfield, mod, :snow_smoke_ok)
         ok = Base.invokelatest(smoke_fn; nsteps=240)
         if ok === missing
-            @info "snow robustness: inputs absent, skipping"
-            @test_skip ok === true
+            testdata_unavailable("snow robustness")
         else
             @test ok === true   # 240 steps finite AND a multi-layer snowpack formed
         end
