@@ -8,9 +8,9 @@
 # history to paper/data/julia_clm_<domain>_<year>.nc. The plot script
 # (paper/plot_parity_domain.py) compares it to that domain's Fortran h0.
 #
-#   DOMAIN=Stillwater julia +1.12 --project=. scripts/parity_run_domain.jl
-#   DOMAIN=Aripuana   julia +1.12 --project=. scripts/parity_run_domain.jl
-#   DOMAIN=Bow        julia +1.12 --project=. scripts/parity_run_domain.jl
+#   DOMAIN=Stillwater CLM_OUTPUT_DIR=/path/to/results julia +1.12 --project=. scripts/parity_run_domain.jl
+#   DOMAIN=Aripuana   CLM_OUTPUT_DIR=/path/to/results julia +1.12 --project=. scripts/parity_run_domain.jl
+#   DOMAIN=Bow        CLM_OUTPUT_DIR=/path/to/results julia +1.12 --project=. scripts/parity_run_domain.jl
 #
 # All three reference runs share the Bow lnd_in physics config (use_hydrstress +
 # use_luna, Jackson1996 rooting, Vionnet2012 + wind-dependent snow density,
@@ -165,7 +165,7 @@ yr  = cfg.year
 
 fsurdat   = joinpath(cfg.caldir, "surfdata_clm.nc")
 paramfile = joinpath(cfg.caldir, "clm5_params.nc")
-outdir    = abspath(joinpath(@__DIR__, "..", "paper", "data"))
+outdir    = abspath(get(ENV, "CLM_OUTPUT_DIR", joinpath(@__DIR__, "..", "paper", "data")))
 fhistory  = joinpath(outdir, "julia_clm_$(lowercase(DOM))_phs_$(yr).nc")
 isdir(outdir) || mkpath(outdir)
 
