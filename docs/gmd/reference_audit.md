@@ -230,3 +230,13 @@ therefore moves upstream to the snow-cover-fraction update. For aerodynamic resi
 `ram1=um/ustar^2` and `uaf=um*sqrt(1/(ram1*um))`; the traced pre-iteration `um` agrees,
 so `uaf` reduces to the already-different incoming `ustar`. The next aerodynamic
 boundary is the initial Monin–Obukhov solve and its roughness/displacement inputs.
+
+Raw `frac_sno` equals `frac_sno_eff` in both models at canopy entry, so the effective
+fraction mapping is not responsible. Snow depth differs by only `1.35e-8 m`, whereas
+`int_snow` is `932.43263 mm` in Julia and `932.70099 mm` in CTSM. The Julia diagnostic
+`h2osno_total_col` is still zero at this boundary, but it is not the value used by
+`handle_new_snow!`: that routine computes a local total directly from the matched snow
+layer masses. The next defensible boundary is therefore canopy interception's
+`qflx_snow_grnd`, followed by `newsnow` and `bifall`, before the snow-cover-fraction
+update. A separate diagnostic-state audit should decide whether the stale stored total
+needs production synchronization.

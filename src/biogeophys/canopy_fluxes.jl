@@ -2074,7 +2074,7 @@ function canopy_fluxes_core!(
             _Tcp = eltype(wtga)
             open(CANOPY_PERITER_PATH[], itlef == 0 ? "w" : "a") do io
                 if itlef == 0
-                    println(io, "nstep itlef p t_veg dt_veg del del2 efe efsh ustar um obu wtl0 wtg0 wtga wtgaq qsatl qsatldT dc1 dc2 rssun rssha tlbef sabv air bir cir qg forc_q rb uaf ram1 qg_snow qg_soil qg_h2osfc frac_sno_eff frac_h2osfc")
+                    println(io, "nstep itlef p t_veg dt_veg del del2 efe efsh ustar um obu wtl0 wtg0 wtga wtgaq qsatl qsatldT dc1 dc2 rssun rssha tlbef sabv air bir cir qg forc_q rb uaf ram1 qg_snow qg_soil qg_h2osfc frac_sno_eff frac_h2osfc frac_sno snow_depth int_snow h2osno_total")
                 end
                 for fi in 1:fn
                     p = filterp[fi]
@@ -2094,7 +2094,9 @@ function canopy_fluxes_core!(
                         forc_q_col[c], rb[p], frictionvel.uaf_patch[p],
                         frictionvel.ram1_patch[p], waterdiagbulk.qg_snow_col[c],
                         waterdiagbulk.qg_soil_col[c], waterdiagbulk.qg_h2osfc_col[c],
-                        waterdiagbulk.frac_sno_eff_col[c], waterdiagbulk.frac_h2osfc_col[c])
+                        waterdiagbulk.frac_sno_eff_col[c], waterdiagbulk.frac_h2osfc_col[c],
+                        waterdiagbulk.frac_sno_col[c], waterdiagbulk.snow_depth_col[c],
+                        waterstatebulk.int_snow_col[c], waterdiagbulk.h2osno_total_col[c])
                     println(io, join(row, " "))
                 end
             end
