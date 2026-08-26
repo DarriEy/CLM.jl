@@ -205,3 +205,11 @@ injecting them before the ordinary `surface_radiation!` call reproduces the same
 The temporary direct-`SABV` hook has therefore been removed from production source.
 The remaining discrepancy is small but still above the frozen strict threshold, so the
 comparison remains formally failing and no exception is claimed.
+
+The first remaining photosynthesis residual is now localized to canopy humidity and
+boundary conductance. Julia enters the tree call with `QAF=0.0065372678704` and
+`gbmol=802654.6136`, versus CTSM `0.0065374042231` and `802655.6602`. A direct
+`QAF` carry experiment leaves the result unchanged because `CanopyFluxes` overwrites
+that state before photosynthesis using `(forc_q + qg)/2` in both codes. Consequently,
+`QAF` was not retained as an oracle field. The next comparison must trace `qg` and its
+ground saturation inputs at canopy entry, plus the independent `rb`-to-`gbmol` path.

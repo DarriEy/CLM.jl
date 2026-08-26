@@ -141,3 +141,11 @@ canopy_trace_executable_sha256 = "c44d3057f77b31b80d153abd605cbfa03efffe1cc36b70
 
 [current_blocker]
 description = "The oracle now carries bulk two-band FABD/FABI. Replaying them before the normal surface_radiation! call reconstructs SABV without a direct override, restores the CTSM convergence shape (18 iteration records in each implementation), and nearly restores instantaneous BTRAN: Julia/CTSM are 0.05617329895/0.05617311246 for the tree and 0.1276399865/0.1276477601 for grass. Absolute errors are 1.86e-7 and 7.77e-6. Localize the remaining O(1e-5 to 1e-4) relative iteration deltas; no science exception has been added."
+
+[residual_localization]
+first_tree_qaf_julia = 0.0065372678703830385
+first_tree_qaf_fortran = 0.006537404223121
+first_tree_gbmol_julia = 802654.6136132295
+first_tree_gbmol_fortran = 802655.6601503
+qaf_direct_carry_changes_result = false
+description = "The first residual photosynthesis call differs in QAF by 1.36e-7 and boundary conductance by about 1.3e-6 relative. Directly carrying QAF is ineffective because both implementations initialize it inside CanopyFluxes as (forc_q + qg)/2 before photosynthesis. The next boundary to compare is qg and its ground saturation/humidity inputs; independently localize the rb-to-gbmol path."
