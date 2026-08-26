@@ -1,0 +1,47 @@
+name = "bow-btran-2003-04-29"
+status = "build-toolchain-blocked"
+
+[source]
+repository = "https://github.com/ESCOMP/CTSM.git"
+tag = "ctsm5.3.012"
+tag_object = "ae99861566e6aa8fdbdfff0f2bbe3fdad60ba7bb"
+commit = "ab466d6f9789ca3df2c72bda46cf7afed2d04102"
+externals_manifest = "repro/manifests/ctsm5.3.012-externals.txt"
+
+[case]
+compset = "I2000Clm50SpRs"
+resolution = "f09_g17"
+machine = "homebrew"
+compiler = "gnu"
+mpi = "mpich"
+tasks = 1
+threads = 1
+python = "3.11"
+start_type = "startup"
+start_date = "2003-01-01"
+target_window_start = "2003-04-29T00:00:00"
+target_window_end = "2003-05-07T00:00:00"
+note = "Run from the January restart to preserve the trajectory feeding the daily minimum. A one-step shared-state replay is then generated at the worst window."
+
+[instrumentation]
+module = "scripts/validation/fortran_pdump/pdumpMod.F90"
+module_sha256 = "1829d5425d7018d0532ead86a1190f8d222d9e48ba8eb59ae2dc16e89a5a7da9"
+driver_hooks = "scripts/validation/fortran_pdump/clm_driver.hooks.diff"
+driver_hooks_sha256 = "302df477afd6214578e8263b6759e23c8303a7a525b217bf2c52d935721a0c28"
+required_additions = ["instantaneous patch BTRAN", "vegwp", "SMP", "HK", "root conductance", "LUNA 10-day state"]
+state_neutrality_required = true
+
+[staged_inputs]
+lnd_in_sha256 = "2f90e823bef7418b69c19040e2cef61c0c1201d74a9c3ce132720482165e438f"
+nuopc_runconfig_sha256 = "99530cd6119506e24f6b8d6a6de55e84c3c4b0c101f25aa15bf0d3c6ba9e0489"
+january_restart_sha256 = "b0385bde80091ebf744d5489b696c9f5c6874210529e8dfefd1a90616f1ce604"
+
+[acceptance]
+identical_initial_state = true
+compare_instantaneous_not_daily_history = true
+thresholds_frozen = true
+no_exception_until_oracle_passes = true
+
+[current_blocker]
+description = "CIME case creation succeeds under Python 3.11, but stock build stops before compilation because ESMFMKFILE is not configured. The only discovered ESMF installation is an unactivated micromamba package and must not be treated as a reproducible toolchain."
+

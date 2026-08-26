@@ -66,3 +66,23 @@ Build one parameterized reference pipeline that starts from the verified CTSM ta
 Historic references may be used for debugging, but definitive manuscript claims should use
 newly generated references from this pipeline or provide a documented equivalence audit
 that is equally strong.
+
+## Clean-source execution update — 2026-08-26
+
+- `./bin/git-fleximod update` completed successfully in the clean tagged checkout.
+- The recursive source hashes are frozen in
+  `repro/manifests/ctsm5.3.012-externals.txt`.
+- The Bow BTRAN oracle specification and checksummed staged inputs are frozen in
+  `repro/configs/bow_btran_oracle.toml`.
+- CIME fails under the system Python because `distutils` is unavailable. Running under an
+  explicit uv-managed Python 3.11 creates the case successfully.
+- A clean `I2000Clm50SpRs`, `f09_g17`, one-task case reached build namelist generation and
+  stopped before compilation because `ESMFMKFILE` is unset. Compiler, MPICH, netCDF-C, and
+  netCDF-Fortran are installed; a reproducible ESMF installation/activation remains the
+  active build-toolchain blocker.
+- The staged archive has a January 2003 Bow restart and complete run namelists, but not the
+  April 29 shared-state dump cited by historical notes. The new pipeline must run the
+  January trajectory through the target window, then emit the shared-state oracle.
+
+No BTRAN exception has been added. The annual consumers support the daily-minimum
+amplification hypothesis, but only the new identical-state oracle can close the claim.

@@ -1,0 +1,23 @@
+# CTSM ctsm5.3.012 recursive source manifest
+# Generated from a clean checkout with ./bin/git-fleximod update on 2026-08-26.
+# Leading '-' denotes optional or nested worktrees intentionally not populated.
+ctsm ab466d6f9789ca3df2c72bda46cf7afed2d04102
+ccs_config 69a958581ecd2d32ee9cb1c38bcd3847b8b920bf
+cime 422ddaa770a3cea6e83a60c9700ebce77acaceed
+cime/CIME/non_py/cprnc 9276b219750881633d8673c72ec80ac821f96d82
+components/cdeps 7b0b3a827241c53d296ec877cb1f59966bf5e5bf
+components/cdeps/fox 4ff17b4a1a66b4ae0fbe9a2067503cb4b4c292c0
+components/cdeps/share/genf90 4816965ba946731352bad195b7d946a5fe682ff5
+components/cism c84cc9f5b3103766a35d0a7ddd5e9dbd7deae762
+components/cism/source_cism ab9de2c3cf64554f4024515bd2703cfef76c6cb1
+components/cmeps 47fb4e633a76ec6d60969b1af751f90790387246
+components/mizuRoute 81c720c7ee51f9c69f2934f696078c42f4493565
+components/mosart e2ffe00004cc416cfc8bcfae2a949474075c1d1f
+components/rtm b3dfcfbba58c151ac5a6ab513b3515ef3deff798
+libraries/mct 82b0071e69d14330b75d23b0bc68543ebea9aadc
+libraries/parallelio f52ade075619b32fa141993b5665b0fe099befc2
+share 4b9dc4871a259f00f35bb47708d876cb7dcdf75c
+src/fates e3e7d2cd86a66f8ca0e8f6dc4a823246a2bdb95
+src/fates/tools/landusedata 5b357329214ac3b647daa3d471fb9fac9c116a54
+optional:doc/doc-builder ab9bc93dd09d0173f8097c7a18c7d061c1cd3b79 not-populated
+
