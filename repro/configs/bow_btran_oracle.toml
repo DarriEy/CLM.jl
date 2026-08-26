@@ -112,7 +112,7 @@ bulk_fabd_fabi_replayed_before_surface_radiation = true
 btran_pft2_absolute_error = 9.777664788934715e-13
 btran_pft3_absolute_error = 1.0272300575542292e-5
 julia_canopy_iteration_trace = "btran_canopy_periter_julia_n2901.txt (generated in the run directory)"
-julia_canopy_iteration_trace_sha256 = "8c6c99d3e1c3ba1f3df900fbca0f50672f185597c5bc7d09a8718f07553388db"
+julia_canopy_iteration_trace_sha256 = "e2459fd66a2a4615cf69dc1b67ed6a07441497d7ea64b3662d6110a5cee7b2b3"
 canopy_iteration_records_fortran = 18
 canopy_iteration_records_julia = 18
 julia_final_gs_mol_sun_pft2 = 741188.399469082
@@ -140,7 +140,7 @@ fortran_canopy_iteration_trace_sha256 = "7dd4263b2e4ccaab85412e5cffe3a1e34f55722
 canopy_trace_executable_sha256 = "568257be0cb9f13c0f8ef9181b9e29dad69ac906e1e0ea5f3ec50c6d51650527"
 
 [current_blocker]
-description = "The oracle now also carries previous-step QFLX_SNOW_DRAIN. This makes canopy-entry qg, frac_sno, rb, uaf, and int_snow exact and reduces tree BTRAN to 9.78e-13 absolute error. Grass remains high-sensitivity at 1.03e-5 absolute error; the first remaining physical-state difference is a 1.38e-8 m post-HandleNewSnow snow-depth residual. Localize newsnow density/bifall arithmetic before considering any tolerance or science exception."
+description = "The oracle carries previous-step QFLX_SNOW_DRAIN, and the comparator now matches CTSM's wind-dependent fresh-snow-density namelist control. Canopy-entry snow, humidity, radiation, and aerodynamic states are exact; tree BTRAN differs by 9.78e-13. Grass remains high-sensitivity at 1.03e-5 absolute error, amplified from O(1e-8) iteration-one canopy-energy arithmetic. Quantify cross-language numerical sensitivity before freezing a justified submission tolerance; no science exception has been added."
 
 [residual_localization]
 first_tree_qaf_julia = 0.0065372678703830385
@@ -179,5 +179,10 @@ qflx_snow_drain_fortran = 1.5656422644052498e-5
 previous_step_snow_drain_replayed = true
 post_handle_new_snow_frac_sno_identical = true
 post_handle_new_snow_int_snow_identical = true
-post_handle_new_snow_snow_depth_absolute_error = 1.3765947493027397e-8
-next_snow_boundary = "HandleNewSnow newsnow density and bifall arithmetic"
+wind_dependent_snow_density_matches_ctsm_namelist = true
+new_snow_bifall_julia = 170.42278497089904
+new_snow_bifall_fortran = 170.42278497089904
+post_handle_new_snow_snow_depth_absolute_error = 0.0
+first_tree_efe_absolute_error = 2.948283395198814e-9
+first_grass_efe_absolute_error = 1.0511179482364241e-8
+next_snow_boundary = "closed: all traced HandleNewSnow inputs and outputs match"

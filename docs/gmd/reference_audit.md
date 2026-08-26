@@ -259,3 +259,19 @@ the snow-depth increment into `newsnow`, new-snow density, and `bifall` arithmet
 The stored `h2osno_total_col` diagnostic is also stale in Julia at this boundary, but
 the snow-cover calculation uses a locally reconstructed layer total, so it is not yet
 identified as causal.
+
+Instrumentation inside `UpdateQuantitiesForNewSnow` closes that snow boundary. All
+inputs match, but the first Julia diagnostic run computed `bifall=169.1577526 kg m-3`
+versus CTSM's `170.4227850 kg m-3`. The comparator had not enabled the CTSM namelist
+setting `wind_dependent_snow_density=.true.`. Enabling the corresponding existing Julia
+control makes `bifall` and the post-`HandleNewSnow` snow depth bit-for-bit identical;
+the production default is unchanged. BTRAN itself is unchanged, proving that the tiny
+snow-depth residual was correlated rather than causal.
+
+With the snow, humidity, radiation, and initial aerodynamic boundaries exact, the
+remaining divergence begins in roundoff-scale canopy-energy arithmetic: iteration-one
+`efe` differs by `2.95e-9` for the tree and `1.05e-8` for grass, while first-iteration
+stomatal resistance is exact to displayed precision. The grass hydraulic trajectory
+amplifies these differences to a `1.03e-5` BTRAN difference. Any submission tolerance
+must therefore be justified as cross-language numerical sensitivity, not as agreement
+obtained by omitting a known state or namelist control.

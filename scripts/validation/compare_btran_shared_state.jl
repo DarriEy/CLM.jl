@@ -81,6 +81,7 @@ end
 
 step_date = oracle_datetime(ORACLE_BEFORE)
 println("BTRAN shared-state comparison: nstep=$NSTEP start=$step_date")
+CLM.snow_hydrology_set_control_for_testing!(wind_dep_snow_density=true)
 photo_trace = joinpath(RUN_DIR, "btran_photo_julia_n$(NSTEP).txt")
 canopy_trace = joinpath(RUN_DIR, "btran_canopy_periter_julia_n$(NSTEP).txt")
 isfile(photo_trace) && rm(photo_trace)
