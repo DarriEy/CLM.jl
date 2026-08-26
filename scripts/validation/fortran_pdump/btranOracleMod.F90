@@ -42,6 +42,7 @@ contains
     integer :: v_laisun, v_laisha, v_elai, v_esai, v_tsai, v_fdry
     integer :: v_rho, v_pbot, v_thm, v_qtran, v_bsun, v_bsha
     integer :: v_nrad, v_tlaiz, v_fsunz, v_fabdsun, v_fabdsha, v_fabisun, v_fabisha
+    integer :: v_vcintsun, v_vcintsha
     character(len=256) :: fname
     real(r8), allocatable :: p1(:), pveg(:,:), pcana(:,:), cground(:,:), psoil(:,:)
     integer, allocatable :: pi1(:)
@@ -120,6 +121,8 @@ contains
     ier = nf90_def_var(ncid, 'FABD_SHA_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabdsha)
     ier = nf90_def_var(ncid, 'FABI_SUN_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabisun)
     ier = nf90_def_var(ncid, 'FABI_SHA_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabisha)
+    ier = nf90_def_var(ncid, 'VCMAXCINTSUN', NF90_DOUBLE, (/dpft/), v_vcintsun)
+    ier = nf90_def_var(ncid, 'VCMAXCINTSHA', NF90_DOUBLE, (/dpft/), v_vcintsha)
     ier = nf90_enddef(ncid)
 
     ier = nf90_put_var(ncid, v_nstep, nstep)
@@ -170,6 +173,8 @@ contains
     call pft2d(bounds, nlevcan, surfalb_inst%fabd_sha_z_patch, pcana); ier = nf90_put_var(ncid, v_fabdsha, pcana)
     call pft2d(bounds, nlevcan, surfalb_inst%fabi_sun_z_patch, pcana); ier = nf90_put_var(ncid, v_fabisun, pcana)
     call pft2d(bounds, nlevcan, surfalb_inst%fabi_sha_z_patch, pcana); ier = nf90_put_var(ncid, v_fabisha, pcana)
+    call pft1d(bounds, surfalb_inst%vcmaxcintsun_patch, p1); ier = nf90_put_var(ncid, v_vcintsun, p1)
+    call pft1d(bounds, surfalb_inst%vcmaxcintsha_patch, p1); ier = nf90_put_var(ncid, v_vcintsha, p1)
 
     ier = nf90_close(ncid)
     if (ier == NF90_NOERR) then

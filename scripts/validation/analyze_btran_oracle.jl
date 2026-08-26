@@ -13,6 +13,7 @@ const FIELDS = (
     "FORC_PBOT", "THM", "QFLX_TRAN_VEG", "BSUN", "BSHA",
     "NRAD", "TLAI_Z", "FSUN_Z", "FABD_SUN_Z", "FABD_SHA_Z",
     "FABI_SUN_Z", "FABI_SHA_Z",
+    "VCMAXCINTSUN", "VCMAXCINTSHA",
 )
 
 function read_oracle(path)

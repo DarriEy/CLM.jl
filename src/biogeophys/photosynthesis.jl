@@ -5365,9 +5365,9 @@ function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
     # byte-identical. Appends one block per pass-3 call (i.e. per canopy leaf-temp
     # Newton iteration) so the Julia trajectory lines up with the Fortran trajectory.
     if PHS_PHOTO_DEBUG[]
-        _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun,
+        _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun, rh_leaf_sha,
             eair, esat_tv, cair, oair, qsatl, qaf, laisun, laisha, elai, esai,
-            fdry, forc_rho, forc_pbot, tgcm, par_z_sun_in, jmax_z_local,
+            fdry, forc_rho, forc_pbot, tgcm, par_z_sun_in, par_z_sha_in, jmax_z_local,
             nrad, mask_patch, col_of_patch)
     end
     return nothing
@@ -5376,9 +5376,9 @@ end
 # Read-only dump helper for the PHS photosynthesis-internals parity localization.
 # Reads only already-converged ps arrays + pass-3 inputs; recomputes je_sun the same
 # way the body does. Writes nothing into model state.
-function _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun,
+function _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun, rh_leaf_sha,
         eair, esat_tv, cair, oair, qsatl, qaf, laisun, laisha, elai, esai,
-        fdry, forc_rho, forc_pbot, tgcm, par_z_sun_in, jmax_z_local,
+        fdry, forc_rho, forc_pbot, tgcm, par_z_sun_in, par_z_sha_in, jmax_z_local,
         nrad, mask_patch, col_of_patch)
     fnps = params_inst.fnps; theta_psii = params_inst.theta_psii
     row(p, iv, key, vals...) = string("JPHOTO p=", p, " iv=", iv, " ", key, "= ",
@@ -5413,6 +5413,22 @@ function _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun,
                 println(io, row(p, iv, "an_gsmol_bsun_rs_sun",
                                ps.an_sun_patch[p, iv], gs_sun,
                                bsun_arr[p], ps.rssun_z_patch[p, iv]))
+                jm_sha = jmax_z_local[p, SHA, iv]
+                qabs_sha = 0.5 * (1.0 - fnps) * par_z_sha_in[p, iv] * 4.6
+                r1s, r2s = quadratic_solve(theta_psii, -(qabs_sha + jm_sha), qabs_sha * jm_sha)
+                je_sha = min(r1s, r2s)
+                println(io, row(p, iv, "vcmax_jmax_tpu_lmr_sha",
+                               ps.vcmax_z_phs_patch[p, SHA, iv], jm_sha,
+                               ps.tpu_z_phs_patch[p, SHA, iv], ps.lmrsha_z_patch[p, iv]))
+                println(io, row(p, iv, "ci_ac_aj_ap_ag_sha",
+                               ps.cisha_z_patch[p, iv], ps.ac_phs_patch[p, SHA, iv],
+                               ps.aj_phs_patch[p, SHA, iv], ps.ap_phs_patch[p, SHA, iv],
+                               ps.ag_phs_patch[p, SHA, iv]))
+                println(io, row(p, iv, "an_gsmol_bsha_rs_sha",
+                               ps.an_sha_patch[p, iv], gs_sha,
+                               bsha_arr[p], ps.rssha_z_patch[p, iv]))
+                println(io, row(p, iv, "jesha_parsha_rhleafsha",
+                               je_sha, par_z_sha_in[p, iv], rh_leaf_sha[p]))
                 println(io, row(p, iv, "calcstress_q_gs0_b",
                                qsun, qsha, gs0sun, gs0sha,
                                bsun_arr[p], bsha_arr[p]))

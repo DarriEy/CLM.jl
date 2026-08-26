@@ -159,3 +159,15 @@ A historical replay immediately before the fused PHS kernel was attempted and re
 as a comparator because that revision predates the required LUNA and current driver
 configuration. The next defensible boundary is therefore the first-call photosynthesis
 input/output tuple on the current code, not a cross-version result.
+
+That tuple exposed two additional carried fields rather than a missing science branch.
+CTSM scales shaded LUNA `VCMAX`, `JMAX`, and `TPU` by
+`VCMAXCINTSHA/VCMAXCINTSUN`; Julia already contains the same branch, but the replay had
+not carried those integration coefficients. Adding them restores the shaded capacities
+exactly. The first tree `hybrid_PHS` result consequently moves from `AN_SUN=0.60670`
+to `0.73843694`, versus CTSM `0.73844529`; stressed sunlit conductance is `48985.65`
+versus `48986.83`. The initial leaf photosynthesis/PHS tuple is therefore close. The
+remaining large BTRAN difference develops later as the canopy energy solve follows a
+longer convergence trajectory. The complete replay now yields BTRAN `0.8455352` and
+`0.4414279` versus CTSM `0.0561731` and `0.1276478`; first-call agreement is not
+whole-step parity.

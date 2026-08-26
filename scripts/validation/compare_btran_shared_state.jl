@@ -62,6 +62,8 @@ function inject_btran_oracle!(inst, bounds, _)
         inst.surfalb.fabd_sha_z_patch[p, :] .= permutedims(ds["FABD_SHA_Z"][:, :])
         inst.surfalb.fabi_sun_z_patch[p, :] .= permutedims(ds["FABI_SUN_Z"][:, :])
         inst.surfalb.fabi_sha_z_patch[p, :] .= permutedims(ds["FABI_SHA_Z"][:, :])
+        inst.surfalb.vcmaxcintsun_patch[p] .= ds["VCMAXCINTSUN"][:]
+        inst.surfalb.vcmaxcintsha_patch[p] .= ds["VCMAXCINTSHA"][:]
     end
     compare_inst_to_dump(inst, joinpath(RUN_DIR, "pdump_before_step_n$(NSTEP).nc");
                          label="injected initial state", tol=1e-9)
