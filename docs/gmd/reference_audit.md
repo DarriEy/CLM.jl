@@ -183,3 +183,18 @@ current replay hook runs before `surface_radiation!`, however, and that routine
 recomputes the field before `canopy_fluxes_core!`. The next isolation step is a
 post-surface-radiation/pre-canopy injection hook; changing iteration limits or adding a
 scientific exception would be premature.
+
+The boundary replay confirms that diagnosis. Applying the CTSM `SABV` values only at
+entry to `canopy_fluxes_core!` changes tree BTRAN from `0.8455352` to `0.05617330`
+against CTSM's `0.05617311`, and grass from `0.4414279` to `0.12763999` against
+`0.12764776`. Both solvers now emit 18 patch-iteration records (11 tree and 7 grass),
+instead of Julia retaining both patches for 17 iterations. At the first iteration the
+largest remaining relative differences in the traced flux/conductance quantities are
+approximately `2e-5`–`7e-5`; final absolute BTRAN errors are `1.86e-7` and `7.77e-6`.
+This is causal isolation, not a production fix: the override is explicitly gated and
+off by default. Inspection of `surface_radiation!` further narrows the replay omission:
+it constructs `SABV` from the bulk two-band `FABD`/`FABI` canopy absorptances, while the
+oracle currently carries only the canopy-layer visible-band sun/shade arrays used by
+photosynthesis. The replay's cold-started bulk arrays are therefore zero. Those bulk
+absorptances must be added to the next oracle revision and injected before
+`surface_radiation!`; this evidence does not indicate a production radiation defect.

@@ -95,9 +95,9 @@ script = "scripts/validation/compare_btran_shared_state.jl"
 nstep = 2901
 registered_initial_fields = 27
 initial_global_max_relative_error = 0.0
-julia_btran_pft2 = 0.84553519143568256
+julia_btran_pft2 = 0.056173298946619217
 fortran_btran_pft2 = 0.05617311246487857
-julia_btran_pft3 = 0.44142792084579408
+julia_btran_pft3 = 0.12763998650895952
 fortran_btran_pft3 = 0.12764776011861273
 passes = false
 exception_added = false
@@ -107,6 +107,13 @@ soil_conductance_max_relative_error = 0.0
 fortran_bsun_pft2 = 0.0492945711714089
 fortran_bsha_pft2 = 0.059867419478346
 canopy_radiation_state_matches = true
+sabv_replayed_at_pre_canopy_boundary = true
+btran_pft2_absolute_error = 1.8648174064661571e-7
+btran_pft3_absolute_error = 7.7736096532055043e-6
+julia_canopy_iteration_trace = "btran_canopy_periter_julia_n2901.txt (generated in the run directory)"
+julia_canopy_iteration_trace_sha256 = "204c11c50846a30793773583e0131ee6a41542c3f9ef25b7968f81f0b4aa1f55"
+canopy_iteration_records_fortran = 18
+canopy_iteration_records_julia = 18
 julia_final_gs_mol_sun_pft2 = 741188.399469082
 fortran_final_gs_mol_sun_pft2_approx = 660500.0
 julia_final_gs_mol_sun_pft3 = 851899.1570570428
@@ -132,4 +139,4 @@ fortran_canopy_iteration_trace_sha256 = "f38ede0ada9c4d47fbb83933ebaef1ffb7584ea
 canopy_trace_executable_sha256 = "c44d3057f77b31b80d153abd605cbfa03efffe1cc36b702bc34ae975217b6a3f"
 
 [current_blocker]
-description = "End-of-iteration canopy traces localize the next missing carried boundary field: Julia reaches canopy energy balance with SABV=0 for both vegetated patches, while CTSM has 772.8918277 and 190.2960005 W m-2. This reverses the first temperature increment (Julia -1 K, CTSM +1 K) even though the first leaf/PHS tuple is close. SABV is now registered in the oracle and replay, but it must be injected at the post-surface-radiation/pre-canopy boundary because the full driver recomputes it after the current pre-step hook. No science exception has been added."
+description = "Replaying SABV at the post-surface-radiation/pre-canopy boundary restores the CTSM convergence shape (18 iteration records in each implementation) and nearly restores instantaneous BTRAN: Julia/CTSM are 0.05617329895/0.05617311246 for the tree and 0.1276399865/0.1276477601 for grass. Absolute errors are 1.86e-7 and 7.77e-6. The replay cold-starts bulk FABD/FABI canopy absorptances at zero; surface_radiation! therefore correctly recomputes zero SABV even though the already-carried canopy-layer visible-band fields match. Add bulk FABD/FABI to the oracle and replay them before surface_radiation!, then localize the remaining O(1e-5 to 1e-4) relative iteration deltas. No science exception has been added."
