@@ -222,3 +222,11 @@ higher by `5.48786e-5 s m-1`; the grass differences have the same sign. The resi
 therefore has two concrete upstream branches: `SurfaceHumidity` (`qg_snow`, `qg_soil`,
 surface fractions and their temperatures) and the canopy `ram1 -> uaf -> rb -> gbmol`
 chain. Neither is evidence for changing the hydraulic or convergence algorithms.
+
+Tracing the surface mixture shows `qg_snow`, `qg_soil`, `qg_h2osfc`, and
+`frac_h2osfc` are identical. The full `2.72705e-7` humidity difference is produced by
+`frac_sno_eff`: Julia `0.2749586811`, CTSM `0.2749147620`. The humidity investigation
+therefore moves upstream to the snow-cover-fraction update. For aerodynamic resistance,
+`ram1=um/ustar^2` and `uaf=um*sqrt(1/(ram1*um))`; the traced pre-iteration `um` agrees,
+so `uaf` reduces to the already-different incoming `ustar`. The next aerodynamic
+boundary is the initial Monin–Obukhov solve and its roughness/displacement inputs.
