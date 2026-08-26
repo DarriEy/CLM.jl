@@ -122,6 +122,11 @@ fortran_calcstress_calls_pft2 = 33
 fortran_calcstress_calls_pft3 = 21
 trace_executable_sha256 = "a606f5e0d809425c4ae78b455181c94d88a10c7efa2d2f599646007e0f6cd769"
 trace_executable_scientific_source_modified_for_read_only_logging = true
+fortran_outer_phs_trace = "btran_phs_outer_fortran_n2901.txt (generated in the run directory)"
+fortran_outer_phs_trace_sha256 = "413070802a88e641b4cce3b1d903ac574f2f1f4b138c2f15da3835ac7fc63d6a"
+fortran_outer_phs_calls_pft2 = 11
+fortran_outer_phs_calls_pft3 = 7
+outer_trace_executable_sha256 = "a101a9a3ef9b8bd0103e676a05b4b3c74819df0c1e6cc93a96ddc1c362f47dc6"
 
 [current_blocker]
-description = "The persisted CTSM trace confirms 33 tree and 21 grass calcstress calls, while the Julia pass-level trace records 17 outer coupled calls per patch and therefore cannot be paired ordinally. At the earliest recorded outer state, the direct getqflx thermodynamic and canopy inputs are equal or very close, but unstressed shaded gs already differs strongly. Add an inner-call Julia capture to prove the exact first photosynthesis scalar; conductance construction, sun/shade geometry, and the direct getqflx input bundle are excluded."
+description = "A second CTSM trace at the hybrid_PHS return boundary records 11 tree and 7 grass outer calls versus Julia's 17 calls for each patch. The first outer call is close but not exact (tree AN_SUN 0.7384 versus 0.6067; grass 3.8224 versus 3.7214), and the different outer convergence trajectories amplify the final BTRAN gap. Localize the first-call photosynthesis inputs/outputs before changing the scalarized solver. Conductance construction, sun/shade geometry, and the direct getqflx input bundle remain excluded."

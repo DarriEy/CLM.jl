@@ -146,3 +146,16 @@ CTSM for the tree, and `2.07e6` versus `7.95e5` for grass. This moves the first-
 search upstream of `getqflx` and the hydraulic Newton solve into the sun/shade
 photosynthesis/CI coupling. An inner-call Julia capture is still required before naming
 the exact expression, because the current traces have different call granularity.
+
+A matching CTSM trace at the `hybrid_PHS` return boundary removes the inner-call
+granularity ambiguity but reveals a second control-flow difference: CTSM completes 11
+tree and 7 grass outer calls during the canopy-temperature solve, while Julia completes
+17 for each. The first outer result is already close but unequal. Tree `AN_SUN` is
+`0.73845` in CTSM versus `0.60670` in Julia and grass is `3.82239` versus `3.72144`;
+their corresponding stress and stomatal-conductance values differ in the same direction.
+The trajectories then separate sharply. This evidence supports amplification through
+the coupled convergence path, but does not yet justify changing its iteration limits.
+A historical replay immediately before the fused PHS kernel was attempted and rejected
+as a comparator because that revision predates the required LUNA and current driver
+configuration. The next defensible boundary is therefore the first-call photosynthesis
+input/output tuple on the current code, not a cross-version result.

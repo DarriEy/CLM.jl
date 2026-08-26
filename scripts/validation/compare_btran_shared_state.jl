@@ -77,15 +77,20 @@ step_date = oracle_datetime(ORACLE_BEFORE)
 println("BTRAN shared-state comparison: nstep=$NSTEP start=$step_date")
 photo_trace = joinpath(RUN_DIR, "btran_photo_julia_n$(NSTEP).txt")
 isfile(photo_trace) && rm(photo_trace)
-CLM.PHS_PHOTO_DEBUG[] = true
-CLM.PHS_PHOTO_DEBUG_PATH[] = photo_trace
+have_photo_debug = isdefined(CLM, :PHS_PHOTO_DEBUG)
+if have_photo_debug
+    CLM.PHS_PHOTO_DEBUG[] = true
+    CLM.PHS_PHOTO_DEBUG_PATH[] = photo_trace
+end
 (inst, bounds) = run_one_parity_step!(NSTEP; dumpdir=RUN_DIR, step_date=step_date,
                                       use_hydrstress=true, use_luna=true,
                                       forcing_offset_hours=-1,
                                       driver_is_first_step=false,
                                       pre_step_hook=inject_btran_oracle!)
-CLM.PHS_PHOTO_DEBUG[] = false
-println("Julia PHS call trace: $photo_trace")
+if have_photo_debug
+    CLM.PHS_PHOTO_DEBUG[] = false
+    println("Julia PHS call trace: $photo_trace")
+end
 
 NCDataset(ORACLE_AFTER) do ds
     f = Float64.(ds["BTRAN"][:])

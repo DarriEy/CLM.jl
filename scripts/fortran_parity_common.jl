@@ -147,8 +147,10 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
     # accumulators) and bleeds into the active-patch EFLX_GNET. Pin the latitude init
     # the harness was validated against, then restore the global default for any later
     # naive/production cold start in the session.
-    _prev_cs = CLM.coldstart_match_fortran()
-    CLM.coldstart_match_fortran!(false)
+    _have_cs_switch = isdefined(CLM, :coldstart_match_fortran) &&
+                      isdefined(CLM, :coldstart_match_fortran!)
+    _prev_cs = _have_cs_switch ? CLM.coldstart_match_fortran() : nothing
+    _have_cs_switch && CLM.coldstart_match_fortran!(false)
     (inst, bounds, filt, tm) = CLM.clm_initialize!(;
         fsurdat=fsurdat, paramfile=paramfile,
         start_date=start_date, dtime=dtime, use_cn=use_cn, use_luna=use_luna,
@@ -165,7 +167,7 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         fndep=fndep,
         cnfire_method=cnfire_method, flnfm=flnfm, fhdm=fhdm,
         int_snow_max=int_snow)
-    CLM.coldstart_match_fortran!(_prev_cs)
+    _have_cs_switch && CLM.coldstart_match_fortran!(_prev_cs)
 
     # The Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true. (CLM5 default).
     # Enable them here — the parity harness runs from a warm Fortran restart, so the
