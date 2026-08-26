@@ -1,5 +1,5 @@
 name = "bow-btran-2003-04-29"
-status = "build-toolchain-blocked"
+status = "stock-build-complete"
 
 [source]
 repository = "https://github.com/ESCOMP/CTSM.git"
@@ -42,6 +42,17 @@ compare_instantaneous_not_daily_history = true
 thresholds_frozen = true
 no_exception_until_oracle_passes = true
 
-[current_blocker]
-description = "CIME case creation succeeds under Python 3.11, but stock build stops before compilation because ESMFMKFILE is not configured. The only discovered ESMF installation is an unactivated micromamba package and must not be treated as a reproducible toolchain."
+[stock_build]
+completed = "2026-08-26"
+executable_sha256 = "9719074f2300508c722bf6326c420f8e19339b737ce28d5c268b81094db0a57d"
+python = "3.11.16"
+cmake = "3.31.8"
+esmf = "8.9.1"
+mpich = "4.3.2"
+netcdf_c = "4.9.3"
+netcdf_fortran = "4.6.2"
+compatibility_patch = "repro/patches/ctsm5.3.012-darwin-build-compat.patch"
+scientific_source_modified = false
 
+[current_blocker]
+description = "The stock executable is complete. The remaining work is to add the declared BTRAN shared-state diagnostics, prove the instrumented executable state-neutral, and run the January-to-April oracle trajectory."

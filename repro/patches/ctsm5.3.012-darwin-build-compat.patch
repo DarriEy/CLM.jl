@@ -1,0 +1,22 @@
+Build-only compatibility settings for CTSM 5.3.012 on Apple Silicon
+===================================================================
+
+These settings do not alter CLM scientific source. They are applied to the generated
+CIME case and the CIME ParallelIO build invocation:
+
+1. Use Python 3.11 because this CIME revision imports distutils.
+2. Bind NETCDF, NETCDF_PATH, PNETCDF, PNETCDF_PATH, and ESMFMKFILE to one isolated
+   MPICH toolchain prefix.
+3. Pin CMake to 3.31.8; CMake 4 removes compatibility requested by the bundled PIO.
+4. Append `-DNETCDF_ENABLE_LEGACY_MACROS` to CPPDEFS. netCDF-C 4.9.3 retains the
+   legacy `_FillValue` spelling behind this documented compatibility switch.
+5. Pass `-D CMAKE_RANLIB=/usr/bin/ranlib` to the PIO configure step because the
+   conda LLVM ranlib rejects the Darwin `-c` option emitted by this build.
+6. Pass `-D HAVE_PAR_FILTERS=0` to the PIO configure step. The optional parallel
+   filter interface in the frozen PIO source has inconsistent Fortran guards with
+   modern netCDF feature macros; CLM history/restart I/O does not require filters.
+7. Place EXEROOT, RUNDIR, and DOUT_S_ROOT under an isolated temporary run root.
+
+The resulting stock executable SHA-256 is recorded in
+`repro/configs/bow_btran_oracle.toml`. Instrumentation is built only after this
+unmodified-CLM baseline succeeds.
