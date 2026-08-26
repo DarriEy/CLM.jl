@@ -106,3 +106,12 @@ step produces BTRAN `1.0` for both vegetated patches versus CTSM values `0.05617
 and `0.127648`. This is a reproduced discrepancy, not grounds for an exception: the
 next localization must freeze the remaining instantaneous forcing and PHS conductance
 inputs before assigning the first divergent routine.
+
+That expansion is complete. At step 2901, Julia matches CTSM's post-call
+`K_SOIL_ROOT`, root conductance, and soil conductance exactly (zero max absolute and
+relative error), excluding conductance construction as the source of the BTRAN gap.
+CTSM's final sunlit/shaded stress factors for the tree patch are `0.0492946` and
+`0.0598674`; its weighted BTRAN is therefore `0.0561731`. The Julia one-step harness
+still returns BTRAN `1.0` and does not reproduce CTSM's sunlit/shaded LAI or canopy
+energy trajectory. Attribution must therefore move to the earlier canopy-radiation
+boundary. This remains an open localization result, not a scientific exception.

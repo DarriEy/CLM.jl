@@ -377,6 +377,7 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
                               flanduse::String="", flanduse_year::Int=0,
                               natpft_size::Int=15,
                               pre_step_hook=nothing,
+                              driver_is_first_step::Union{Bool,Nothing}=nothing,
                               h2osfcflag::Int=1)
     (inst, bounds, filt, tm) = build_bow_inst(; dtime=3600, start_date=step_date, use_cn=use_cn, use_luna=use_luna,
                               use_lch4=use_lch4, use_c13=use_c13, use_c14=use_c14,
@@ -491,7 +492,9 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     CLM.clm_drv!(config, inst, filt, filt_ia, bounds,
                  true, nextsw_cday, declin, declin, obliqr,
                  false, false, "", false;
-                 nstep=tm.nstep, is_first_step=(tm.nstep==1),
+                 nstep=tm.nstep,
+                 is_first_step=(driver_is_first_step === nothing ?
+                                tm.nstep == 1 : driver_is_first_step),
                  is_beg_curr_day=CLM.is_beg_curr_day(tm),
                  is_end_curr_day=CLM.is_end_curr_day(tm),
                  is_beg_curr_year=CLM.is_beg_curr_year(tm),

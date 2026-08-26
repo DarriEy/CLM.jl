@@ -8,6 +8,9 @@ const FIELDS = (
     "PCO2_240", "PO2_240", "ELAI240", "PAR240D_Z", "PAR240X_Z",
     "T_A10", "T_VEG10_DAY", "T_VEG10_NIGHT", "RH10_AF", "RB10",
     "VCMX25_Z", "JMX25_Z", "PNLC_Z", "ENZS_Z",
+    "K_SOIL_ROOT", "SOIL_CONDUCTANCE", "ROOTFR", "BSW", "SUCSAT",
+    "LAISUN", "LAISHA", "ELAI", "ESAI", "TSAI", "FDRY", "FORC_RHO",
+    "FORC_PBOT", "THM", "QFLX_TRAN_VEG", "BSUN", "BSHA",
 )
 
 function read_oracle(path)

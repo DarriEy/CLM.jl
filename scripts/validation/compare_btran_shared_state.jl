@@ -25,16 +25,31 @@ function inject_btran_oracle!(inst, bounds, _)
         inst.soilstate.smp_l_col[1, :] .= vec(ds["SMP"][:, 1])
         inst.soilstate.hk_l_col[1, :] .= vec(ds["HK"][:, 1])
         inst.soilstate.root_conductance_patch[p, :] .= permutedims(ds["ROOT_CONDUCTANCE"][:, :])
+        inst.soilstate.k_soil_root_patch[p, :] .= permutedims(ds["K_SOIL_ROOT"][:, :])
+        inst.soilstate.soil_conductance_patch[p, :] .= permutedims(ds["SOIL_CONDUCTANCE"][:, :])
+        inst.soilstate.rootfr_patch[p, :] .= permutedims(ds["ROOTFR"][:, :])
+        inst.soilstate.bsw_col[1, :] .= vec(ds["BSW"][:, 1])
+        inst.soilstate.sucsat_col[1, :] .= vec(ds["SUCSAT"][:, 1])
         inst.atm2lnd.forc_pbot240_downscaled_patch[p] .= ds["PBOT240"][:]
         inst.atm2lnd.forc_pco2_240_patch[p] .= ds["PCO2_240"][:]
         inst.atm2lnd.forc_po2_240_patch[p] .= ds["PO2_240"][:]
         inst.canopystate.elai240_patch[p] .= ds["ELAI240"][:]
+        inst.canopystate.laisun_patch[p] .= ds["LAISUN"][:]
+        inst.canopystate.laisha_patch[p] .= ds["LAISHA"][:]
+        inst.canopystate.elai_patch[p] .= ds["ELAI"][:]
+        inst.canopystate.esai_patch[p] .= ds["ESAI"][:]
+        inst.canopystate.tsai_patch[p] .= ds["TSAI"][:]
         inst.solarabs.par240d_z_patch[p, :] .= permutedims(ds["PAR240D_Z"][:, :])
         inst.solarabs.par240x_z_patch[p, :] .= permutedims(ds["PAR240X_Z"][:, :])
         inst.temperature.t_a10_patch[p] .= ds["T_A10"][:]
         inst.temperature.t_veg10_day_patch[p] .= ds["T_VEG10_DAY"][:]
         inst.temperature.t_veg10_night_patch[p] .= ds["T_VEG10_NIGHT"][:]
         inst.water.waterdiagnosticbulk_inst.rh10_af_patch[p] .= ds["RH10_AF"][:]
+        inst.water.waterdiagnosticbulk_inst.fdry_patch[p] .= ds["FDRY"][:]
+        inst.atm2lnd.forc_rho_downscaled_col[1] = ds["FORC_RHO"][1]
+        inst.atm2lnd.forc_pbot_downscaled_col[1] = ds["FORC_PBOT"][1]
+        inst.temperature.thm_patch[p] .= ds["THM"][:]
+        inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_patch[p] .= ds["QFLX_TRAN_VEG"][:]
         inst.frictionvel.rb10_patch[p] .= ds["RB10"][:]
         inst.photosyns.vcmx25_z_patch[p, :] .= permutedims(ds["VCMX25_Z"][:, :])
         inst.photosyns.jmx25_z_patch[p, :] .= permutedims(ds["JMX25_Z"][:, :])
@@ -56,6 +71,7 @@ println("BTRAN shared-state comparison: nstep=$NSTEP start=$step_date")
 (inst, bounds) = run_one_parity_step!(NSTEP; dumpdir=RUN_DIR, step_date=step_date,
                                       use_hydrstress=true, use_luna=true,
                                       forcing_offset_hours=-1,
+                                      driver_is_first_step=false,
                                       pre_step_hook=inject_btran_oracle!)
 
 NCDataset(ORACLE_AFTER) do ds
@@ -66,6 +82,26 @@ NCDataset(ORACLE_AFTER) do ds
         a = abs(j[p] - f[p])
         r = a / (1 + max(abs(j[p]), abs(f[p])))
         @printf("%d,%.17g,%.17g,%.17g,%.17g\n", p, j[p], f[p], a, r)
+    end
+    checks = [
+        ("K_SOIL_ROOT", inst.soilstate.k_soil_root_patch[1:length(f), :]),
+        ("ROOT_CONDUCTANCE", inst.soilstate.root_conductance_patch[1:length(f), :]),
+        ("SOIL_CONDUCTANCE", inst.soilstate.soil_conductance_patch[1:length(f), :]),
+        ("VEGWP", inst.canopystate.vegwp_patch[1:length(f), :]),
+        ("LAISUN", inst.canopystate.laisun_patch[1:length(f)]),
+        ("LAISHA", inst.canopystate.laisha_patch[1:length(f)]),
+        ("FDRY", inst.water.waterdiagnosticbulk_inst.fdry_patch[1:length(f)]),
+    ]
+    println("diagnostic,max_abs,max_rel")
+    for (name, jraw) in checks
+        fraw = Array(ds[name])
+        fvals = vec(Float64.(fraw))
+        jvals = ndims(fraw) == 2 ? vec(Float64.(permutedims(jraw))) : vec(Float64.(jraw))
+        keep = [isfinite(fvals[i]) && abs(fvals[i]) < 1e35 for i in eachindex(fvals)]
+        a = maximum(abs.(jvals[keep] .- fvals[keep]))
+        r = maximum(abs.(jvals[keep] .- fvals[keep]) ./
+                    (1 .+ max.(abs.(jvals[keep]), abs.(fvals[keep]))))
+        @printf("%s,%.17g,%.17g\n", name, a, r)
     end
 end
 

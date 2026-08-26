@@ -38,6 +38,9 @@ contains
     integer :: v_pbot240, v_pco2240, v_po2240, v_elai240
     integer :: v_par240d, v_par240x, v_ta10, v_tv10d, v_tv10n, v_rh10, v_rb10
     integer :: v_vcmx25, v_jmx25, v_pnlc, v_enzs
+    integer :: v_kroot, v_soilcond, v_rootfr, v_bsw, v_sucsat
+    integer :: v_laisun, v_laisha, v_elai, v_esai, v_tsai, v_fdry
+    integer :: v_rho, v_pbot, v_thm, v_qtran, v_bsun, v_bsha
     character(len=256) :: fname
     real(r8), allocatable :: p1(:), pveg(:,:), pcana(:,:), cground(:,:), psoil(:,:)
 
@@ -90,6 +93,23 @@ contains
     ier = nf90_def_var(ncid, 'JMX25_Z', NF90_DOUBLE, (/dcan,dpft/), v_jmx25)
     ier = nf90_def_var(ncid, 'PNLC_Z', NF90_DOUBLE, (/dcan,dpft/), v_pnlc)
     ier = nf90_def_var(ncid, 'ENZS_Z', NF90_DOUBLE, (/dcan,dpft/), v_enzs)
+    ier = nf90_def_var(ncid, 'K_SOIL_ROOT', NF90_DOUBLE, (/dsoil,dpft/), v_kroot)
+    ier = nf90_def_var(ncid, 'SOIL_CONDUCTANCE', NF90_DOUBLE, (/dsoil,dpft/), v_soilcond)
+    ier = nf90_def_var(ncid, 'ROOTFR', NF90_DOUBLE, (/dground,dpft/), v_rootfr)
+    ier = nf90_def_var(ncid, 'BSW', NF90_DOUBLE, (/dground,dcol/), v_bsw)
+    ier = nf90_def_var(ncid, 'SUCSAT', NF90_DOUBLE, (/dground,dcol/), v_sucsat)
+    ier = nf90_def_var(ncid, 'LAISUN', NF90_DOUBLE, (/dpft/), v_laisun)
+    ier = nf90_def_var(ncid, 'LAISHA', NF90_DOUBLE, (/dpft/), v_laisha)
+    ier = nf90_def_var(ncid, 'ELAI', NF90_DOUBLE, (/dpft/), v_elai)
+    ier = nf90_def_var(ncid, 'ESAI', NF90_DOUBLE, (/dpft/), v_esai)
+    ier = nf90_def_var(ncid, 'TSAI', NF90_DOUBLE, (/dpft/), v_tsai)
+    ier = nf90_def_var(ncid, 'FDRY', NF90_DOUBLE, (/dpft/), v_fdry)
+    ier = nf90_def_var(ncid, 'FORC_RHO', NF90_DOUBLE, (/dcol/), v_rho)
+    ier = nf90_def_var(ncid, 'FORC_PBOT', NF90_DOUBLE, (/dcol/), v_pbot)
+    ier = nf90_def_var(ncid, 'THM', NF90_DOUBLE, (/dpft/), v_thm)
+    ier = nf90_def_var(ncid, 'QFLX_TRAN_VEG', NF90_DOUBLE, (/dpft/), v_qtran)
+    ier = nf90_def_var(ncid, 'BSUN', NF90_DOUBLE, (/dpft/), v_bsun)
+    ier = nf90_def_var(ncid, 'BSHA', NF90_DOUBLE, (/dpft/), v_bsha)
     ier = nf90_enddef(ncid)
 
     ier = nf90_put_var(ncid, v_nstep, nstep)
@@ -115,6 +135,24 @@ contains
     call pft2d(bounds, nlevcan, photosyns_inst%jmx25_z_patch, pcana); ier = nf90_put_var(ncid, v_jmx25, pcana)
     call pft2d(bounds, nlevcan, photosyns_inst%pnlc_z_patch, pcana); ier = nf90_put_var(ncid, v_pnlc, pcana)
     call pft2d(bounds, nlevcan, photosyns_inst%enzs_z_patch, pcana); ier = nf90_put_var(ncid, v_enzs, pcana)
+    call pft2d(bounds, nlevsoi, soilstate_inst%k_soil_root_patch, psoil); ier = nf90_put_var(ncid, v_kroot, psoil)
+    call pft2d(bounds, nlevsoi, soilstate_inst%soil_conductance_patch, psoil); ier = nf90_put_var(ncid, v_soilcond, psoil)
+    deallocate(psoil); allocate(psoil(nlevgrnd,npft))
+    call pft2d(bounds, nlevgrnd, soilstate_inst%rootfr_patch, psoil); ier = nf90_put_var(ncid, v_rootfr, psoil)
+    call col2d(bounds, nlevgrnd, soilstate_inst%bsw_col, cground); ier = nf90_put_var(ncid, v_bsw, cground)
+    call col2d(bounds, nlevgrnd, soilstate_inst%sucsat_col, cground); ier = nf90_put_var(ncid, v_sucsat, cground)
+    call pft1d(bounds, canopystate_inst%laisun_patch, p1); ier = nf90_put_var(ncid, v_laisun, p1)
+    call pft1d(bounds, canopystate_inst%laisha_patch, p1); ier = nf90_put_var(ncid, v_laisha, p1)
+    call pft1d(bounds, canopystate_inst%elai_patch, p1); ier = nf90_put_var(ncid, v_elai, p1)
+    call pft1d(bounds, canopystate_inst%esai_patch, p1); ier = nf90_put_var(ncid, v_esai, p1)
+    call pft1d(bounds, canopystate_inst%tsai_patch, p1); ier = nf90_put_var(ncid, v_tsai, p1)
+    call pft1d(bounds, water_inst%waterdiagnosticbulk_inst%fdry_patch, p1); ier = nf90_put_var(ncid, v_fdry, p1)
+    call col1d(bounds, atm2lnd_inst%forc_rho_downscaled_col, cground(1,:)); ier = nf90_put_var(ncid, v_rho, cground(1,:))
+    call col1d(bounds, atm2lnd_inst%forc_pbot_downscaled_col, cground(1,:)); ier = nf90_put_var(ncid, v_pbot, cground(1,:))
+    call pft1d(bounds, temperature_inst%thm_patch, p1); ier = nf90_put_var(ncid, v_thm, p1)
+    call pft1d(bounds, water_inst%waterfluxbulk_inst%qflx_tran_veg_patch, p1); ier = nf90_put_var(ncid, v_qtran, p1)
+    call pft1d(bounds, energyflux_inst%bsun_patch, p1); ier = nf90_put_var(ncid, v_bsun, p1)
+    call pft1d(bounds, energyflux_inst%bsha_patch, p1); ier = nf90_put_var(ncid, v_bsha, p1)
 
     ier = nf90_close(ncid)
     if (ier == NF90_NOERR) then
@@ -167,5 +205,15 @@ contains
        end do
     end do
   end subroutine col2d
+
+  subroutine col1d(bounds, src, dst)
+    type(bounds_type), intent(in) :: bounds
+    real(r8), intent(in) :: src(bounds%begc:)
+    real(r8), intent(out) :: dst(:)
+    integer :: c
+    do c = bounds%begc, bounds%endc
+       dst(c-bounds%begc+1) = src(c)
+    end do
+  end subroutine col1d
 
 end module btranOracleMod
