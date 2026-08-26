@@ -23,7 +23,7 @@ contains
 
   subroutine btran_oracle_write(bounds, label)
     use netcdf
-    use clm_varpar      , only : nlevgrnd, nlevsoi, nlevcan, nvegwcs
+    use clm_varpar      , only : nlevgrnd, nlevsoi, nlevcan, nvegwcs, numrad
     use clm_time_manager, only : get_nstep, get_curr_date
     use clm_instMod     , only : energyflux_inst, canopystate_inst, soilstate_inst, &
                                  atm2lnd_inst, solarabs_inst, temperature_inst, &
@@ -33,7 +33,7 @@ contains
     character(len=*), intent(in) :: label
 
     integer :: nstep, yr, mon, day, tod, ymd, ncol, npft
-    integer :: ncid, ier, dcol, dpft, dground, dsoil, dcan, dvegwcs
+    integer :: ncid, ier, dcol, dpft, dground, dsoil, dcan, dvegwcs, drad
     integer :: v_nstep, v_ymd, v_tod, v_btran, v_vegwp, v_smp, v_hk, v_rootcond
     integer :: v_pbot240, v_pco2240, v_po2240, v_elai240
     integer :: v_par240d, v_par240x, v_ta10, v_tv10d, v_tv10n, v_rh10, v_rb10
@@ -42,9 +42,9 @@ contains
     integer :: v_laisun, v_laisha, v_elai, v_esai, v_tsai, v_fdry
     integer :: v_rho, v_pbot, v_thm, v_qtran, v_bsun, v_bsha
     integer :: v_nrad, v_tlaiz, v_fsunz, v_fabdsun, v_fabdsha, v_fabisun, v_fabisha
-    integer :: v_vcintsun, v_vcintsha, v_sabv
+    integer :: v_vcintsun, v_vcintsha, v_sabv, v_fabd, v_fabi
     character(len=256) :: fname
-    real(r8), allocatable :: p1(:), pveg(:,:), pcana(:,:), cground(:,:), psoil(:,:)
+    real(r8), allocatable :: p1(:), pveg(:,:), pcana(:,:), prad(:,:), cground(:,:), psoil(:,:)
     integer, allocatable :: pi1(:)
 
     nstep = get_nstep()
@@ -55,7 +55,7 @@ contains
     ymd = yr*10000 + mon*100 + day
     ncol = bounds%endc - bounds%begc + 1
     npft = bounds%endp - bounds%begp + 1
-    allocate(p1(npft), pveg(nvegwcs,npft), pcana(nlevcan,npft))
+    allocate(p1(npft), pveg(nvegwcs,npft), pcana(nlevcan,npft), prad(numrad,npft))
     allocate(cground(nlevgrnd,ncol), psoil(nlevsoi,npft))
     allocate(pi1(npft))
 
@@ -73,6 +73,7 @@ contains
     ier = nf90_def_dim(ncid, 'levsoi', nlevsoi, dsoil)
     ier = nf90_def_dim(ncid, 'levcan', nlevcan, dcan)
     ier = nf90_def_dim(ncid, 'nvegwcs', nvegwcs, dvegwcs)
+    ier = nf90_def_dim(ncid, 'numrad', numrad, drad)
 
     ier = nf90_def_var(ncid, 'nstep', NF90_INT, v_nstep)
     ier = nf90_def_var(ncid, 'timemgr_rst_curr_ymd', NF90_INT, v_ymd)
@@ -124,6 +125,8 @@ contains
     ier = nf90_def_var(ncid, 'VCMAXCINTSUN', NF90_DOUBLE, (/dpft/), v_vcintsun)
     ier = nf90_def_var(ncid, 'VCMAXCINTSHA', NF90_DOUBLE, (/dpft/), v_vcintsha)
     ier = nf90_def_var(ncid, 'SABV', NF90_DOUBLE, (/dpft/), v_sabv)
+    ier = nf90_def_var(ncid, 'FABD', NF90_DOUBLE, (/drad,dpft/), v_fabd)
+    ier = nf90_def_var(ncid, 'FABI', NF90_DOUBLE, (/drad,dpft/), v_fabi)
     ier = nf90_enddef(ncid)
 
     ier = nf90_put_var(ncid, v_nstep, nstep)
@@ -177,6 +180,8 @@ contains
     call pft1d(bounds, surfalb_inst%vcmaxcintsun_patch, p1); ier = nf90_put_var(ncid, v_vcintsun, p1)
     call pft1d(bounds, surfalb_inst%vcmaxcintsha_patch, p1); ier = nf90_put_var(ncid, v_vcintsha, p1)
     call pft1d(bounds, solarabs_inst%sabv_patch, p1); ier = nf90_put_var(ncid, v_sabv, p1)
+    call pft2d(bounds, numrad, surfalb_inst%fabd_patch, prad); ier = nf90_put_var(ncid, v_fabd, prad)
+    call pft2d(bounds, numrad, surfalb_inst%fabi_patch, prad); ier = nf90_put_var(ncid, v_fabi, prad)
 
     ier = nf90_close(ncid)
     if (ier == NF90_NOERR) then
@@ -189,7 +194,7 @@ contains
   contains
 
     subroutine cleanup()
-      deallocate(p1, pveg, pcana, cground, psoil, pi1)
+      deallocate(p1, pveg, pcana, prad, cground, psoil, pi1)
     end subroutine cleanup
 
   end subroutine btran_oracle_write

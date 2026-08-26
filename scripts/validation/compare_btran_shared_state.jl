@@ -65,6 +65,8 @@ function inject_btran_oracle!(inst, bounds, _)
         inst.surfalb.vcmaxcintsun_patch[p] .= ds["VCMAXCINTSUN"][:]
         inst.surfalb.vcmaxcintsha_patch[p] .= ds["VCMAXCINTSHA"][:]
         inst.solarabs.sabv_patch[p] .= ds["SABV"][:]
+        inst.surfalb.fabd_patch[p, :] .= permutedims(ds["FABD"][:, :])
+        inst.surfalb.fabi_patch[p, :] .= permutedims(ds["FABI"][:, :])
     end
     compare_inst_to_dump(inst, joinpath(RUN_DIR, "pdump_before_step_n$(NSTEP).nc");
                          label="injected initial state", tol=1e-9)
@@ -84,7 +86,6 @@ isfile(photo_trace) && rm(photo_trace)
 isfile(canopy_trace) && rm(canopy_trace)
 have_photo_debug = isdefined(CLM, :PHS_PHOTO_DEBUG)
 have_canopy_debug = isdefined(CLM, :CANOPY_PERITER_DEBUG)
-have_sabv_replay = isdefined(CLM, :CANOPY_SABV_REPLAY_DEBUG)
 if have_photo_debug
     CLM.PHS_PHOTO_DEBUG[] = true
     CLM.PHS_PHOTO_DEBUG_PATH[] = photo_trace
@@ -93,12 +94,6 @@ if have_canopy_debug
     CLM.CANOPY_PERITER_DEBUG[] = true
     CLM.CANOPY_PERITER_PATH[] = canopy_trace
     CLM.CANOPY_PERITER_NSTEP[] = NSTEP
-end
-if have_sabv_replay
-    CLM.CANOPY_SABV_REPLAY_DEBUG[] = true
-    NCDataset(ORACLE_BEFORE) do ds
-        CLM.CANOPY_SABV_REPLAY_VALUES[] = Float64.(ds["SABV"][:])
-    end
 end
 (inst, bounds) = run_one_parity_step!(NSTEP; dumpdir=RUN_DIR, step_date=step_date,
                                       use_hydrstress=true, use_luna=true,
@@ -112,9 +107,6 @@ end
 if have_canopy_debug
     CLM.CANOPY_PERITER_DEBUG[] = false
     println("Julia canopy iteration trace: $canopy_trace")
-end
-if have_sabv_replay
-    CLM.CANOPY_SABV_REPLAY_DEBUG[] = false
 end
 
 NCDataset(ORACLE_AFTER) do ds

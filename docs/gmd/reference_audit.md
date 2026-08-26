@@ -198,3 +198,10 @@ oracle currently carries only the canopy-layer visible-band sun/shade arrays use
 photosynthesis. The replay's cold-started bulk arrays are therefore zero. Those bulk
 absorptances must be added to the next oracle revision and injected before
 `surface_radiation!`; this evidence does not indicate a production radiation defect.
+
+That upstream test is now complete. The oracle carries both `FABD` and `FABI`, and
+injecting them before the ordinary `surface_radiation!` call reproduces the same
+`SABV`, iteration counts, and near-parity BTRAN obtained in the causal override test.
+The temporary direct-`SABV` hook has therefore been removed from production source.
+The remaining discrepancy is small but still above the frozen strict threshold, so the
+comparison remains formally failing and no exception is claimed.

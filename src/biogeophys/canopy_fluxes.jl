@@ -26,13 +26,6 @@ const CANOPY_PERITER_DEBUG = Ref(false)
 const CANOPY_PERITER_PATH  = Ref("periter_julia.txt")
 const CANOPY_PERITER_NSTEP = Ref(13461)
 
-# Shared-state replay aid (parity diagnostics only). The ordinary driver computes
-# SABV in surface_radiation! before entering this routine. An oracle replay may
-# replace that single boundary field here, after the production radiation call and
-# immediately before canopy physics. Default OFF, so production behavior is unchanged.
-const CANOPY_SABV_REPLAY_DEBUG = Ref(false)
-const CANOPY_SABV_REPLAY_VALUES = Ref(Float64[])
-
 # Biomass heat storage tuning parameters
 const K_VERT_CANOPY      = 0.1     # vertical distribution of stem
 const K_CYL_VOL_CANOPY   = 1.0     # departure from cylindrical volume
@@ -1508,14 +1501,6 @@ function canopy_fluxes_core!(
     # --- Convenience aliases ---
     params = canopy_fluxes_params
     ctrl   = canopy_fluxes_ctrl
-
-    if CANOPY_SABV_REPLAY_DEBUG[]
-        values = CANOPY_SABV_REPLAY_VALUES[]
-        length(values) <= length(bounds_patch) ||
-            error("SABV replay length $(length(values)) exceeds patch bounds $(length(bounds_patch))")
-        firstp = first(bounds_patch)
-        solarabs.sabv_patch[firstp:(firstp + length(values) - 1)] .= values
-    end
 
     # Local work arrays (patch-indexed). Allocated via similar() of an input
     # state array (NOT zeros()) + fill!, so they share the state's backend —
