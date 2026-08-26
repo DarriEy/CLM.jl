@@ -67,6 +67,7 @@ function inject_btran_oracle!(inst, bounds, _)
         inst.solarabs.sabv_patch[p] .= ds["SABV"][:]
         inst.surfalb.fabd_patch[p, :] .= permutedims(ds["FABD"][:, :])
         inst.surfalb.fabi_patch[p, :] .= permutedims(ds["FABI"][:, :])
+        inst.water.waterfluxbulk_inst.wf.qflx_snow_drain_col[1] = ds["QFLX_SNOW_DRAIN"][1]
     end
     compare_inst_to_dump(inst, joinpath(RUN_DIR, "pdump_before_step_n$(NSTEP).nc");
                          label="injected initial state", tol=1e-9)

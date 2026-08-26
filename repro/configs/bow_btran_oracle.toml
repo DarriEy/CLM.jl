@@ -25,12 +25,12 @@ note = "Run from the January restart to preserve the trajectory feeding the dail
 
 [instrumentation]
 module = "scripts/validation/fortran_pdump/btranOracleMod.F90"
-module_sha256 = "aa65cae417c9a48f75733f0af53d20ef08cfd356e5fc1348668b2da005837879"
+module_sha256 = "74c808b45aef3fac8813772478ebeb867597c72d24f85f784026cf942674808d"
 driver_hooks = "scripts/validation/fortran_pdump/btran_oracle_driver.hooks.diff"
 driver_hooks_sha256 = "79fb0daa546dfc0105557d8454e0c836dc1ffedc7f3e8580ef809cc63d54fab3"
 target_window_patch = "repro/patches/bow-btran-target-window.patch"
 target_window_patch_sha256 = "4a2efd622d682719c1171db777b8b6c0a23f72fafd6b2a2e4e52bedc14081c4a"
-fields = ["instantaneous patch BTRAN", "BSUN", "BSHA", "vegwp", "SMP", "HK", "root conductance", "soil conductance", "soil-root conductance", "root fractions", "soil hydraulic parameters", "canopy geometry", "carried canopy-layer and bulk two-band albedo state", "LUNA integration state", "absorbed vegetation shortwave", "instantaneous pressure and density", "prior transpiration", "LUNA 10-day state"]
+fields = ["instantaneous patch BTRAN", "BSUN", "BSHA", "vegwp", "SMP", "HK", "root conductance", "soil conductance", "soil-root conductance", "root fractions", "soil hydraulic parameters", "canopy geometry", "carried canopy-layer and bulk two-band albedo state", "LUNA integration state", "absorbed vegetation shortwave", "instantaneous pressure and density", "prior transpiration", "previous-step snow drainage", "LUNA 10-day state"]
 state_neutrality_required = true
 
 [staged_inputs]
@@ -76,7 +76,7 @@ end = "2003-05-07T00:00:00"
 boundaries = ["before_step", "after_hydrologydrainage"]
 diagnostic_files = 386
 prognostic_files = 386
-executable_sha256 = "21327714b512473f38e97a496e7448e1130cd245b544ee8f55422a1f9f728724"
+executable_sha256 = "568257be0cb9f13c0f8ef9181b9e29dad69ac906e1e0ea5f3ec50c6d51650527"
 malloc_nano_zone = 0
 note = "MallocNanoZone=0 avoids a confirmed macOS nano-allocator guard abort in netCDF-C while opening the unchanged restart."
 
@@ -87,17 +87,17 @@ pft = 2
 fortran_btran = 0.05617311246487857
 pdump_before_sha256 = "e47b1215ec476faf661f9a1c6918d96076305a2bf293d248dfd7b9f3b31bd66f"
 pdump_after_sha256 = "31c3be9b9a56fa8467716cc9679975327985a0657e51a3b56449b0c13ea78ca8"
-diagnostic_before_sha256 = "5c2c57673255cb87af1cd57a6a24b415f26a1c76cf9dd278b522c5360e70dd7f"
-diagnostic_after_sha256 = "4e0016ee3c0e83535ef9d32619e93f377a0e1bf18cfd83910ac726438f6c8bb6"
+diagnostic_before_sha256 = "27158255c609a68d0d12ba81d7e5991b7815705165da36783d4a4d290c081bef"
+diagnostic_after_sha256 = "ec6516c12aa6fe39bdb7e83f7372fb8cd0b048666d1e340ac467b904b9f5a1d8"
 
 [shared_state_comparison]
 script = "scripts/validation/compare_btran_shared_state.jl"
 nstep = 2901
-registered_initial_fields = 29
+registered_initial_fields = 30
 initial_global_max_relative_error = 0.0
-julia_btran_pft2 = 0.056173298946619217
+julia_btran_pft2 = 0.056173112463900804
 fortran_btran_pft2 = 0.05617311246487857
-julia_btran_pft3 = 0.12763998650895952
+julia_btran_pft3 = 0.12763748781803719
 fortran_btran_pft3 = 0.12764776011861273
 passes = false
 exception_added = false
@@ -109,10 +109,10 @@ fortran_bsha_pft2 = 0.059867419478346
 canopy_radiation_state_matches = true
 sabv_replayed_at_pre_canopy_boundary = false
 bulk_fabd_fabi_replayed_before_surface_radiation = true
-btran_pft2_absolute_error = 1.8648174064661571e-7
-btran_pft3_absolute_error = 7.7736096532055043e-6
+btran_pft2_absolute_error = 9.777664788934715e-13
+btran_pft3_absolute_error = 1.0272300575542292e-5
 julia_canopy_iteration_trace = "btran_canopy_periter_julia_n2901.txt (generated in the run directory)"
-julia_canopy_iteration_trace_sha256 = "033056691219416cd7c1e9cbf1c22c9444055faa1a6deba31fbaccb6a52de198"
+julia_canopy_iteration_trace_sha256 = "8c6c99d3e1c3ba1f3df900fbca0f50672f185597c5bc7d09a8718f07553388db"
 canopy_iteration_records_fortran = 18
 canopy_iteration_records_julia = 18
 julia_final_gs_mol_sun_pft2 = 741188.399469082
@@ -136,11 +136,11 @@ fortran_outer_phs_calls_pft2 = 11
 fortran_outer_phs_calls_pft3 = 7
 outer_trace_executable_sha256 = "a101a9a3ef9b8bd0103e676a05b4b3c74819df0c1e6cc93a96ddc1c362f47dc6"
 fortran_canopy_iteration_trace = "btran_canopy_periter_fortran_n2901.txt (generated in the run directory)"
-fortran_canopy_iteration_trace_sha256 = "b18c6f2e3ef867d2fa5d2e730c11952a95129894bfaccb7cca43997c2f29722b"
-canopy_trace_executable_sha256 = "51a3778385ccf7292159f41d7214cd30023bc4ec57ab7e9c0677947f2076be99"
+fortran_canopy_iteration_trace_sha256 = "7dd4263b2e4ccaab85412e5cffe3a1e34f5572254cbb815b7d36d1d16ddfda80"
+canopy_trace_executable_sha256 = "568257be0cb9f13c0f8ef9181b9e29dad69ac906e1e0ea5f3ec50c6d51650527"
 
 [current_blocker]
-description = "The oracle now carries bulk two-band FABD/FABI. Replaying them before the normal surface_radiation! call reconstructs SABV without a direct override, restores the CTSM convergence shape (18 iteration records in each implementation), and nearly restores instantaneous BTRAN: Julia/CTSM are 0.05617329895/0.05617311246 for the tree and 0.1276399865/0.1276477601 for grass. Absolute errors are 1.86e-7 and 7.77e-6. Localize the remaining O(1e-5 to 1e-4) relative iteration deltas; no science exception has been added."
+description = "The oracle now also carries previous-step QFLX_SNOW_DRAIN. This makes canopy-entry qg, frac_sno, rb, uaf, and int_snow exact and reduces tree BTRAN to 9.78e-13 absolute error. Grass remains high-sensitivity at 1.03e-5 absolute error; the first remaining physical-state difference is a 1.38e-8 m post-HandleNewSnow snow-depth residual. Localize newsnow density/bifall arithmetic before considering any tolerance or science exception."
 
 [residual_localization]
 first_tree_qaf_julia = 0.0065372678703830385
@@ -173,4 +173,11 @@ snow_depth_julia = 2.1746716973796527
 snow_depth_fortran = 2.1746716839099283
 int_snow_julia = 932.4326269401993
 int_snow_fortran = 932.7009914889461
-next_snow_boundary = "canopy interception qflx_snow_grnd, newsnow, bifall"
+qflx_snow_grnd_identical = true
+qflx_snow_drain_julia = 1.5656422644052498e-5
+qflx_snow_drain_fortran = 1.5656422644052498e-5
+previous_step_snow_drain_replayed = true
+post_handle_new_snow_frac_sno_identical = true
+post_handle_new_snow_int_snow_identical = true
+post_handle_new_snow_snow_depth_absolute_error = 1.3765947493027397e-8
+next_snow_boundary = "HandleNewSnow newsnow density and bifall arithmetic"

@@ -42,7 +42,7 @@ contains
     integer :: v_laisun, v_laisha, v_elai, v_esai, v_tsai, v_fdry
     integer :: v_rho, v_pbot, v_thm, v_qtran, v_bsun, v_bsha
     integer :: v_nrad, v_tlaiz, v_fsunz, v_fabdsun, v_fabdsha, v_fabisun, v_fabisha
-    integer :: v_vcintsun, v_vcintsha, v_sabv, v_fabd, v_fabi
+    integer :: v_vcintsun, v_vcintsha, v_sabv, v_fabd, v_fabi, v_snowdrain
     character(len=256) :: fname
     real(r8), allocatable :: p1(:), pveg(:,:), pcana(:,:), prad(:,:), cground(:,:), psoil(:,:)
     integer, allocatable :: pi1(:)
@@ -127,6 +127,7 @@ contains
     ier = nf90_def_var(ncid, 'SABV', NF90_DOUBLE, (/dpft/), v_sabv)
     ier = nf90_def_var(ncid, 'FABD', NF90_DOUBLE, (/drad,dpft/), v_fabd)
     ier = nf90_def_var(ncid, 'FABI', NF90_DOUBLE, (/drad,dpft/), v_fabi)
+    ier = nf90_def_var(ncid, 'QFLX_SNOW_DRAIN', NF90_DOUBLE, (/dcol/), v_snowdrain)
     ier = nf90_enddef(ncid)
 
     ier = nf90_put_var(ncid, v_nstep, nstep)
@@ -182,6 +183,8 @@ contains
     call pft1d(bounds, solarabs_inst%sabv_patch, p1); ier = nf90_put_var(ncid, v_sabv, p1)
     call pft2d(bounds, numrad, surfalb_inst%fabd_patch, prad); ier = nf90_put_var(ncid, v_fabd, prad)
     call pft2d(bounds, numrad, surfalb_inst%fabi_patch, prad); ier = nf90_put_var(ncid, v_fabi, prad)
+    call col1d(bounds, water_inst%waterfluxbulk_inst%qflx_snow_drain_col, cground(1,:)); &
+       ier = nf90_put_var(ncid, v_snowdrain, cground(1,:))
 
     ier = nf90_close(ncid)
     if (ier == NF90_NOERR) then

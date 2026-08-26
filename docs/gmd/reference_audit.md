@@ -240,3 +240,22 @@ layer masses. The next defensible boundary is therefore canopy interception's
 `qflx_snow_grnd`, followed by `newsnow` and `bifall`, before the snow-cover-fraction
 update. A separate diagnostic-state audit should decide whether the stale stored total
 needs production synchronization.
+
+The canopy-boundary trace rules out a throughfall discrepancy: `qflx_snow_grnd` is
+bit-for-bit identical. Instead, CTSM enters `HandleNewSnow` with the previous time
+step's `qflx_snow_drain=1.56564226440525e-5 mm s-1`, while the one-step Julia replay
+had left that restart-carried flux at its cold-start zero. Adding it to the diagnostic
+oracle and injecting it at the pre-step boundary makes `int_snow`, `frac_sno`, `qg`,
+incoming `ustar`/`uaf`, and `rb` exact at canopy entry. Tree BTRAN then agrees to
+`9.78e-13` absolute error. This is a replay-completeness correction, not a production
+science change.
+
+Grass BTRAN remains different by `1.03e-5`, despite the same seven-iteration control
+flow and exact first-iteration humidity and aerodynamic inputs. The earliest remaining
+physical-state residual in the expanded trace is snow depth after `HandleNewSnow`,
+`1.38e-8 m`; iteration-one energy terms differ only around `1e-8` or below but the
+grass hydraulic trajectory amplifies them. The next comparison should therefore split
+the snow-depth increment into `newsnow`, new-snow density, and `bifall` arithmetic.
+The stored `h2osno_total_col` diagnostic is also stale in Julia at this boundary, but
+the snow-cover calculation uses a locally reconstructed layer total, so it is not yet
+identified as causal.
