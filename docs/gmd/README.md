@@ -24,7 +24,8 @@ that satisfies the same evidence requirements.
 
 - [x] Clean clone outside a cloud-synced directory.
 - [x] Submission branch created from current public `main`.
-- [ ] Full CPU suite passes from a clean environment.
+- [x] Full macOS CPU suite passes with all staged scientific data required.
+- [ ] Full Linux CPU suite passes in the locked clean-room environment.
 - [x] Exact upstream CTSM source tag/commit identified.
 - [ ] Exact upstream CTSM build and run configuration reproduced and archived.
 - [ ] Experiment protocol reviewed and frozen.
@@ -74,6 +75,7 @@ Large inputs and outputs will live in a DOI-backed experiment archive rather tha
 Audit status: the upstream CTSM tag and commit are now verified, but configuration and
 reference-generation provenance remain open; see `reference_audit.md`.
 
-The strict external-data suite currently fails (27,766 pass, 1 fail, 3 broken); see
-`strict_suite_2026-08-25.md`. In particular, strict-mode coverage, derivative acceptance,
-and synthetic parameter-recovery criteria must be repaired before they support claims.
+The corrected strict external-data suite passes its macOS CPU execution gate (27,779 pass,
+0 fail, 3 explicit hardware skips); see `strict_suite_2026-08-25.md`. Derivative acceptance,
+initialization scope, lake/FATES diagnostics, and synthetic multi-parameter recovery remain
+scientific qualification failures and cannot support manuscript claims yet.

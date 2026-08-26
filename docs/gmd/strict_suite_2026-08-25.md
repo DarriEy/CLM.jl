@@ -1,6 +1,32 @@
 # Strict external-data suite qualification — 2026-08-25
 
-Status: **FAIL**.
+Status: **CPU/data execution gate PASS on macOS; scientific claim gates remain open**.
+
+## Corrected rerun
+
+The first run below diagnosed two release-harness defects: `CESM_INPUTDATA` was not pointed
+at the SNICAR files already present in the staged archive, and several custom data gates
+bypassed strict enforcement. Commit `cbdedaa` centralized those gates. The complete archive
+configuration was then rerun with both roots declared:
+
+```sh
+SYMFLUENCE_DATA=/path/to/SYMFLUENCE_data \
+CESM_INPUTDATA=/path/to/SYMFLUENCE_data/installs/cesm-inputdata \
+CLM_REQUIRE_TESTDATA=1 \
+julia --project=. --check-bounds=yes -e 'using Test; include("test/runtests.jl")'
+```
+
+Result on Julia 1.12.6 / macOS 26.5 / Apple M1:
+
+- exit status: **0**;
+- **27,779 passed, 0 failed, 3 broken, 27,782 total**;
+- elapsed Julia test time: **85 min 50.6 s**;
+- all three broken markers were the explicit CUDA, AMDGPU, and Metal hardware skips in
+  `test/test_backend.jl`, not unavailable scientific data.
+
+Focused confirmation before the rerun also produced 15/15 standalone-run passes, 4/4 lake
+water-balance passes, and 7/7 FUN cold-start passes. The macOS CPU/data execution gate is
+therefore green. Linux clean-room and real-accelerator gates remain open.
 
 ## Execution
 
@@ -54,11 +80,19 @@ data skip must use one gate before the definitive clean-room run.
 - The full initialization diagnostic reported many NaNs on nominally active fields while
   its selected-field assertions passed. The paper must specify which state subset is
   required finite rather than describing the whole initialized state as finite.
+- The corrected rerun reported 457 NaN-on-active fields after Bow initialization plus one
+  step while the selected-field `InitCold` assertions passed. Its current test title is
+  broader than what it proves.
+- A FATES long-run fixture repeatedly emitted non-finite gridcell water-balance diagnostics
+  while narrower FATES assertions passed. FATES remains outside the primary claim boundary.
+- Lake diagnostic tests passed their scoped assertions but reported a maximum relative
+  Julia/Fortran difference of 0.4599 in their 16- and 24-step diagnostic output. Lake
+  physics remains outside the validated claim until a dedicated comparison is qualified.
 
 ## Required closure
 
 1. Make all required data resolve from a single documented archive and checksum manifest.
-2. Route every data-gated test through the strict helper; demonstrate zero broken tests.
+2. Repeat the strict-gate audit on Linux; the macOS rerun has zero data-related broken tests.
 3. Re-run the entire suite on Linux in the locked CPU environment and require exit 0.
 4. Prespecify derivative tolerances and make non-finite finite differences fail or be an
    explicitly justified exclusion.
