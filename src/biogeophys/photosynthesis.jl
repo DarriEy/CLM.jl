@@ -5365,8 +5365,10 @@ function psn_phs_pass3_update!(ps, mask_patch, col_of_patch, ivt, nrad,
     # byte-identical. Appends one block per pass-3 call (i.e. per canopy leaf-temp
     # Newton iteration) so the Julia trajectory lines up with the Fortran trajectory.
     if PHS_PHOTO_DEBUG[]
-        _phs_photo_debug_dump(ps, bsun_arr, rh_leaf_sun, eair, esat_tv, cair, oair,
-            par_z_sun_in, jmax_z_local, nrad, mask_patch)
+        _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun,
+            eair, esat_tv, cair, oair, qsatl, qaf, laisun, laisha, elai, esai,
+            fdry, forc_rho, forc_pbot, tgcm, par_z_sun_in, jmax_z_local,
+            nrad, mask_patch, col_of_patch)
     end
     return nothing
 end
@@ -5374,8 +5376,10 @@ end
 # Read-only dump helper for the PHS photosynthesis-internals parity localization.
 # Reads only already-converged ps arrays + pass-3 inputs; recomputes je_sun the same
 # way the body does. Writes nothing into model state.
-function _phs_photo_debug_dump(ps, bsun_arr, rh_leaf_sun, eair, esat_tv, cair, oair,
-        par_z_sun_in, jmax_z_local, nrad, mask_patch)
+function _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun,
+        eair, esat_tv, cair, oair, qsatl, qaf, laisun, laisha, elai, esai,
+        fdry, forc_rho, forc_pbot, tgcm, par_z_sun_in, jmax_z_local,
+        nrad, mask_patch, col_of_patch)
     fnps = params_inst.fnps; theta_psii = params_inst.theta_psii
     row(p, iv, key, vals...) = string("JPHOTO p=", p, " iv=", iv, " ", key, "= ",
                                       join(vals, " "))
@@ -5383,6 +5387,14 @@ function _phs_photo_debug_dump(ps, bsun_arr, rh_leaf_sun, eair, esat_tv, cair, o
         for p in PHS_PHOTO_DEBUG_PATCHES[]
             (1 <= p <= length(mask_patch) && mask_patch[p]) || continue
             for iv in 1:nrad[p]
+                c = col_of_patch[p]
+                gs_sun = ps.gs_mol_sun_patch[p, iv]
+                gs_sha = ps.gs_mol_sha_patch[p, iv]
+                gs0sun = bsun_arr[p] > 0.01 ? gs_sun / bsun_arr[p] : gs_sun
+                gs0sha = bsha_arr[p] > 0.01 ? gs_sha / bsha_arr[p] : gs_sha
+                qsun, qsha, _, _ = _getqflx(ps.gb_mol_patch[p], gs0sun, gs0sha,
+                    0.0, 0.0, qsatl[p], qaf[p], true, laisun[p], laisha[p],
+                    elai[p], esai[p], fdry[p], forc_rho[c], forc_pbot[p], tgcm[p], RGAS)
                 vc = ps.vcmax_z_phs_patch[p, SUN, iv]
                 jm = jmax_z_local[p, SUN, iv]
                 tp = ps.tpu_z_phs_patch[p, SUN, iv]
@@ -5399,8 +5411,14 @@ function _phs_photo_debug_dump(ps, bsun_arr, rh_leaf_sun, eair, esat_tv, cair, o
                                ps.aj_phs_patch[p, SUN, iv], ps.ap_phs_patch[p, SUN, iv],
                                ps.ag_phs_patch[p, SUN, iv]))
                 println(io, row(p, iv, "an_gsmol_bsun_rs_sun",
-                               ps.an_sun_patch[p, iv], ps.gs_mol_sun_patch[p, iv],
+                               ps.an_sun_patch[p, iv], gs_sun,
                                bsun_arr[p], ps.rssun_z_patch[p, iv]))
+                println(io, row(p, iv, "calcstress_q_gs0_b",
+                               qsun, qsha, gs0sun, gs0sha,
+                               bsun_arr[p], bsha_arr[p]))
+                println(io, row(p, iv, "vegwp",
+                               vegwp[p, SUN], vegwp[p, SHA],
+                               vegwp[p, XYL], vegwp[p, ROOT_SEG]))
                 println(io, row(p, iv, "rhcan_rhleaf_cair_oair_esattv_eair",
                                ps.vpd_can_patch[p], rh_leaf_sun[p], cair[p], oair[p],
                                esat_tv[p], eair[p]))

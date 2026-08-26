@@ -124,3 +124,13 @@ conductance is about `7.40e5` versus CTSM `6.61e5` for the tree patch, and `8.38
 versus `1.72e6` for the grass patch. Conductance construction and sun/shade geometry
 are therefore excluded, but the photosynthesis-demand/calcstress boundary is not yet
 closed. This remains an open localization result, not a scientific exception.
+
+The Julia trace is now reproducible rather than console-only. For the last recorded
+coupled call it reconstructs unstressed sunlit/shaded transpiration demands of
+`3.21064e-7` / `5.95820e-7 kg m-2 s-1` for the tree and `3.46312e-6` /
+`6.11948e-7 kg m-2 s-1` for the grass, alongside unstressed stomatal conductance,
+`BSUN`/`BSHA`, and all four plant water potentials. The previous CTSM call trace was
+not retained as an artifact, so its console transcription is not being promoted to
+submission evidence. The next oracle run must persist that trace and compare the call
+sequence mechanically; only then can demand generation be separated from the hydraulic
+Newton solve.

@@ -111,6 +111,11 @@ julia_final_gs_mol_sun_pft2 = 740192.384170828
 fortran_final_gs_mol_sun_pft2_approx = 660500.0
 julia_final_gs_mol_sun_pft3 = 837759.497927225
 fortran_final_gs_mol_sun_pft3_approx = 1718200.0
+julia_reconstructed_qflx_sun_pft2 = 3.2106391724207096e-7
+julia_reconstructed_qflx_sha_pft2 = 5.958196682034042e-7
+julia_reconstructed_qflx_sun_pft3 = 3.4631240060856032e-6
+julia_reconstructed_qflx_sha_pft3 = 6.11947688445951e-7
+julia_calcstress_trace = "btran_photo_julia_n2901.txt (generated in the run directory)"
 
 [current_blocker]
-description = "Injecting carried canopy-layer albedo state makes LAISUN and LAISHA exact and moves Julia BTRAN toward CTSM, while K_SOIL_ROOT, ROOT_CONDUCTANCE and SOIL_CONDUCTANCE remain exact. Call traces then diverge in converged stomatal conductance and hydraulic stress: localize the photosynthesis-demand/calcstress coupling before the Newton solve rather than conductance construction or sun/shade geometry."
+description = "Injecting carried canopy-layer albedo state makes LAISUN and LAISHA exact and moves Julia BTRAN toward CTSM, while K_SOIL_ROOT, ROOT_CONDUCTANCE and SOIL_CONDUCTANCE remain exact. The opt-in Julia trace now records reconstructed unstressed gs, qflx demand, BSUN/BSHA, and VEGWP at every coupled call. Persist and machine-compare the corresponding CTSM trace to determine whether the first unequal scalar is demand or the hydraulic solve; do not infer this from the earlier console transcript."
