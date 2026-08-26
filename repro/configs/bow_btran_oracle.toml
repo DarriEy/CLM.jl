@@ -116,6 +116,12 @@ julia_reconstructed_qflx_sha_pft2 = 5.958196682034042e-7
 julia_reconstructed_qflx_sun_pft3 = 3.4631240060856032e-6
 julia_reconstructed_qflx_sha_pft3 = 6.11947688445951e-7
 julia_calcstress_trace = "btran_photo_julia_n2901.txt (generated in the run directory)"
+fortran_calcstress_trace = "btran_calcstress_fortran_n2901.txt (generated in the run directory)"
+fortran_calcstress_trace_sha256 = "df5af7f515c83d2d638cbd265a7d72e4172720742e60e405d03a040305c0246b"
+fortran_calcstress_calls_pft2 = 33
+fortran_calcstress_calls_pft3 = 21
+trace_executable_sha256 = "a606f5e0d809425c4ae78b455181c94d88a10c7efa2d2f599646007e0f6cd769"
+trace_executable_scientific_source_modified_for_read_only_logging = true
 
 [current_blocker]
-description = "Injecting carried canopy-layer albedo state makes LAISUN and LAISHA exact and moves Julia BTRAN toward CTSM, while K_SOIL_ROOT, ROOT_CONDUCTANCE and SOIL_CONDUCTANCE remain exact. The opt-in Julia trace now records reconstructed unstressed gs, qflx demand, BSUN/BSHA, and VEGWP at every coupled call. Persist and machine-compare the corresponding CTSM trace to determine whether the first unequal scalar is demand or the hydraulic solve; do not infer this from the earlier console transcript."
+description = "The persisted CTSM trace confirms 33 tree and 21 grass calcstress calls, while the Julia pass-level trace records 17 outer coupled calls per patch and therefore cannot be paired ordinally. At the earliest recorded outer state, the direct getqflx thermodynamic and canopy inputs are equal or very close, but unstressed shaded gs already differs strongly. Add an inner-call Julia capture to prove the exact first photosynthesis scalar; conductance construction, sun/shade geometry, and the direct getqflx input bundle are excluded."

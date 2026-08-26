@@ -5416,6 +5416,10 @@ function _phs_photo_debug_dump(ps, bsun_arr, bsha_arr, vegwp, rh_leaf_sun,
                 println(io, row(p, iv, "calcstress_q_gs0_b",
                                qsun, qsha, gs0sun, gs0sha,
                                bsun_arr[p], bsha_arr[p]))
+                println(io, row(p, iv, "getqflx_inputs",
+                               ps.gb_mol_patch[p], qsatl[p], qaf[p],
+                               laisun[p], laisha[p], elai[p], esai[p], fdry[p],
+                               forc_rho[c], forc_pbot[p], tgcm[p]))
                 println(io, row(p, iv, "vegwp",
                                vegwp[p, SUN], vegwp[p, SHA],
                                vegwp[p, XYL], vegwp[p, ROOT_SEG]))

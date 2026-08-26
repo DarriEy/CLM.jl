@@ -134,3 +134,15 @@ not retained as an artifact, so its console transcription is not being promoted 
 submission evidence. The next oracle run must persist that trace and compare the call
 sequence mechanically; only then can demand generation be separated from the hydraulic
 Newton solve.
+
+The CTSM trace is now persisted and checksummed. It contains 33 tree and 21 grass
+`calcstress` calls, whereas Julia's current trace contains 17 pass-level records per
+patch; the two files therefore must not be joined by line number. At the earliest
+recorded outer state, `qsatl`, LAI/SAI, dry fraction, density, pressure, and reference
+temperature agree to displayed precision; `qaf` differs by only `1.36e-7`, and boundary
+conductance is exact for grass and within 0.36% for the tree. Despite that, the first
+recorded unstressed shaded stomatal conductance is `8.05e5` in Julia versus `3.02e5` in
+CTSM for the tree, and `2.07e6` versus `7.95e5` for grass. This moves the first-divergence
+search upstream of `getqflx` and the hydraulic Newton solve into the sun/shade
+photosynthesis/CI coupling. An inner-call Julia capture is still required before naming
+the exact expression, because the current traces have different call granularity.
