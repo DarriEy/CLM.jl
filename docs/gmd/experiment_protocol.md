@@ -36,7 +36,10 @@ Status: **draft — thresholds and experiment membership are not frozen**.
 
 ## 3. Implementations
 
-- **Reference:** exact CTSM/CLM commit, compiler, flags, configuration, and dump patch TBD.
+- **Reference:** CTSM tag `ctsm5.3.012`, commit
+  `ab466d6f9789ca3df2c72bda46cf7afed2d04102`; the current macOS build and oracle
+  configuration are recorded in `repro/configs/bow_btran_oracle.toml`. The definitive
+  Linux compiler/flags and archived instrumentation patch remain to be frozen.
 - **Candidate:** exact CLM.jl submission commit TBD; Julia CPU Float64.
 - **Differentiable candidate:** same commit/configuration with explicitly listed smoothing
   and AD mode.
@@ -91,6 +94,12 @@ verdicts and cannot disappear from aggregates.
 
 Exact thresholds remain TBD until reviewed by a land-model scientist and frozen before the
 definitive run. Both passing and failing cells will be published.
+
+For process-oracle tolerances, exact agreement is required for discrete control flow,
+configuration, injected state, and declared inputs. Numerical output tolerances will be
+set only after running the same oracle with the locked Linux compiler and an independent
+compiler/optimization configuration. The tolerance study reports the full range and must
+not choose a threshold from whichever configuration most closely matches Julia.
 
 ## 7. Experiments
 

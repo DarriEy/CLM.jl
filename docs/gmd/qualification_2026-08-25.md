@@ -1,6 +1,7 @@
 # Three-site annual qualification — 2026-08-25
 
-Status: **annual completion passes; two snow residuals resolved diagnostically; Bow BTRAN remains open**.
+Status: **annual completion passes; snow residuals are diagnostically classified; Bow
+BTRAN has a reproducible process oracle but the annual parity cell remains open**.
 
 ## Source and environment
 
@@ -45,7 +46,9 @@ three qualification sites.
 | Stillwater | SNOW_DEPTH | +15.8 % | 0.50 | daily |
 
 Therefore claim C01 (strict agreement with the declared Fortran reference) remains failed
-until Bow BTRAN is closed with a reproducible shared-state oracle. Annual completion claim C02 has supporting
+until the Bow annual BTRAN trajectory is regenerated with the now-audited controls and
+meets a prespecified criterion. The target shared-state oracle is now reproducible, but it
+does not retroactively qualify the existing annual output. Annual completion claim C02 has supporting
 qualification evidence but is not final until inputs and run metadata are fully archived.
 
 ## Fresh residual audit
@@ -74,17 +77,21 @@ The fresh Bow audit localizes BTRAN to 29 April–6 May (largest difference on 3
 Julia 0.33648, Fortran 0.21410). Yet the annual consumers pass: QVEGT and FCTR -0.674%,
 latent heat +0.574%; total soil liquid differs +0.087% and SWE -0.501%. This supports the
 daily-minimum amplification hypothesis but does not prove instantaneous implementation
-parity. The previously described shared-state n11616 oracle is absent from the staged
-archive and cannot be submission evidence until regenerated from the exact CTSM source
-pipeline.
+parity. The historical n11616 oracle remains excluded. A replacement oracle has now been
+generated from CTSM tag `ctsm5.3.012` (commit
+`ab466d6f9789ca3df2c72bda46cf7afed2d04102`) at step 2901 in the worst target
+window. Its configuration and checksums are in `repro/configs/bow_btran_oracle.toml`.
+After complete state/control replay, tree BTRAN agrees to `9.78e-13` absolute error and
+grass differs by `1.03e-5`, amplified from approximately `1e-8` canopy-energy arithmetic.
 
 ## Immediate investigation
 
-1. Regenerate the Bow 29 April shared-state/process-boundary oracle from the exact CTSM
-   source pipeline, including instantaneous BTRAN and its hydraulic inputs.
-2. Confirm that replaying the worst daily-minimum window from identical state matches before
-   classifying BTRAN as a documented diagnostic exception.
+1. Repeat the target oracle with the locked Linux compiler and at least one independent
+   compiler/optimization configuration; publish every result rather than selecting the closest.
+2. Prespecify a numerical-sensitivity rule from that matrix before deciding whether the
+   grass residual is within tolerance. Do not derive a threshold from one macOS run.
 3. Add `SNOWDP` explicitly to the frozen paper variable table and label `SNOW_DEPTH` as
    snow-covered-area height everywhere.
-4. Keep thresholds frozen during the remaining investigation. Do not add a BTRAN exception until a physical
-   mechanism and acceptability argument have independent scientific review.
+4. Regenerate the Bow annual trajectory with the audited restart fields and namelist controls,
+   then rerun the unchanged 207-cell gate. Do not add a BTRAN exception without independent
+   scientific and numerical review.

@@ -53,6 +53,8 @@ esmf = "8.9.1"
 mpich = "4.3.2"
 netcdf_c = "4.9.3"
 netcdf_fortran = "4.6.2"
+fortran_compiler = "GNU Fortran 16.1.0 (Homebrew GCC 16.1.0)"
+fortran_flags = "-fconvert=big-endian -ffree-line-length-none -ffixed-line-length-none -O -fallow-argument-mismatch -fallow-invalid-boz"
 compatibility_patch = "repro/patches/ctsm5.3.012-darwin-build-compat.patch"
 scientific_source_modified = false
 
@@ -186,3 +188,13 @@ post_handle_new_snow_snow_depth_absolute_error = 0.0
 first_tree_efe_absolute_error = 2.948283395198814e-9
 first_grass_efe_absolute_error = 1.0511179482364241e-8
 next_snow_boundary = "closed: all traced HandleNewSnow inputs and outputs match"
+
+[numerical_sensitivity_plan]
+status = "prespecified-before-definitive-linux-runs"
+fixed_target_nstep = 2901
+fixed_metrics = ["BTRAN absolute error by PFT", "iteration count by PFT", "first-iteration EFE absolute error", "maximum injected-state relative error"]
+required_cells = ["locked Linux release flags", "locked Linux no-optimization Fortran", "macOS GNU Fortran release flags"]
+report_all_cells = true
+threshold_from_single_best_cell_forbidden = true
+scientific_state_tolerance_unchanged = 1.0e-9
+btran_acceptance_tolerance = "unfrozen pending matrix and independent review"
