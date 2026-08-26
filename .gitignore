@@ -46,3 +46,4 @@ scratch/
 
 # parity suite log
 suite_bgc.log
+/repro/results/btran-sensitivity/*/

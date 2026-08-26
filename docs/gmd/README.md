@@ -75,6 +75,14 @@ Large inputs and outputs will live in a DOI-backed experiment archive rather tha
 Audit status: the upstream CTSM tag and commit are now verified, but configuration and
 reference-generation provenance remain open; see `reference_audit.md`.
 
+The Linux sensitivity-cell execution contract is implemented in
+`scripts/gmd/run_btran_sensitivity_cell.sh`; its JSON result schema is produced by
+`scripts/gmd/summarize_btran_oracle.py`. Case creation and input acquisition remain
+deliberately outside that runner until the CIME machine definition and redistribution
+inventory are frozen.
+`scripts/gmd/aggregate_btran_sensitivity.py` combines the prescribed cells while retaining
+every result and intentionally has no mechanism for declaring a tolerance pass.
+
 The corrected strict external-data suite passes its macOS CPU execution gate (27,779 pass,
 0 fail, 3 explicit hardware skips); see `strict_suite_2026-08-25.md`. Derivative acceptance,
 initialization scope, lake/FATES diagnostics, and synthetic multi-parameter recovery remain
