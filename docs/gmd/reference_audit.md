@@ -86,8 +86,13 @@ that is equally strong.
 - The staged archive has a January 2003 Bow restart and complete run namelists, but not the
   April 29 shared-state dump cited by historical notes. The new pipeline must run the
   January trajectory through the target window, then emit the shared-state oracle.
+- A relocated `startup + finidat` replay from the January restart completed for six model
+  steps with the stock executable. The same replay with the established `pdumpMod` and two
+  driver hooks also completed and exercised all snapshot writes. Every selected history
+  variable and value was identical; only the netCDF root name and creation timestamp
+  differed. Checksums and executable identity are frozen in the oracle specification.
 
 No BTRAN exception has been added. The annual consumers support the daily-minimum
 amplification hypothesis, but only the new identical-state oracle can close the claim.
-The active task is now diagnostic instrumentation and state-neutrality verification, not
-toolchain provisioning.
+The active task is now adding the BTRAN/LUNA diagnostic fields and executing the target
+trajectory; base instrumentation state-neutrality and toolchain provisioning are closed.

@@ -1,5 +1,5 @@
 name = "bow-btran-2003-04-29"
-status = "stock-build-complete"
+status = "base-instrumentation-neutral"
 
 [source]
 repository = "https://github.com/ESCOMP/CTSM.git"
@@ -54,5 +54,17 @@ netcdf_fortran = "4.6.2"
 compatibility_patch = "repro/patches/ctsm5.3.012-darwin-build-compat.patch"
 scientific_source_modified = false
 
+[instrumentation_smoke]
+completed = "2026-08-26"
+steps = 6
+instrumented_executable_sha256 = "7d65c2c82fa0071975808080e3cc00c555b17e9d219fd68af823827e06992f11"
+stock_history_sha256 = "98ef9d793312c8a7e90eeef8bfe8d502ee09a0e9e55fb7daa3b5f7af1812bfa8"
+instrumented_history_sha256 = "cd161be29777d26584e79c973562d60568740adae4b1ea3797ddc75b74b91465"
+history_data_identical = true
+metadata_only_differences = ["netCDF root name", "creation timestamp"]
+snapshot_write_path_exercised = true
+before_step_n0_sha256 = "3e44e3a0d8df592900039e9cf4dc24803004fa3a4dc161d4832677c50f7d7ea3"
+after_hydrologydrainage_n0_sha256 = "46a255d3494cfbc836f9f5302293a3d4a5cea645abec6bd24f245f9bcaa2465a"
+
 [current_blocker]
-description = "The stock executable is complete. The remaining work is to add the declared BTRAN shared-state diagnostics, prove the instrumented executable state-neutral, and run the January-to-April oracle trajectory."
+description = "The established snapshot instrumentation is state-neutral with its write path active. The remaining work is to add and compile the declared BTRAN/LUNA fields, then run the January-to-April oracle trajectory."
