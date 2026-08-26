@@ -1,0 +1,7 @@
+--- pdumpMod.F90.smoke
++++ pdumpMod.F90.target-window
+@@
+-  integer, parameter :: pdump_nstep_lo = 0
+-  integer, parameter :: pdump_nstep_hi = 6
++  integer, parameter :: pdump_nstep_lo = 2832
++  integer, parameter :: pdump_nstep_hi = 3024

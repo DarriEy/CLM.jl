@@ -1,5 +1,5 @@
 name = "bow-btran-2003-04-29"
-status = "base-instrumentation-neutral"
+status = "target-oracle-generated-discrepancy-reproduced"
 
 [source]
 repository = "https://github.com/ESCOMP/CTSM.git"
@@ -24,11 +24,13 @@ target_window_end = "2003-05-07T00:00:00"
 note = "Run from the January restart to preserve the trajectory feeding the daily minimum. A one-step shared-state replay is then generated at the worst window."
 
 [instrumentation]
-module = "scripts/validation/fortran_pdump/pdumpMod.F90"
-module_sha256 = "1829d5425d7018d0532ead86a1190f8d222d9e48ba8eb59ae2dc16e89a5a7da9"
-driver_hooks = "scripts/validation/fortran_pdump/clm_driver.hooks.diff"
-driver_hooks_sha256 = "302df477afd6214578e8263b6759e23c8303a7a525b217bf2c52d935721a0c28"
-required_additions = ["instantaneous patch BTRAN", "vegwp", "SMP", "HK", "root conductance", "LUNA 10-day state"]
+module = "scripts/validation/fortran_pdump/btranOracleMod.F90"
+module_sha256 = "a43f3e65b504c38cd22ff8a3490a829783192a2bd628d2d2fcb7498ec83bf37a"
+driver_hooks = "scripts/validation/fortran_pdump/btran_oracle_driver.hooks.diff"
+driver_hooks_sha256 = "79fb0daa546dfc0105557d8454e0c836dc1ffedc7f3e8580ef809cc63d54fab3"
+target_window_patch = "repro/patches/bow-btran-target-window.patch"
+target_window_patch_sha256 = "4a2efd622d682719c1171db777b8b6c0a23f72fafd6b2a2e4e52bedc14081c4a"
+fields = ["instantaneous patch BTRAN", "vegwp", "SMP", "HK", "root conductance", "LUNA 10-day state"]
 state_neutrality_required = true
 
 [staged_inputs]
@@ -66,5 +68,39 @@ snapshot_write_path_exercised = true
 before_step_n0_sha256 = "3e44e3a0d8df592900039e9cf4dc24803004fa3a4dc161d4832677c50f7d7ea3"
 after_hydrologydrainage_n0_sha256 = "46a255d3494cfbc836f9f5302293a3d4a5cea645abec6bd24f245f9bcaa2465a"
 
+[target_oracle]
+completed = "2026-08-26"
+steps = "2832:3024"
+start = "2003-04-29T00:00:00"
+end = "2003-05-07T00:00:00"
+boundaries = ["before_step", "after_hydrologydrainage"]
+diagnostic_files = 386
+prognostic_files = 386
+executable_sha256 = "00dea16f592c8079ef10ce5dbe8ab10036c48d836ffdc5ec873d5e466e7d6c34"
+malloc_nano_zone = 0
+note = "MallocNanoZone=0 avoids a confirmed macOS nano-allocator guard abort in netCDF-C while opening the unchanged restart."
+
+[target_oracle.minimum]
+nstep = 2901
+date = "2003-05-01T21:00:00"
+pft = 2
+fortran_btran = 0.05617311246487857
+pdump_before_sha256 = "e47b1215ec476faf661f9a1c6918d96076305a2bf293d248dfd7b9f3b31bd66f"
+pdump_after_sha256 = "31c3be9b9a56fa8467716cc9679975327985a0657e51a3b56449b0c13ea78ca8"
+diagnostic_before_sha256 = "c9eb52a97858dc9225f1b376df08944c1ccaf3183b73a1c27b2c890a75649989"
+diagnostic_after_sha256 = "b1050b034bbeb534591d40008b6741220e25ca86d77dfda9e9e781eb2e90a056"
+
+[shared_state_comparison]
+script = "scripts/validation/compare_btran_shared_state.jl"
+nstep = 2901
+registered_initial_fields = 17
+initial_global_max_relative_error = 0.0
+julia_btran_pft2 = 1.0
+fortran_btran_pft2 = 0.05617311246487857
+julia_btran_pft3 = 1.0
+fortran_btran_pft3 = 0.12764776011861273
+passes = false
+exception_added = false
+
 [current_blocker]
-description = "The established snapshot instrumentation is state-neutral with its write path active. The remaining work is to add and compile the declared BTRAN/LUNA fields, then run the January-to-April oracle trajectory."
+description = "The target discrepancy is reproduced from an exact 17-field registered initial state. Before attributing the first divergent calculation, extend the sidecar with instantaneous forcing and the remaining PHS conductance inputs (k_soil_root, soil_conductance, root fractions and hydraulic parameters), then compare at the first canopy/PHS boundary."

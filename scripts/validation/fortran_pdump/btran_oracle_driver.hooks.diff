@@ -1,0 +1,11 @@
+--- clm_driver.F90.stock
++++ clm_driver.F90.btran-oracle
+@@
+   use pdumpMod               , only : pdump_write
++  use btranOracleMod         , only : btran_oracle_write
+@@
+        call pdump_write(bounds_clump, 'before_step')
++       call btran_oracle_write(bounds_clump, 'before_step')
+@@
+        call pdump_write(bounds_clump, 'after_hydrologydrainage')
++       call btran_oracle_write(bounds_clump, 'after_hydrologydrainage')

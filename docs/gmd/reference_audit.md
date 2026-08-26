@@ -94,5 +94,15 @@ that is equally strong.
 
 No BTRAN exception has been added. The annual consumers support the daily-minimum
 amplification hypothesis, but only the new identical-state oracle can close the claim.
-The active task is now adding the BTRAN/LUNA diagnostic fields and executing the target
-trajectory; base instrumentation state-neutrality and toolchain provisioning are closed.
+Base instrumentation state-neutrality, toolchain provisioning, and the target trajectory
+are closed; first-divergence localization remains active.
+
+The target trajectory has now also completed from 2003-01-01 through the full
+2003-04-29--2003-05-07 oracle window. It emitted paired prognostic and BTRAN/LUNA
+sidecars at 193 hourly steps. The lowest vegetated-patch value is BTRAN
+`0.05617311246487857` at 2003-05-01 21:00 (step 2901). Re-injecting the registered
+17-field initial state into CLM.jl gives zero initial relative error, but the next Julia
+step produces BTRAN `1.0` for both vegetated patches versus CTSM values `0.0561731`
+and `0.127648`. This is a reproduced discrepancy, not grounds for an exception: the
+next localization must freeze the remaining instantaneous forcing and PHS conductance
+inputs before assigning the first divergent routine.
