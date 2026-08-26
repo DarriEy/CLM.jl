@@ -13,7 +13,7 @@ const FIELDS = (
     "FORC_PBOT", "THM", "QFLX_TRAN_VEG", "BSUN", "BSHA",
     "NRAD", "TLAI_Z", "FSUN_Z", "FABD_SUN_Z", "FABD_SHA_Z",
     "FABI_SUN_Z", "FABI_SHA_Z",
-    "VCMAXCINTSUN", "VCMAXCINTSHA",
+    "VCMAXCINTSUN", "VCMAXCINTSHA", "SABV",
 )
 
 function read_oracle(path)
@@ -51,7 +51,12 @@ function main(run_dir)
     end
 
     for name in FIELDS
-        vals = reduce(vcat, vec(Float64.(r.data[name])) for r in target)
+        available = filter(r -> haskey(r.data, name), target)
+        if isempty(available)
+            @printf("field=%s absent=all\n", name)
+            continue
+        end
+        vals = reduce(vcat, vec(Float64.(r.data[name])) for r in available)
         finite = filter(isfinite, vals)
         @printf("field=%s finite=%d total=%d min=%.17g max=%.17g\n",
                 name, length(finite), length(vals), minimum(finite), maximum(finite))

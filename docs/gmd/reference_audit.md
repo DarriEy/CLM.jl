@@ -171,3 +171,15 @@ remaining large BTRAN difference develops later as the canopy energy solve follo
 longer convergence trajectory. The complete replay now yields BTRAN `0.8455352` and
 `0.4414279` versus CTSM `0.0561731` and `0.1276478`; first-call agreement is not
 whole-step parity.
+
+End-of-iteration instrumentation in both canopy solvers then located the first large
+energy-path discrepancy before convergence can amplify it. At iteration one, CTSM
+enters the tree and grass energy balances with `SABV=772.8918277` and
+`190.2960005 W m-2`; Julia has zero for both. The resulting bounded Newton increment
+is `+1 K` in CTSM and `-1 K` in Julia. The remaining conductance and photosynthesis
+quantities at that boundary are comparatively close, so convergence settings are not
+the first cause. `SABV` is now part of the diagnostic oracle and replay registry. The
+current replay hook runs before `surface_radiation!`, however, and that routine
+recomputes the field before `canopy_fluxes_core!`. The next isolation step is a
+post-surface-radiation/pre-canopy injection hook; changing iteration limits or adding a
+scientific exception would be premature.

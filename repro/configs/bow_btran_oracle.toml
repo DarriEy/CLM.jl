@@ -25,12 +25,12 @@ note = "Run from the January restart to preserve the trajectory feeding the dail
 
 [instrumentation]
 module = "scripts/validation/fortran_pdump/btranOracleMod.F90"
-module_sha256 = "905f6ffe07301a2529a7bd8244b7b4d68e41fb1aeba2f53cb68bc5f852af884d"
+module_sha256 = "24debf32f09f0d99209d4dcdd3a4075846b7efbedb8768e2068ae760cf7bd924"
 driver_hooks = "scripts/validation/fortran_pdump/btran_oracle_driver.hooks.diff"
 driver_hooks_sha256 = "79fb0daa546dfc0105557d8454e0c836dc1ffedc7f3e8580ef809cc63d54fab3"
 target_window_patch = "repro/patches/bow-btran-target-window.patch"
 target_window_patch_sha256 = "4a2efd622d682719c1171db777b8b6c0a23f72fafd6b2a2e4e52bedc14081c4a"
-fields = ["instantaneous patch BTRAN", "BSUN", "BSHA", "vegwp", "SMP", "HK", "root conductance", "soil conductance", "soil-root conductance", "root fractions", "soil hydraulic parameters", "canopy geometry", "carried canopy-layer albedo and LUNA integration state", "instantaneous pressure and density", "prior transpiration", "LUNA 10-day state"]
+fields = ["instantaneous patch BTRAN", "BSUN", "BSHA", "vegwp", "SMP", "HK", "root conductance", "soil conductance", "soil-root conductance", "root fractions", "soil hydraulic parameters", "canopy geometry", "carried canopy-layer albedo and LUNA integration state", "absorbed vegetation shortwave", "instantaneous pressure and density", "prior transpiration", "LUNA 10-day state"]
 state_neutrality_required = true
 
 [staged_inputs]
@@ -93,7 +93,7 @@ diagnostic_after_sha256 = "08dd365985803d2f626199195d583fd276391ab1ce46516be0f45
 [shared_state_comparison]
 script = "scripts/validation/compare_btran_shared_state.jl"
 nstep = 2901
-registered_initial_fields = 26
+registered_initial_fields = 27
 initial_global_max_relative_error = 0.0
 julia_btran_pft2 = 0.84553519143568256
 fortran_btran_pft2 = 0.05617311246487857
@@ -127,6 +127,9 @@ fortran_outer_phs_trace_sha256 = "413070802a88e641b4cce3b1d903ac574f2f1f4b138c2f
 fortran_outer_phs_calls_pft2 = 11
 fortran_outer_phs_calls_pft3 = 7
 outer_trace_executable_sha256 = "a101a9a3ef9b8bd0103e676a05b4b3c74819df0c1e6cc93a96ddc1c362f47dc6"
+fortran_canopy_iteration_trace = "btran_canopy_periter_fortran_n2901.txt (generated in the run directory)"
+fortran_canopy_iteration_trace_sha256 = "f38ede0ada9c4d47fbb83933ebaef1ffb7584eab54a140598e1e075093f3e80c"
+canopy_trace_executable_sha256 = "c44d3057f77b31b80d153abd605cbfa03efffe1cc36b702bc34ae975217b6a3f"
 
 [current_blocker]
-description = "Adding carried VCMAXCINTSUN/VCMAXCINTSHA restores CTSM's shaded LUNA capacity scaling. The first tree hybrid_PHS result then agrees closely (AN_SUN 0.73843694 versus 0.73844529; stressed GS_SUN 48985.65 versus 48986.83), excluding the leaf photosynthesis tuple as the primary error. The later coupled canopy-temperature trajectory still takes a different number of outer calls and produces divergent BTRAN. Localize the canopy energy convergence inputs/order; no science exception has been added."
+description = "End-of-iteration canopy traces localize the next missing carried boundary field: Julia reaches canopy energy balance with SABV=0 for both vegetated patches, while CTSM has 772.8918277 and 190.2960005 W m-2. This reverses the first temperature increment (Julia -1 K, CTSM +1 K) even though the first leaf/PHS tuple is close. SABV is now registered in the oracle and replay, but it must be injected at the post-surface-radiation/pre-canopy boundary because the full driver recomputes it after the current pre-step hook. No science exception has been added."

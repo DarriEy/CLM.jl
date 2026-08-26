@@ -64,6 +64,7 @@ function inject_btran_oracle!(inst, bounds, _)
         inst.surfalb.fabi_sha_z_patch[p, :] .= permutedims(ds["FABI_SHA_Z"][:, :])
         inst.surfalb.vcmaxcintsun_patch[p] .= ds["VCMAXCINTSUN"][:]
         inst.surfalb.vcmaxcintsha_patch[p] .= ds["VCMAXCINTSHA"][:]
+        inst.solarabs.sabv_patch[p] .= ds["SABV"][:]
     end
     compare_inst_to_dump(inst, joinpath(RUN_DIR, "pdump_before_step_n$(NSTEP).nc");
                          label="injected initial state", tol=1e-9)
@@ -78,11 +79,19 @@ end
 step_date = oracle_datetime(ORACLE_BEFORE)
 println("BTRAN shared-state comparison: nstep=$NSTEP start=$step_date")
 photo_trace = joinpath(RUN_DIR, "btran_photo_julia_n$(NSTEP).txt")
+canopy_trace = joinpath(RUN_DIR, "btran_canopy_periter_julia_n$(NSTEP).txt")
 isfile(photo_trace) && rm(photo_trace)
+isfile(canopy_trace) && rm(canopy_trace)
 have_photo_debug = isdefined(CLM, :PHS_PHOTO_DEBUG)
+have_canopy_debug = isdefined(CLM, :CANOPY_PERITER_DEBUG)
 if have_photo_debug
     CLM.PHS_PHOTO_DEBUG[] = true
     CLM.PHS_PHOTO_DEBUG_PATH[] = photo_trace
+end
+if have_canopy_debug
+    CLM.CANOPY_PERITER_DEBUG[] = true
+    CLM.CANOPY_PERITER_PATH[] = canopy_trace
+    CLM.CANOPY_PERITER_NSTEP[] = NSTEP
 end
 (inst, bounds) = run_one_parity_step!(NSTEP; dumpdir=RUN_DIR, step_date=step_date,
                                       use_hydrstress=true, use_luna=true,
@@ -92,6 +101,10 @@ end
 if have_photo_debug
     CLM.PHS_PHOTO_DEBUG[] = false
     println("Julia PHS call trace: $photo_trace")
+end
+if have_canopy_debug
+    CLM.CANOPY_PERITER_DEBUG[] = false
+    println("Julia canopy iteration trace: $canopy_trace")
 end
 
 NCDataset(ORACLE_AFTER) do ds
