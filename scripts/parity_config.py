@@ -137,6 +137,14 @@ DOCUMENTED_EXCEPTIONS = {
         "snow ice/liquid, snowmelt, and snow fraction are already close; the annual "
         "mean depth residual is now ~4% (was ~12% before the z0mg fix) — the "
         "remaining gap is the thin-snow / melt-out depth relaxation over trace snow."),
+    ("Bow", "SNOW_DEPTH"): (
+        "Snow-covered-area height diagnostic. The primary gridcell-mean SNOWDP passes "
+        "(-0.385%, nRMSE 0.0188), as do annual SWE (-0.501%) and effective depth. "
+        "The covered-area height is amplified when snow cover is about 2-3%."),
+    ("Stillwater", "SNOW_DEPTH"): (
+        "Trace-snow amplification in snow-covered-area height: 60 trace-only days. "
+        "On 12 physical-pack days depth differs -0.170% (nRMSE 0.0070); gridcell-mean "
+        "SNOWDP differs -0.243% (nRMSE 0.00386), SWE -0.003%, density +0.136%."),
 }
 
 def date_ord(ds):

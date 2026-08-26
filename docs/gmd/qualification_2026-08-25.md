@@ -1,6 +1,6 @@
 # Three-site annual qualification — 2026-08-25
 
-Status: **annual completion passes; strict scientific-parity gate fails**.
+Status: **annual completion passes; two snow residuals resolved diagnostically; Bow BTRAN remains open**.
 
 ## Source and environment
 
@@ -44,19 +44,47 @@ three qualification sites.
 | Bow | SNOW_DEPTH | +0.9 % | 0.12 | daily |
 | Stillwater | SNOW_DEPTH | +15.8 % | 0.50 | daily |
 
-Therefore claim C01 (strict agreement with the declared Fortran reference) remains TBD and
-cannot be asserted for the qualification matrix. Annual completion claim C02 has supporting
+Therefore claim C01 (strict agreement with the declared Fortran reference) remains failed
+until Bow BTRAN is closed with a reproducible shared-state oracle. Annual completion claim C02 has supporting
 qualification evidence but is not final until inputs and run metadata are fully archived.
+
+## Fresh residual audit
+
+The submission branch adds `scripts/gmd/audit_qualification_residuals.py`, which reads only the
+new qualification outputs and staged Fortran references. It independently reproduced the
+residual mechanisms rather than importing historical paper results.
+
+`SNOW_DEPTH` is CTSM's height over the **snow-covered area**. CTSM's gridcell-mean snow
+height is the separate `SNOWDP` diagnostic. The two failed covered-area cells have passing
+gridcell-mean, snow-mass, and physical-pack comparisons:
+
+| Site | Covered-area depth | Covered nRMSE | Gridcell `SNOWDP` | Grid nRMSE | SWE | Physical-pack result |
+|---|---:|---:|---:|---:|---:|---|
+| Bow | +0.851% | 0.123 | -0.385% | 0.0188 | -0.501% | covered depth +0.852%; density -0.531% |
+| Stillwater | +15.757% | 0.503 | -0.243% | 0.00386 | -0.003% | 12 days: depth -0.170%, nRMSE 0.0070; density +0.136% |
+
+Stillwater has 60 days where SWE is positive but at or below the gate's 0.02 mm physical
+floor. Bow's largest covered-area depth differences occur from 26 September through 4
+October when snow cover is only about 2–3.5%; multiplying covered-area height by snow cover
+reproduces `SNOWDP` and removes the daily failure. Both `SNOW_DEPTH` cells are therefore
+retained visibly as documented secondary-diagnostic exceptions, while `SNOWDP` is the
+appropriate gridcell-scale paper variable.
+
+The fresh Bow audit localizes BTRAN to 29 April–6 May (largest difference on 30 April:
+Julia 0.33648, Fortran 0.21410). Yet the annual consumers pass: QVEGT and FCTR -0.674%,
+latent heat +0.574%; total soil liquid differs +0.087% and SWE -0.501%. This supports the
+daily-minimum amplification hypothesis but does not prove instantaneous implementation
+parity. The previously described shared-state n11616 oracle is absent from the staged
+archive and cannot be submission evidence until regenerated from the exact CTSM source
+pipeline.
 
 ## Immediate investigation
 
-1. Confirm date alignment, units, aggregation, fill handling, and the exact mapped Fortran
-   diagnostics for `BTRAN`/`BTRANMN` and `SNOW_DEPTH` before changing physics.
-2. Plot daily residuals and locate season/state transitions responsible for each nRMSE.
-3. Determine whether BTRAN compares unlike diagnostics (instantaneous/mean/minimum,
-   patch/column aggregation) or reflects a model-path difference.
-4. For snow depth, compare SWE, snow ice/liquid, snow fraction, layer count, density, melt,
-   and the distinction between snow-covered-area and gridcell-average depth.
-5. Use process-boundary dumps around the first divergence; fix only demonstrated defects.
-6. Keep thresholds frozen during this investigation. Do not add exceptions until a physical
+1. Regenerate the Bow 29 April shared-state/process-boundary oracle from the exact CTSM
+   source pipeline, including instantaneous BTRAN and its hydraulic inputs.
+2. Confirm that replaying the worst daily-minimum window from identical state matches before
+   classifying BTRAN as a documented diagnostic exception.
+3. Add `SNOWDP` explicitly to the frozen paper variable table and label `SNOW_DEPTH` as
+   snow-covered-area height everywhere.
+4. Keep thresholds frozen during the remaining investigation. Do not add a BTRAN exception until a physical
    mechanism and acceptability argument have independent scientific review.

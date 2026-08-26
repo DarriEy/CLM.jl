@@ -33,6 +33,10 @@ total_cells = total_pass = 0
 
 for key, fh0, jnc, lab, biome in DOMAINS:
     jpath = os.path.join(DATA_DIR, jnc)
+    if not os.path.exists(jpath):
+        # Qualification runs are isolated by domain to prevent accidental output
+        # reuse. Retain compatibility with the historical flat paper/data layout.
+        jpath = os.path.join(DATA_DIR, key, jnc)
     if not (os.path.exists(fh0) and os.path.exists(jpath)):
         pending.append((key, lab)); continue
     dj, df = Dataset(jpath), Dataset(fh0)

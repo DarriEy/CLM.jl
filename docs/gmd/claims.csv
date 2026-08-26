@@ -1,5 +1,5 @@
 claim_id,proposed_claim,status,required_experiment,evidence_artifact,scope_notes
-C01,Scoped Julia CPU implementation agrees with declared Fortran CLM5 reference,FAIL-QUALIFICATION,E1-E4,docs/gmd/qualification_2026-08-25.md,204/207 strict cells; three unexplained failures
+C01,Scoped Julia CPU implementation agrees with declared Fortran CLM5 reference,FAIL-QUALIFICATION,E1-E4,docs/gmd/qualification_2026-08-25.md,Two snow diagnostics resolved; Bow BTRAN shared-state oracle remains unavailable
 C02,Annual simulations complete with conservation checks active,PASS-QUALIFICATION,E3-E4,docs/gmd/qualification_2026-08-25.md,Three sites complete; archive provenance still required
 C03,Differentiable formulation has verified derivatives,FAIL-QUALIFICATION,E5-E6,docs/gmd/strict_suite_2026-08-25.md,AD group passes but non-finite winter finite difference is accepted
 C04,Smoothing introduces quantified acceptable bias,TBD,E5,TBD,Threshold requires scientific review
