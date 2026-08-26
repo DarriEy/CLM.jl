@@ -2074,7 +2074,7 @@ function canopy_fluxes_core!(
             _Tcp = eltype(wtga)
             open(CANOPY_PERITER_PATH[], itlef == 0 ? "w" : "a") do io
                 if itlef == 0
-                    println(io, "nstep itlef p t_veg dt_veg del del2 efe efsh ustar um obu wtl0 wtg0 wtga wtgaq qsatl qsatldT dc1 dc2 rssun rssha tlbef sabv air bir cir")
+                    println(io, "nstep itlef p t_veg dt_veg del del2 efe efsh ustar um obu wtl0 wtg0 wtga wtgaq qsatl qsatldT dc1 dc2 rssun rssha tlbef sabv air bir cir qg forc_q rb uaf")
                 end
                 for fi in 1:fn
                     p = filterp[fi]
@@ -2090,7 +2090,8 @@ function canopy_fluxes_core!(
                         wtl0[p], wtg0, wtga[p], wtgaq, qsatl[p], qsatldT[p],
                         dc1, dc2_dbg[p], photosyns.rssun_patch[p],
                         photosyns.rssha_patch[p], tlbef[p], solarabs.sabv_patch[p],
-                        air[p], bir[p], cir[p])
+                        air[p], bir[p], cir[p], waterdiagbulk.qg_col[c],
+                        forc_q_col[c], rb[p], frictionvel.uaf_patch[p])
                     println(io, join(row, " "))
                 end
             end

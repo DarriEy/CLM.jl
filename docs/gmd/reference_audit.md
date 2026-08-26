@@ -213,3 +213,12 @@ boundary conductance. Julia enters the tree call with `QAF=0.0065372678704` and
 that state before photosynthesis using `(forc_q + qg)/2` in both codes. Consequently,
 `QAF` was not retained as an oracle field. The next comparison must trace `qg` and its
 ground saturation inputs at canopy entry, plus the independent `rb`-to-`gbmol` path.
+
+An expanded end-of-iteration trace separates those paths. Atmospheric `forc_q` and
+leaf `qsatl` are exact, while column `qg` is lower in Julia by `2.72705e-7`; this
+fully accounts for the initial `QAF` direction because `QAF=(forc_q+qg)/2`.
+Separately, Julia's first tree `uaf` is lower by `5.88790e-7 m s-1` and `rb` is
+higher by `5.48786e-5 s m-1`; the grass differences have the same sign. The residual
+therefore has two concrete upstream branches: `SurfaceHumidity` (`qg_snow`, `qg_soil`,
+surface fractions and their temperatures) and the canopy `ram1 -> uaf -> rb -> gbmol`
+chain. Neither is evidence for changing the hydraulic or convergence algorithms.
