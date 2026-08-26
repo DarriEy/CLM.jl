@@ -55,6 +55,13 @@ function inject_btran_oracle!(inst, bounds, _)
         inst.photosyns.jmx25_z_patch[p, :] .= permutedims(ds["JMX25_Z"][:, :])
         inst.photosyns.pnlc_z_patch[p, :] .= permutedims(ds["PNLC_Z"][:, :])
         inst.photosyns.enzs_z_patch[p, :] .= permutedims(ds["ENZS_Z"][:, :])
+        inst.surfalb.nrad_patch[p] .= Int.(ds["NRAD"][:])
+        inst.surfalb.tlai_z_patch[p, :] .= permutedims(ds["TLAI_Z"][:, :])
+        inst.surfalb.fsun_z_patch[p, :] .= permutedims(ds["FSUN_Z"][:, :])
+        inst.surfalb.fabd_sun_z_patch[p, :] .= permutedims(ds["FABD_SUN_Z"][:, :])
+        inst.surfalb.fabd_sha_z_patch[p, :] .= permutedims(ds["FABD_SHA_Z"][:, :])
+        inst.surfalb.fabi_sun_z_patch[p, :] .= permutedims(ds["FABI_SUN_Z"][:, :])
+        inst.surfalb.fabi_sha_z_patch[p, :] .= permutedims(ds["FABI_SHA_Z"][:, :])
     end
     compare_inst_to_dump(inst, joinpath(RUN_DIR, "pdump_before_step_n$(NSTEP).nc");
                          label="injected initial state", tol=1e-9)
@@ -68,11 +75,17 @@ end
 
 step_date = oracle_datetime(ORACLE_BEFORE)
 println("BTRAN shared-state comparison: nstep=$NSTEP start=$step_date")
+photo_trace = joinpath(RUN_DIR, "btran_photo_julia_n$(NSTEP).txt")
+isfile(photo_trace) && rm(photo_trace)
+CLM.PHS_PHOTO_DEBUG[] = true
+CLM.PHS_PHOTO_DEBUG_PATH[] = photo_trace
 (inst, bounds) = run_one_parity_step!(NSTEP; dumpdir=RUN_DIR, step_date=step_date,
                                       use_hydrstress=true, use_luna=true,
                                       forcing_offset_hours=-1,
                                       driver_is_first_step=false,
                                       pre_step_hook=inject_btran_oracle!)
+CLM.PHS_PHOTO_DEBUG[] = false
+println("Julia PHS call trace: $photo_trace")
 
 NCDataset(ORACLE_AFTER) do ds
     f = Float64.(ds["BTRAN"][:])

@@ -107,11 +107,20 @@ and `0.127648`. This is a reproduced discrepancy, not grounds for an exception: 
 next localization must freeze the remaining instantaneous forcing and PHS conductance
 inputs before assigning the first divergent routine.
 
-That expansion is complete. At step 2901, Julia matches CTSM's post-call
+The first expansion is complete. At step 2901, Julia matches CTSM's post-call
 `K_SOIL_ROOT`, root conductance, and soil conductance exactly (zero max absolute and
 relative error), excluding conductance construction as the source of the BTRAN gap.
 CTSM's final sunlit/shaded stress factors for the tree patch are `0.0492946` and
 `0.0598674`; its weighted BTRAN is therefore `0.0561731`. The Julia one-step harness
-still returns BTRAN `1.0` and does not reproduce CTSM's sunlit/shaded LAI or canopy
-energy trajectory. Attribution must therefore move to the earlier canopy-radiation
-boundary. This remains an open localization result, not a scientific exception.
+initially returned BTRAN `1.0` and did not reproduce CTSM's sunlit/shaded LAI because
+the replay omitted canopy-layer albedo state carried from the preceding step.
+
+Adding `NRAD`, `TLAI_Z`, `FSUN_Z`, and the direct/diffuse sunlit/shaded absorbed-light
+profiles makes `LAISUN` and `LAISHA` exact. The same replay now gives Julia BTRAN
+`0.7974531` and `0.4016276` versus CTSM `0.0561731` and `0.1276478`; all three
+soil/root conductance arrays remain exact. Read-only call traces place the next
+divergence in the coupled photosynthesis/hydraulic demand: the final sunlit stomatal
+conductance is about `7.40e5` versus CTSM `6.61e5` for the tree patch, and `8.38e5`
+versus `1.72e6` for the grass patch. Conductance construction and sun/shade geometry
+are therefore excluded, but the photosynthesis-demand/calcstress boundary is not yet
+closed. This remains an open localization result, not a scientific exception.

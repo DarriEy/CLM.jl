@@ -27,7 +27,7 @@ contains
     use clm_time_manager, only : get_nstep, get_curr_date
     use clm_instMod     , only : energyflux_inst, canopystate_inst, soilstate_inst, &
                                  atm2lnd_inst, solarabs_inst, temperature_inst, &
-                                 photosyns_inst, frictionvel_inst, water_inst
+                                 photosyns_inst, frictionvel_inst, water_inst, surfalb_inst
 
     type(bounds_type), intent(in) :: bounds
     character(len=*), intent(in) :: label
@@ -41,8 +41,10 @@ contains
     integer :: v_kroot, v_soilcond, v_rootfr, v_bsw, v_sucsat
     integer :: v_laisun, v_laisha, v_elai, v_esai, v_tsai, v_fdry
     integer :: v_rho, v_pbot, v_thm, v_qtran, v_bsun, v_bsha
+    integer :: v_nrad, v_tlaiz, v_fsunz, v_fabdsun, v_fabdsha, v_fabisun, v_fabisha
     character(len=256) :: fname
     real(r8), allocatable :: p1(:), pveg(:,:), pcana(:,:), cground(:,:), psoil(:,:)
+    integer, allocatable :: pi1(:)
 
     nstep = get_nstep()
     if (nstep < oracle_nstep_lo .or. nstep > oracle_nstep_hi) return
@@ -54,6 +56,7 @@ contains
     npft = bounds%endp - bounds%begp + 1
     allocate(p1(npft), pveg(nvegwcs,npft), pcana(nlevcan,npft))
     allocate(cground(nlevgrnd,ncol), psoil(nlevsoi,npft))
+    allocate(pi1(npft))
 
     write(fname,'(a,a,a,i0,a)') 'btran_oracle_', trim(label), '_n', nstep, '.nc'
     ier = nf90_create(trim(fname), NF90_CLOBBER, ncid)
@@ -110,6 +113,13 @@ contains
     ier = nf90_def_var(ncid, 'QFLX_TRAN_VEG', NF90_DOUBLE, (/dpft/), v_qtran)
     ier = nf90_def_var(ncid, 'BSUN', NF90_DOUBLE, (/dpft/), v_bsun)
     ier = nf90_def_var(ncid, 'BSHA', NF90_DOUBLE, (/dpft/), v_bsha)
+    ier = nf90_def_var(ncid, 'NRAD', NF90_INT, (/dpft/), v_nrad)
+    ier = nf90_def_var(ncid, 'TLAI_Z', NF90_DOUBLE, (/dcan,dpft/), v_tlaiz)
+    ier = nf90_def_var(ncid, 'FSUN_Z', NF90_DOUBLE, (/dcan,dpft/), v_fsunz)
+    ier = nf90_def_var(ncid, 'FABD_SUN_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabdsun)
+    ier = nf90_def_var(ncid, 'FABD_SHA_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabdsha)
+    ier = nf90_def_var(ncid, 'FABI_SUN_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabisun)
+    ier = nf90_def_var(ncid, 'FABI_SHA_Z', NF90_DOUBLE, (/dcan,dpft/), v_fabisha)
     ier = nf90_enddef(ncid)
 
     ier = nf90_put_var(ncid, v_nstep, nstep)
@@ -153,6 +163,13 @@ contains
     call pft1d(bounds, water_inst%waterfluxbulk_inst%qflx_tran_veg_patch, p1); ier = nf90_put_var(ncid, v_qtran, p1)
     call pft1d(bounds, energyflux_inst%bsun_patch, p1); ier = nf90_put_var(ncid, v_bsun, p1)
     call pft1d(bounds, energyflux_inst%bsha_patch, p1); ier = nf90_put_var(ncid, v_bsha, p1)
+    call pftint1d(bounds, surfalb_inst%nrad_patch, pi1); ier = nf90_put_var(ncid, v_nrad, pi1)
+    call pft2d(bounds, nlevcan, surfalb_inst%tlai_z_patch, pcana); ier = nf90_put_var(ncid, v_tlaiz, pcana)
+    call pft2d(bounds, nlevcan, surfalb_inst%fsun_z_patch, pcana); ier = nf90_put_var(ncid, v_fsunz, pcana)
+    call pft2d(bounds, nlevcan, surfalb_inst%fabd_sun_z_patch, pcana); ier = nf90_put_var(ncid, v_fabdsun, pcana)
+    call pft2d(bounds, nlevcan, surfalb_inst%fabd_sha_z_patch, pcana); ier = nf90_put_var(ncid, v_fabdsha, pcana)
+    call pft2d(bounds, nlevcan, surfalb_inst%fabi_sun_z_patch, pcana); ier = nf90_put_var(ncid, v_fabisun, pcana)
+    call pft2d(bounds, nlevcan, surfalb_inst%fabi_sha_z_patch, pcana); ier = nf90_put_var(ncid, v_fabisha, pcana)
 
     ier = nf90_close(ncid)
     if (ier == NF90_NOERR) then
@@ -165,7 +182,7 @@ contains
   contains
 
     subroutine cleanup()
-      deallocate(p1, pveg, pcana, cground, psoil)
+      deallocate(p1, pveg, pcana, cground, psoil, pi1)
     end subroutine cleanup
 
   end subroutine btran_oracle_write
@@ -179,6 +196,16 @@ contains
        dst(p-bounds%begp+1) = src(p)
     end do
   end subroutine pft1d
+
+  subroutine pftint1d(bounds, src, dst)
+    type(bounds_type), intent(in) :: bounds
+    integer, intent(in) :: src(bounds%begp:)
+    integer, intent(out) :: dst(:)
+    integer :: p
+    do p = bounds%begp, bounds%endp
+       dst(p-bounds%begp+1) = src(p)
+    end do
+  end subroutine pftint1d
 
   subroutine pft2d(bounds, nlev, src, dst)
     type(bounds_type), intent(in) :: bounds
