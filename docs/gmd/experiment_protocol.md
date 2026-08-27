@@ -38,8 +38,9 @@ Status: **draft — thresholds and experiment membership are not frozen**.
 
 - **Reference:** CTSM tag `ctsm5.3.012`, commit
   `ab466d6f9789ca3df2c72bda46cf7afed2d04102`; the current macOS build and oracle
-  configuration are recorded in `repro/configs/bow_btran_oracle.toml`. The definitive
-  Linux compiler/flags and archived instrumentation patch remain to be frozen.
+  configuration are recorded in `repro/configs/bow_btran_oracle.toml`. The prescribed
+  macOS GNU Fortran 15.3/MPICH 4.3.2 `-O` sensitivity cell completed on 2026-08-27.
+  The definitive Linux compiler/flags remain to be run and frozen.
 - **Candidate:** exact CLM.jl submission commit TBD; Julia CPU Float64.
 - **Differentiable candidate:** same commit/configuration with explicitly listed smoothing
   and AD mode.

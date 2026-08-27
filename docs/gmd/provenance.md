@@ -100,3 +100,16 @@ The exact base commit previously completed GitHub Actions run
 on 2026-08-05. Its four jobs were Julia 1.10 on Ubuntu, latest stable Julia on Ubuntu,
 two-rank MPI bit-identity, and a default-bounds conservation gate. This establishes a
 remote baseline for the source commit, but it does not replace the frozen paper campaign.
+
+On 2026-08-27, the prescribed macOS numerical-sensitivity cell completed on Darwin
+25.5.0/arm64. A durable stock CTSM executable built with conda-forge GNU Fortran 15.3.0,
+MPICH 4.3.2, and `-O` completed the 3,025-step Bow trajectory in 5.62 s; its SHA-256 is
+`a82a46532835d5c4d663eaec921daeef2e26b472cce80e136561ef4ed4df3da7`. A separately
+built instrumented executable completed the same trajectory in 6.20 s and emitted the
+target-step oracle. The injected state was exact, the tree BTRAN absolute error was
+`9.777664788934715e-13`, and the grass error was `1.0272300575542292e-5`, reproducing
+the prior localization. CTSM is recorded as dirty because the archived Darwin build-only
+compatibility patch modifies CIME's PIO invocation; no CLM scientific source is changed
+by that patch. The machine-readable result is intentionally ignored as generated data at
+`repro/results/btran-sensitivity/macos-arm64-gnu15-O-oracle/result.json`. No acceptance
+tolerance is inferred from this single platform cell.
