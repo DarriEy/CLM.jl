@@ -427,6 +427,15 @@ function _calib_dual_copy(src, ::Type{D}) where D
                 setfield!(dst, name, D.(sv))
             elseif sv isa Float64
                 setfield!(dst, name, D(sv))
+            elseif sv isa Array{<:Integer} || sv isa Array{Bool} || sv isa BitArray
+                # Mutable per-run STATE, not just maps: e.g. `col.snl` is flipped
+                # by snow-layer initiation mid-step. Sharing it by reference let a
+                # dual run's snl mutation leak into every later dual instance
+                # built from the same Float64 state, which then read NaN-padded
+                # snow layers it never initialized (t_soisno went all-NaN inside
+                # soil_temperature! on the second of two IDENTICAL runs — the
+                # winter AD false-FAIL of ad_qualification_2026-08-27).
+                setfield!(dst, name, copy(sv))
             else
                 setfield!(dst, name, sv)
             end

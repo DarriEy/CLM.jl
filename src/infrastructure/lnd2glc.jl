@@ -188,13 +188,25 @@ function update_lnd2glc!(
     jtop = nlevsno + 1
 
     # --- defaults (lnd2glcMod.F90:174-193) ---
-    for g in bounds_g, n in 1:nec1
-        l2g.qice_grc[n, g] = zero(FT)
-        l2g.tsrf_grc[n, g] = FT(TFRZ)
-        l2g.topo_grc[n, g] = zero(FT)
-    end
+    # Broadcast over views, never per-element loops: l2g may be device-resident
+    # (the CN full-driver Metal composite reaches this routine), and a scalar
+    # loop here is a device scalar-indexing leak.
+    fill!(view(l2g.qice_grc, :, bounds_g), zero(FT))
+    fill!(view(l2g.tsrf_grc, :, bounds_g), FT(TFRZ))
+    fill!(view(l2g.topo_grc, :, bounds_g), zero(FT))
 
     isempty(bounds_c) && return nothing
+
+    if !(l2g.qice_grc isa Array)
+        # Device path: same per-column physics as the host loop below, as a KA
+        # kernel. The double-assignment error and the |qice|>1 warning are
+        # host-only diagnostics (same convention as balance_check.jl's
+        # `isa Array`-gated scans): the subgrid structure they validate is
+        # static, so any CPU run of the configuration exercises them.
+        lnd2glc_update_device!(l2g, temperature, wf, topo, col, lun, grc,
+                               filter_do_smb_c, bounds_c, jtop, init)
+        return nothing
+    end
 
     # Guard against assigning the same (gridcell, class) slot twice.
     fields_assigned = falses(nec1, last(bounds_g))
@@ -243,5 +255,70 @@ function update_lnd2glc!(
         end
     end
 
+    return nothing
+end
+
+# --------------------------------------------------------------------------
+# Device path for update_lnd2glc!
+# --------------------------------------------------------------------------
+
+# One thread per column in `bounds_c`. Mirrors the host loop in
+# update_lnd2glc! minus its host-only diagnostics: the double-assignment
+# error cannot throw in a kernel (and would be a write race if the condition
+# held), and the |qice| > 1 warning cannot print — both depend only on the
+# static subgrid structure plus magnitudes any CPU run of the same
+# configuration checks. ISTICE columns take their elevation class from the
+# column itype; ISTSOIL columns fill the bare-land slot (class 0) with the
+# bareland normalization inlined (whole-glacier gridcells keep factor 1).
+@kernel function _lnd2glc_update_kernel!(tsrf, topog, qice, @Const(filter_do_smb_c),
+        @Const(col_landunit), @Const(col_gridcell), @Const(col_itype),
+        @Const(col_wtgcell), @Const(lun_itype), @Const(lun_wtgcell),
+        @Const(landunit_indices), @Const(t_soisno), @Const(topo_col),
+        @Const(qflx_glcice), jtop::Int, init::Bool, nfilt::Int,
+        cmin::Int, cmax::Int)
+    i = @index(Global)
+    c = i + cmin - 1
+    @inbounds if c <= cmax && c <= nfilt && filter_do_smb_c[c]
+        T = eltype(qice)
+        l = col_landunit[c]
+        g = col_gridcell[c]
+        itl = lun_itype[l]
+        n = -1
+        flux_normalization = one(T)
+        if itl == ISTICE
+            n = col_itype_to_ice_class(Int(col_itype[c]))
+        elseif itl == ISTSOIL
+            n = 0
+            li = landunit_indices[ISTICE, g]
+            area_glacier = li == ISPVAL ? zero(T) : T(lun_wtgcell[li])
+            if !(abs(area_glacier - one(T)) < T(1.0e-13))
+                flux_normalization = T(col_wtgcell[c]) / (one(T) - area_glacier)
+            end
+        end
+        if n >= 0
+            idx = lnd2glc_class_index(n)
+            if 1 <= idx <= size(qice, 1)
+                tsrf[idx, g] = t_soisno[c, jtop]
+                topog[idx, g] = topo_col[c]
+                if !init
+                    qice[idx, g] = qflx_glcice[c] * flux_normalization
+                end
+            end
+        end
+    end
+end
+
+"Launch the device variant of the update_lnd2glc! column loop."
+function lnd2glc_update_device!(l2g::Lnd2GlcData, temperature::TemperatureData,
+                                wf, topo::TopoData, col::ColumnData,
+                                lun::LandunitData, grc::GridcellData,
+                                filter_do_smb_c::AbstractVector{Bool},
+                                bounds_c::UnitRange{Int}, jtop::Int, init::Bool)
+    _launch!(_lnd2glc_update_kernel!, l2g.tsrf_grc, l2g.topo_grc, l2g.qice_grc,
+             filter_do_smb_c, col.landunit, col.gridcell, col.itype, col.wtgcell,
+             lun.itype, lun.wtgcell, grc.landunit_indices,
+             temperature.t_soisno_col, topo.topo_col, wf.qflx_glcice_col,
+             jtop, init, length(filter_do_smb_c), first(bounds_c), last(bounds_c);
+             ndrange = length(bounds_c))
     return nothing
 end
