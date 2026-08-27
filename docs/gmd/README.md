@@ -37,6 +37,7 @@ that satisfies the same evidence requirements.
 - [ ] Code, inputs, outputs, and analysis have licence/redistribution clearance.
 - [ ] Exact software and experiment releases archived with persistent identifiers.
 - [ ] Human domain and numerical reviews completed and recorded.
+- [x] Fresh manuscript architecture and journal-specific submission strategy established.
 
 The current qualification checkpoint is indexed in `repro/results/index.json` and checked
 by `scripts/gmd/verify_results_index.py`. The machine-readable-results item remains open
@@ -69,6 +70,9 @@ docs/gmd/
   redistribution_audit_2026-08-27.md  committed-data clearance audit
   experiment_protocol.md    frozen scientific protocol
   claims.csv                claim-to-evidence ledger
+  submission_strategy.md    staged journal and archive strategy
+paper/
+  README.md                 fresh manuscript architecture and drafting guardrails
 repro/
   environments/             locked paper environments and hardware records
   configs/                  complete model/experiment configurations

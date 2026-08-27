@@ -1,4 +1,5 @@
-paper/
+paper/*
+!paper/README.md
 .DS_Store
 
 # Archives / build artifacts
