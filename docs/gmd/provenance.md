@@ -143,3 +143,9 @@ cannot bypass its comparisons. The locked Linux focused rerun now fails 9 winter
 and passes all 125 assertions across the other five regimes. This is an intentionally open
 qualification gate, recorded in `ad_qualification_2026-08-27.md`; it supersedes the earlier
 console label that called the NaN-reference winter case passed.
+
+The two-parameter synthetic recovery test was similarly tightened to require a nonzero
+starting signal and recovery of each generating parameter within 10%. Its locked Linux run
+passes the scalar `csoilc` recovery but fails four joint Medlyn/Vcmax assertions: objective
+and gradient are zero at the wrong defaults, and recovered errors are 25.0% and 23.1%.
+`calibration_qualification_2026-08-27.md` records the result and resulting claim exclusion.

@@ -186,7 +186,9 @@ const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
         # 1. Gradient is non-zero (AD differentiates through csoilc correctly)
         grad = CLM.calibration_gradient(prob, θ_start)
         @test abs(grad[1]) > 1.0
-        # 2. Optimizer did not diverge
+        # 2. A recovery experiment must recover the generating parameter.
+        @test rel_recovery_error < 0.10
+        # 3. Optimizer did not diverge
         @test result.objective <= obj_start * 1.1
         @test result.iterations <= 20
         println("  Experiment A: PASSED")
@@ -273,11 +275,18 @@ const FSURDAT_PATH, PARAMFILE_PATH = bow_params()
         println("  Iterations: $(result.iterations), converged: $(result.converged)")
         println("  Final objective: $(round(result.objective, sigdigits=6))")
 
-        # Success criterion: objective decreased significantly
-        # With use_smooth_fd=true, gradient descent should converge well.
+        # A twin experiment is a recovery test, not merely an optimizer smoke test.
+        # Require an identifiable starting signal and recovery of both generating
+        # parameters; a zero objective at the defaults cannot count as success.
+        grad_start = CLM.calibration_gradient(prob, θ_start)
+        @test isfinite(obj_start) && obj_start > 1e-10
+        @test all(isfinite, grad_start)
+        @test maximum(abs, grad_start) > 1e-8
+        @test err_medlyn < 0.10
+        @test err_vcmax < 0.10
         @test result.objective <= obj_start * 0.5  # at least 50% reduction
         @test result.iterations <= 30
-        println("  Experiment B: PASSED")
+        println("  Experiment B: COMPLETED — verdict is the enclosing Test summary")
     end
 
     # =====================================================================

@@ -103,3 +103,8 @@ The AD false-positive has now been converted into a real gate: five forcing regi
 125/125, while winter fails 9 finite-reference assertions. See
 `ad_qualification_2026-08-27.md`. Seasonal-cycle differentiability remains outside the
 submission claim unless that trajectory is repaired and independently requalified.
+
+The synthetic calibration false-positive is also closed: scalar `csoilc` recovery passes,
+but the joint Medlyn/Vcmax experiment now fails four identifiability/recovery assertions
+because its starting objective and gradient are exactly zero at the wrong parameters. See
+`calibration_qualification_2026-08-27.md`. Joint parameter-recovery claims remain excluded.
