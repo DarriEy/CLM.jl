@@ -24,16 +24,18 @@
     },
     "S04": {
       "logical_name": "Bow CLM DDS final-evaluation chain",
+      "exact_history_file": "Bow_at_Banff_lumped.clm2.h0.2008-12-30-00000.nc",
+      "exact_history_sha256": "6793ab309c9da08a5e18e7acc79c488b9758f16cee4f21ccedfb20794cc9734b",
       "declared_generation_sources": ["RDRS hourly forcing", "WSC station 05BB001", "Copernicus DEM", "MODIS land cover", "CTSM release-clm5.0.30", "SYMFLUENCE"],
       "terms_ids": ["T01", "T02", "T03", "T04", "T05", "T06"],
-      "exact_extraction_recipe_identified": false,
+      "exact_extraction_recipe_identified": true,
       "license_evidence_complete": false
     }
   },
   "derivations": {
     "D02": {"source_ids": ["S02"], "copied_values": ["LONGXY", "LATIXY"], "coordinate_identity_verified": true},
     "D03": {"source_ids": ["S03"], "copied_values": ["LONGXY", "LATIXY"], "coordinate_identity_verified": true},
-    "D04": {"source_ids": ["S04"], "exact_extraction_recipe_identified": false},
+    "D04": {"source_ids": ["S04"], "exact_extraction_recipe_identified": true, "recipe": "scripts/gmd/extract_bow_reference.jl", "all_28_arrays_bit_identical": true},
     "D05": {"source_ids": ["S01"], "byte_copy_then_changed_variables": ["PCT_GLACIER", "PCT_NATVEG"], "all_other_variables_identical": true},
     "D06": {"source_ids": ["S01"], "byte_copy_then_changed_variables": ["PCT_LAKE", "PCT_NATVEG"], "all_other_variables_identical": true},
     "D07": {"source_ids": ["S01"], "byte_copy_then_changed_variables": ["PCT_LAKE", "PCT_NATVEG"], "all_other_variables_identical": true}

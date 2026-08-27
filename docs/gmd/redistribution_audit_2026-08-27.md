@@ -38,8 +38,13 @@ source hashes, copied fields, and exact transformation evidence. S01 is the Bow 
 file declared by the local campaign configuration to incorporate Copernicus DEM and MODIS
 land-cover inputs. S02 is the Aripuana surface file; S03 is the exact CTSM input-data
 surface file. D04's metadata and surviving final-evaluation directory identify an RDRS,
-WSC, Copernicus, MODIS, CTSM, and SYMFLUENCE chain, but no exact extraction recipe for the
-committed 365-value subset was found.
+WSC, Copernicus, MODIS, CTSM, and SYMFLUENCE chain. The exact source history file and
+extraction have now been recovered: every one of the committed subset's 28 arrays is
+bit-identical to `Bow_at_Banff_lumped.clm2.h0.2008-12-30-00000.nc` at the recorded S04
+checksum. `scripts/gmd/extract_bow_reference.jl` reproduces the subset without aggregation
+or recalculation. Regeneration matches dimensions, raw array values, variable attributes,
+and global attributes; the NetCDF container checksum is not expected to match across
+serialization libraries. This closes content provenance, not redistribution permission.
 
 The three fixture generators now require an explicit source or `SYMFLUENCE_DATA`, record a
 source checksum, and avoid writing absolute source paths. This prevents future privacy

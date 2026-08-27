@@ -34,8 +34,9 @@ Primary records reviewed:
 2. Ask NCAR/CTSM maintainers for the redistribution status of exact S03. If it is not
    affirmatively redistributable, exclude D03 and provide the standard CTSM downloader
    path plus checksum.
-3. Recover D04's extraction recipe. Then package ECCC/WSC attributions, the applicable
-   Copernicus notice, NASA citations, and a complete transformation record.
+3. D04's exact extraction recipe is recovered. Package ECCC/WSC attributions, the
+   applicable Copernicus notice, NASA citations, and the complete transformation record
+   only after T03 and T06 are resolved or bypassed.
 
 Until these actions are complete, all six NetCDF artifacts remain `HOLD` and the GMD
 redistribution checklist remains open.
