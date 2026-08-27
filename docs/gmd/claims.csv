@@ -1,9 +1,9 @@
 claim_id,proposed_claim,status,required_experiment,evidence_artifact,scope_notes
 C01,Scoped Julia CPU implementation agrees with declared Fortran CLM5 reference,FAIL-QUALIFICATION,E1-E4,docs/gmd/qualification_2026-08-25.md,Three-cell BTRAN sensitivity matrix is complete; grass residual disposition and audited annual rerun remain open
 C02,Annual simulations complete with conservation checks active,PASS-QUALIFICATION,E3-E4,docs/gmd/qualification_2026-08-25.md,Three sites complete; definitive archive provenance and frozen rerun still required
-C03,Differentiable formulation has verified derivatives,FAIL-QUALIFICATION,E5-E6,docs/gmd/ad_qualification_2026-08-27.md,Five forcing regimes pass 125/125; winter fails nine finite-reference assertions so seasonal-cycle robustness is excluded
+C03,Differentiable formulation has verified derivatives,PASS-QUALIFICATION-MACOS,E5-E6,docs/gmd/ad_requalification_2026-08-27.md,All six regimes pass 150/150 after the dual-copy state-aliasing fix; winter FAIL was a harness artifact; locked-Linux rerun pending
 C04,Smoothing introduces quantified acceptable bias,TBD,E5,TBD,Threshold requires scientific review
-C05,Gradient calibration recovers synthetic parameters,FAIL-QUALIFICATION,E7,docs/gmd/calibration_qualification_2026-08-27.md,Scalar csoilc recovery passes; joint Medlyn/Vcmax experiment has zero starting signal and fails four assertions
+C05,Gradient calibration recovers synthetic parameters,PASS-QUALIFICATION-MACOS,E7,docs/gmd/calibration_requalification_2026-08-27.md,Joint Medlyn/Vcmax recovery passes 19/19 after the PHS overrides-forwarding and LUNA vcmax-scale fixes; locked-Linux rerun pending
 C06,Demonstrated accelerator reproduces CPU pathway,TBD,E8,TBD,Matched precision comparison
 C07,Accelerator becomes faster above a measured workload,TBD,E9,TBD,Only tested hardware/software
 C08,Paper results are independently reproducible,PARTIAL-QUALIFICATION,clean-room,docs/gmd/strict_suite_linux_2026-08-27.md,Locked Linux CPU/data execution completed; definitive one-command campaign DOI and independent reproduction remain open
