@@ -136,12 +136,26 @@ function reference!(f)
                 (rho_est_c / rho_est_g)
         end
     end
+    # pco2/po2 rescale: ONE rescale per gridcell at the weighted-mean
+    # elevation-corrected pbot, in the kernel's exact algebraic form
+    # (pco2 *= pbot_ds/pbot_nd). The old per-column divide-then-multiply was
+    # the very defect 15b7601/5d27c43 fixed (it compounded across multi-column
+    # gridcells) and differs by 1 ulp even for one column, so keeping it here
+    # made the byte-identity gate flag the INTENDED src behaviour.
+    psum = zeros(bounds.endg); wsum = zeros(bounds.endg)
     for c in bc_col
         g = col.gridcell[c]
-        pbot_nd = a2l.forc_pbot_not_downscaled_grc[g]; pbot_ds = a2l.forc_pbot_downscaled_col[c]
+        w = col.wtgcell[c]; w = isfinite(w) ? max(w, 0.0) : 1.0
+        psum[g] += a2l.forc_pbot_downscaled_col[c] * w
+        wsum[g] += w
+    end
+    for g in bounds.begg:bounds.endg
+        pbot_nd = a2l.forc_pbot_not_downscaled_grc[g]
+        pbot_ds = wsum[g] > 0.0 ? psum[g] / wsum[g] : 0.0
         if pbot_nd > 0.0 && pbot_ds > 0.0
-            a2l.forc_pco2_grc[g] = (a2l.forc_pco2_grc[g] / pbot_nd) * pbot_ds
-            a2l.forc_po2_grc[g]  = (a2l.forc_po2_grc[g]  / pbot_nd) * pbot_ds
+            r = pbot_ds / pbot_nd
+            a2l.forc_pco2_grc[g] *= r
+            a2l.forc_po2_grc[g]  *= r
         end
     end
     # partition_precip
