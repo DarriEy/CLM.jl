@@ -3,11 +3,13 @@
 
 import csv
 import hashlib
+import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "repro/manifests/redistribution.csv"
+SOURCES = ROOT / "repro/manifests/redistribution_sources.json"
 
 
 def sha256(path):
@@ -21,6 +23,7 @@ def sha256(path):
 def main():
     with MANIFEST.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
+    source_trace = json.loads(SOURCES.read_text())
     expected = set()
     for prefix in ("data", "test/reference_data", "test_inputs"):
         expected.update(path.relative_to(ROOT).as_posix() for path in (ROOT / prefix).rglob("*")
@@ -38,6 +41,17 @@ def main():
             evidence = ROOT / row["license_evidence"]
             if not evidence.is_file():
                 raise AssertionError(f"missing licence evidence: {row['artifact_id']}")
+        elif row["redistribution_status"] == "HOLD":
+            evidence = ROOT / row["license_evidence"]
+            if not evidence.is_file():
+                raise AssertionError(f"missing hold evidence: {row['artifact_id']}")
+            derivation = source_trace["derivations"].get(row["artifact_id"])
+            if derivation is None:
+                raise AssertionError(f"missing source derivation: {row['artifact_id']}")
+            for source_id in derivation["source_ids"]:
+                source = source_trace["sources"][source_id]
+                if source["license_evidence_complete"]:
+                    raise AssertionError(f"held source unexpectedly claims clearance: {source_id}")
     statuses = {row["redistribution_status"] for row in rows}
     if "HOLD" not in statuses:
         raise AssertionError("release must not appear cleared while unresolved data remain")

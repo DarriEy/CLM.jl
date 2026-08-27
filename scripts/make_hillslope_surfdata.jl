@@ -25,11 +25,11 @@
 
 using NCDatasets
 using Printf
+using SHA
 
-const BASE = length(ARGS) >= 1 ? ARGS[1] :
-    "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc"
-const OUT  = length(ARGS) >= 2 ? ARGS[2] :
-    "/private/tmp/claude-501/hillslope_ne3np4_synthetic_c.nc"
+length(ARGS) == 2 || error("usage: make_hillslope_surfdata.jl BASE_SURFDATA OUTPUT")
+const BASE = ARGS[1]
+const OUT = ARGS[2]
 
 # ---- synthetic catena definition (1 hillslope, 4 columns, lowland ci=1 -> upland ci=4)
 const NHILL = 1     # number of representative hillslopes per landunit
@@ -140,7 +140,8 @@ ds.attrib["title"] = "Synthetic CTSM hillslope catena on a real base surface-dat
 ds.attrib["note"]  = "REAL base grid/domain (LONGXY/LATIXY copied from base surfdata); " *
                      "SYNTHETIC idealized hillslope geometry (1 hillslope, 4 cols, upland->lowland). " *
                      "For CLM.jl<->Fortran CTSM hillslope-hydrology parity testing only."
-ds.attrib["base_surfdata"] = BASE
+ds.attrib["base_surfdata"] = basename(BASE)
+ds.attrib["base_surfdata_sha256"] = bytes2hex(open(sha256, BASE))
 ds.attrib["base_grid_kind"] = base_kind
 ds.attrib["active_gridcell_1based"] = active
 ds.attrib["created_by"] = "scripts/make_hillslope_surfdata.jl"

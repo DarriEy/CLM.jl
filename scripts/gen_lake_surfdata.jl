@@ -18,15 +18,22 @@
 #
 # Usage:
 #   julia --project=. scripts/gen_lake_surfdata.jl [path/to/source/surfdata_clm.nc]
-# Default source = the Bow-at-Banff surfdata in SYMFLUENCE_data.
+# If no source argument is given, SYMFLUENCE_DATA must identify the staged archive.
+# Set CLM_FIXTURE_OUTDIR to test regeneration without overwriting tracked fixtures.
 # ==========================================================================
 
 using NCDatasets
+using SHA
 
-const DEFAULT_SRC = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/" *
-                    "domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
+const OUTDIR = get(ENV, "CLM_FIXTURE_OUTDIR",
+                   joinpath(@__DIR__, "..", "test_inputs", "lake"))
 
-const OUTDIR = joinpath(@__DIR__, "..", "test_inputs", "lake")
+function default_source()
+    root = get(ENV, "SYMFLUENCE_DATA", "")
+    isempty(root) && error("pass source surfdata or set SYMFLUENCE_DATA")
+    joinpath(root, "domain_Bow_at_Banff_lumped", "settings", "CLM", "parameters",
+             "surfdata_clm.nc")
+end
 
 """
     clone_surfdata(src, dst; pct_natveg, pct_lake, lakedepth)
@@ -51,6 +58,8 @@ function clone_surfdata(src::String, dst::String; pct_natveg::Float64,
         if haskey(ds, "LAKEDEPTH")
             set_scalar!(ds, "LAKEDEPTH", lakedepth)
         end
+        ds.attrib["derived_from_sha256"] = bytes2hex(open(sha256, src))
+        ds.attrib["created_by"] = "scripts/gen_lake_surfdata.jl"
     end
     return dst
 end
@@ -64,7 +73,7 @@ function set_scalar!(ds::NCDataset, name::String, val::Real)
 end
 
 function main()
-    src = length(ARGS) >= 1 ? ARGS[1] : DEFAULT_SRC
+    src = length(ARGS) >= 1 ? ARGS[1] : default_source()
     mkpath(OUTDIR)
 
     f_lake100 = joinpath(OUTDIR, "surfdata_lake100.nc")

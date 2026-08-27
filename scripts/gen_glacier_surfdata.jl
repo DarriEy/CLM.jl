@@ -23,15 +23,22 @@
 #
 # Usage:
 #   julia --project=. scripts/gen_glacier_surfdata.jl [path/to/source/surfdata_clm.nc]
-# Default source = the Bow-at-Banff surfdata in SYMFLUENCE_data.
+# If no source argument is given, SYMFLUENCE_DATA must identify the staged archive.
+# Set CLM_FIXTURE_OUTDIR to test regeneration without overwriting tracked fixtures.
 # ==========================================================================
 
 using NCDatasets
+using SHA
 
-const DEFAULT_SRC = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/" *
-                    "domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
+const OUTDIR = get(ENV, "CLM_FIXTURE_OUTDIR",
+                   joinpath(@__DIR__, "..", "test_inputs", "glacier"))
 
-const OUTDIR = joinpath(@__DIR__, "..", "test_inputs", "glacier")
+function default_source()
+    root = get(ENV, "SYMFLUENCE_DATA", "")
+    isempty(root) && error("pass source surfdata or set SYMFLUENCE_DATA")
+    joinpath(root, "domain_Bow_at_Banff_lumped", "settings", "CLM", "parameters",
+             "surfdata_clm.nc")
+end
 
 # Write a single value into a (lsmlat, lsmlon) scalar field, preserving shape.
 function set_scalar!(ds::NCDataset, name::String, val::Real)
@@ -62,12 +69,14 @@ function clone_surfdata(src::String, dst::String; pct_natveg::Float64,
         set_scalar!(ds, "PCT_WETLAND", 0.0)
         set_scalar!(ds, "PCT_URBAN",   0.0)
         set_scalar!(ds, "PCT_OCEAN",   0.0)
+        ds.attrib["derived_from_sha256"] = bytes2hex(open(sha256, src))
+        ds.attrib["created_by"] = "scripts/gen_glacier_surfdata.jl"
     end
     return dst
 end
 
 function main()
-    src = length(ARGS) >= 1 ? ARGS[1] : DEFAULT_SRC
+    src = length(ARGS) >= 1 ? ARGS[1] : default_source()
     mkpath(OUTDIR)
 
     f_glac = joinpath(OUTDIR, "surfdata_glacier100.nc")

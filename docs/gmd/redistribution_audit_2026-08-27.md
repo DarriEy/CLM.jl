@@ -29,7 +29,21 @@ The authoritative file-level ledger is `repro/manifests/redistribution.csv`; run
   SYMFLUENCE DDS workflow without recording licences for forcing, parameters, restart, or
   surface inputs. D04 remains on hold; generated status alone is insufficient evidence.
 - The glacier and two lake fixtures were mechanically derived from Bow surface data. Their
-  global `source = SYMFLUENCE` attribute is not a licence. D05-D07 remain on hold.
+  generators first byte-copy S01 and change only two land-unit variables; every other
+  variable was verified identical. Their global `source = SYMFLUENCE` attribute is not a
+  licence. D05-D07 remain on hold.
+
+`repro/manifests/redistribution_sources.json` now records privacy-safe logical source IDs,
+source hashes, copied fields, and exact transformation evidence. S01 is the Bow surface
+file declared by the local campaign configuration to incorporate Copernicus DEM and MODIS
+land-cover inputs. S02 is the Aripuana surface file; S03 is the exact CTSM input-data
+surface file. D04's metadata and surviving final-evaluation directory identify an RDRS,
+WSC, Copernicus, MODIS, CTSM, and SYMFLUENCE chain, but no exact extraction recipe for the
+committed 365-value subset was found.
+
+The three fixture generators now require an explicit source or `SYMFLUENCE_DATA`, record a
+source checksum, and avoid writing absolute source paths. This prevents future privacy
+leakage but does not retroactively clear or alter the held artifacts.
 
 No staged scientific archive under `SYMFLUENCE_DATA` is approved for redistribution by
 this audit. The definitive archive must extend the ledger to every forcing, restart,
