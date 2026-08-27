@@ -215,9 +215,10 @@ function lnd2atm_rof!(
         hillslope_streamflow_to_grc!(l2a.qflx_rofliq_stream_grc,
             wf.volumetric_streamflow_lun, lun, grc, bounds_l, bounds_g)
     else
-        for g in bounds_g
-            l2a.qflx_rofliq_stream_grc[g] = zero(eltype(l2a.qflx_rofliq_stream_grc))
-        end
+        # Broadcast over a view, not a scalar loop — l2a may be device-resident
+        # (this runs inside the whole-driver Metal composites).
+        fill!(view(l2a.qflx_rofliq_stream_grc, bounds_g),
+              zero(eltype(l2a.qflx_rofliq_stream_grc)))
     end
 
     # --- surface / subsurface / perched runoff (lnd2atmMod.F90:356-415) ---
@@ -258,12 +259,12 @@ function lnd2atm_rof!(
     c2g_urbanf!(l2a.qflx_rofliq_qgwl_grc, wf.qflx_qrgwl_col, col, lun, bounds_c, bounds_g)
     c2g_urbanf!(l2a.qflx_rofliq_grc, wf.qflx_runoff_col, col, lun, bounds_c, bounds_g)
     if length(wf.qflx_liq_dynbal_grc) >= last(bounds_g)
-        for g in bounds_g
-            d = wf.qflx_liq_dynbal_grc[g]
-            isfinite(d) || continue
-            l2a.qflx_rofliq_qgwl_grc[g] -= d
-            l2a.qflx_rofliq_grc[g]      -= d
-        end
+        # Device-safe broadcast form of the guarded subtraction: a non-finite
+        # (unset) dynbal flux contributes 0, identical to the skipped iteration.
+        dyn = view(wf.qflx_liq_dynbal_grc, bounds_g)
+        corr = ifelse.(isfinite.(dyn), dyn, zero(eltype(dyn)))
+        view(l2a.qflx_rofliq_qgwl_grc, bounds_g) .-= corr
+        view(l2a.qflx_rofliq_grc, bounds_g)      .-= corr
     end
 
     # --- irrigation withdrawal (lnd2atmMod.F90:455-458) ---
@@ -272,10 +273,9 @@ function lnd2atm_rof!(
     # --- ice runoff, minus the dynbal correction (lnd2atmMod.F90:460-468) ---
     c2g_urbanf!(l2a.qflx_rofice_grc, l2a.qflx_ice_runoff_col, col, lun, bounds_c, bounds_g)
     if length(wf.qflx_ice_dynbal_grc) >= last(bounds_g)
-        for g in bounds_g
-            d = wf.qflx_ice_dynbal_grc[g]
-            isfinite(d) && (l2a.qflx_rofice_grc[g] -= d)
-        end
+        dyn_i = view(wf.qflx_ice_dynbal_grc, bounds_g)
+        view(l2a.qflx_rofice_grc, bounds_g) .-=
+            ifelse.(isfinite.(dyn_i), dyn_i, zero(eltype(dyn_i)))
     end
 
     # --- total evapotranspiration (waterlnd2atm_type%qflx_evap_tot_grc) ---
