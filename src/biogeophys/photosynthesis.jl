@@ -1663,6 +1663,16 @@ end
                 # static profile in both cases. PhotosynthesisMod.F90:1748-1763.
                 if luna_p
                     vcmax25 = vcmx25_z[p, iv]
+                    # The vcmax25_scale calibration override must act on the
+                    # OPERATIVE vcmax25. Under LUNA that is the acclimated
+                    # vcmx25_z, not the static vcmax25top scaled earlier — without
+                    # this the knob is bit-inert in any use_luna configuration.
+                    # LUNA's jmax25 keeps its acclimated value (jmax has its own
+                    # jmax25top_sf knob); tpu25 derives from the scaled vcmax25,
+                    # matching the non-LUNA branch's vcmax→tpu coupling.
+                    if !isnan(vcmax25_scale)
+                        vcmax25 = vcmax25 * vcmax25_scale
+                    end
                     jmax25  = jmx25_z[p, iv]
                     tpu25   = prm.tpu25ratio * vcmax25
                     if !is_sun && vcmaxcint_sun[p] > zero(T) && nlevcan == 1
@@ -2217,6 +2227,12 @@ end
                     # sha is scaled by the canopy sun/sha integration ratio. Matches
                     # PhotosynthesisMod.F90:3377-3391 (use_luna .and. c3flag .and. crop==0).
                     vcmax25_sun = vcmx25_z[p, iv]
+                    # As in the non-PHS body: the vcmax25_scale calibration
+                    # override must scale the OPERATIVE (LUNA-acclimated) vcmax25,
+                    # else the knob is bit-inert whenever use_luna is on.
+                    if !isnan(vcmax25_scale)
+                        vcmax25_sun = vcmax25_sun * vcmax25_scale
+                    end
                     jmax25_sun = jmx25_z[p, iv]
                     tpu25_sun = prm.tpu25ratio * vcmax25_sun
                     vcmax25_sha = vcmax25_sun

@@ -1912,6 +1912,12 @@ function canopy_fluxes_core!(
                 canopystate.elai_patch, canopystate.esai_patch,
                 canopystate.htop_patch, waterdiagbulk.fdry_patch, waterfluxbulk.wf.qflx_tran_veg_patch;
                 nlevcan=NLEVCAN, nlevsoi=_nsoi, use_cn=use_cn, use_luna=use_luna,
+                # Forward the calibration overrides: without this the PHS solve
+                # rebuilt a default all-NaN CalibrationOverrides(), so the
+                # medlyn_slope / vcmax25_scale / jmax25top_sf overrides were
+                # silently inert in the default (use_hydrstress) configuration
+                # while the non-PHS branch below honoured them.
+                overrides=overrides,
                 bsun_patch=energyflux.bsun_patch, bsha_patch=energyflux.bsha_patch)
           else
             # Sunlit leaves
