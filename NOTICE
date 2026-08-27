@@ -23,6 +23,10 @@ contributions only and does not supersede the upstream UCAR/NCAR copyright and
 license terms reproduced below, which continue to govern the portions of this
 work derived from CTSM.
 
+The verbatim FATES parameter file at data/fates/fates_params_default.cdl is
+distributed under the separate upstream FATES terms reproduced in
+LICENSES/FATES.txt.
+
 --------------------------------------------------------------------------------
 Upstream license — Community Land Model (CLM5 / CTSM)
 --------------------------------------------------------------------------------

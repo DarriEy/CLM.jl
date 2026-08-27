@@ -43,6 +43,11 @@ by `scripts/gmd/verify_results_index.py`. The machine-readable-results item rema
 until the frozen definitive campaign adds command, environment, input, checksum, raw-output,
 and persistent-archive links for every manuscript value.
 
+The committed-data redistribution ledger is `repro/manifests/redistribution.csv`. Its
+2026-08-27 audit clears the verbatim FATES parameter file after restoring the separate
+FATES licence, but holds six derived NetCDF artifacts pending source-data permission and
+privacy-clean regeneration. The release checklist therefore remains open.
+
 ## Rules
 
 1. Never copy a headline value from README files, handoff notes, or an old manuscript.
@@ -61,6 +66,7 @@ and persistent-archive links for every manuscript value.
 docs/gmd/
   README.md                 submission scope and gates
   provenance.md             source, repository, environment, and licensing record
+  redistribution_audit_2026-08-27.md  committed-data clearance audit
   experiment_protocol.md    frozen scientific protocol
   claims.csv                claim-to-evidence ledger
 repro/
