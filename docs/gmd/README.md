@@ -38,6 +38,11 @@ that satisfies the same evidence requirements.
 - [ ] Exact software and experiment releases archived with persistent identifiers.
 - [ ] Human domain and numerical reviews completed and recorded.
 
+The current qualification checkpoint is indexed in `repro/results/index.json` and checked
+by `scripts/gmd/verify_results_index.py`. The machine-readable-results item remains open
+until the frozen definitive campaign adds command, environment, input, checksum, raw-output,
+and persistent-archive links for every manuscript value.
+
 ## Rules
 
 1. Never copy a headline value from README files, handoff notes, or an old manuscript.

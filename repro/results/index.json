@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "index_status": "qualification-checkpoint-not-definitive-campaign",
+  "recorded_on": "2026-08-27",
+  "source_commit_basis": "96609ab",
+  "claim_ledger": "docs/gmd/claims.csv",
+  "gates": {
+    "linux_cpu_data": {
+      "status": "pass-composite-qualification",
+      "passed": 27779,
+      "failed": 0,
+      "hardware_broken": 3,
+      "evidence": "docs/gmd/strict_suite_linux_2026-08-27.md",
+      "definitive_single_command_rerun_required": true
+    },
+    "bow_btran_process_oracle": {
+      "status": "matrix-complete-threshold-unfrozen",
+      "cells": 3,
+      "tree_absolute_error_max": 9.777664788934715e-13,
+      "grass_absolute_error_min": 1.0272300575098203e-05,
+      "grass_absolute_error_max": 1.0272300575597804e-05,
+      "matrix": "repro/results/btran-sensitivity/matrix.json",
+      "evidence": "repro/configs/bow_btran_oracle.toml",
+      "claim_supported": false
+    },
+    "automatic_differentiation": {
+      "status": "fail-qualification",
+      "passing_regime_assertions": 125,
+      "winter_passed": 10,
+      "winter_failed": 9,
+      "evidence": "docs/gmd/ad_qualification_2026-08-27.md",
+      "seasonal_cycle_claim_supported": false
+    },
+    "synthetic_parameter_recovery": {
+      "status": "fail-joint-recovery",
+      "scalar_csoilc": "pass",
+      "joint_passed": 3,
+      "joint_failed": 4,
+      "medlyn_relative_error": 0.25,
+      "vcmax_relative_error": 0.23076923076923078,
+      "evidence": "docs/gmd/calibration_qualification_2026-08-27.md",
+      "joint_recovery_claim_supported": false
+    },
+    "strict_scientific_parity": {
+      "status": "fail-qualification",
+      "passed_cells": 204,
+      "total_cells": 207,
+      "evidence": "docs/gmd/qualification_2026-08-25.md",
+      "claim_supported": false
+    }
+  },
+  "open_release_requirements": [
+    "independent disposition of the stable Bow grass BTRAN residual",
+    "audited Bow annual rerun with frozen controls",
+    "finite winter AD reference or explicit narrowed experiment protocol",
+    "identifiable joint calibration observation design or claim exclusion",
+    "real accelerator qualification",
+    "redistribution and licence clearance",
+    "frozen single-command campaign and persistent archive identifiers",
+    "independent domain and numerical review"
+  ]
+}
