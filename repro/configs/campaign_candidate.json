@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "campaign_id": "gmd-candidate-unfrozen",
+  "protocol_frozen": false,
+  "source_commit": "TBD_AFTER_PROTOCOL_FREEZE",
+  "required_platform": "Linux",
+  "required_environment": [
+    "SYMFLUENCE_DATA",
+    "CESM_INPUTDATA"
+  ],
+  "fixed_environment": {
+    "CLM_REQUIRE_TESTDATA": "1",
+    "JULIA_NUM_THREADS": "1"
+  },
+  "steps": [
+    {
+      "id": "results-index",
+      "argv": ["python3", "scripts/gmd/verify_results_index.py"]
+    },
+    {
+      "id": "strict-cpu-data",
+      "argv": ["julia", "--project=.", "--check-bounds=yes", "-e", "using Test; include(\"test/runtests.jl\")"]
+    }
+  ]
+}

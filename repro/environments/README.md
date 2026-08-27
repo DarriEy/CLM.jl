@@ -16,6 +16,23 @@ redact only privacy-sensitive identifiers, never software versions or scientific
 provenance. A dirty Git tree is recorded explicitly and is not acceptable for a definitive
 experiment.
 
+## Definitive campaign runner
+
+The candidate campaign specification is intentionally unfrozen and therefore cannot run:
+
+```sh
+python3 scripts/gmd/run_campaign.py --check-spec
+python3 scripts/gmd/run_campaign.py --output /archive/results/gmd-campaign
+```
+
+The first command validates its schema. The second fails closed until scientific and
+numerical review sets `protocol_frozen`, records a full source commit, and supplies the
+required staged-data paths on Linux. Once frozen, the runner also rejects a dirty or wrong
+checkout and a nonempty output directory. It records the environment, exact commands,
+timestamps, exit codes, and SHA-256 log digests in `campaign.json`, stopping at the first
+failed step. Generated records must still be reviewed for private host and path metadata
+before publication.
+
 ## Bow BTRAN Linux sensitivity cell
 
 The cell runner intentionally does not create a CIME machine definition or acquire model
