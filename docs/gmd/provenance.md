@@ -137,3 +137,9 @@ in the same image; an intentionally missing root produced the required exit-1 fa
 The composite Linux CPU/data coverage is therefore 27,779 pass plus the same three hardware
 skips as macOS. Exact commands, hashes, and the definitive-rerun qualification are recorded
 in `strict_suite_linux_2026-08-27.md`.
+
+The same audit tightened the multi-scenario AD test so non-finite finite-difference values
+cannot bypass its comparisons. The locked Linux focused rerun now fails 9 winter assertions
+and passes all 125 assertions across the other five regimes. This is an intentionally open
+qualification gate, recorded in `ad_qualification_2026-08-27.md`; it supersedes the earlier
+console label that called the NaN-reference winter case passed.

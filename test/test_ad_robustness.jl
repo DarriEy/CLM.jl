@@ -263,7 +263,15 @@ include(joinpath(@__DIR__, "testdata.jl"))
                  inst_dm.temperature.t_grnd_col[1]),
             ]
                 ad_deriv = partials(d_val)[1]
-                fd_deriv = (value(plus_val) - value(minus_val)) / (2 * eps_fd)
+                plus = value(plus_val)
+                minus = value(minus_val)
+
+                # A non-finite reference cannot validate AD. Previously NaN made both
+                # guarded comparison blocks fall through and the scenario printed PASSED.
+                @test isfinite(plus)
+                @test isfinite(minus)
+                fd_deriv = (plus - minus) / (2 * eps_fd)
+                @test isfinite(fd_deriv)
 
                 println("  $(scenario.name): d($var_name)/d(T) AD=$(round(ad_deriv, digits=4)), FD=$(round(fd_deriv, digits=4))")
 
@@ -284,7 +292,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
                 end
             end
 
-            println("  $(scenario.name) PASSED")
+            println("  $(scenario.name) COMPLETED — verdict is the enclosing Test summary")
         end
     end
 end  # outer testset

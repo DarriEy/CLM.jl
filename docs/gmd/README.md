@@ -98,3 +98,8 @@ three hardware skips; see `strict_suite_linux_2026-08-27.md`. Its complete run e
 crop-CFT test that bypassed strict-data routing. The corrected group passed 27/27 and its
 negative missing-data check fails as required. A definitive one-command rerun remains part
 of the frozen paper campaign.
+
+The AD false-positive has now been converted into a real gate: five forcing regimes pass
+125/125, while winter fails 9 finite-reference assertions. See
+`ad_qualification_2026-08-27.md`. Seasonal-cycle differentiability remains outside the
+submission claim unless that trajectory is repaired and independently requalified.
