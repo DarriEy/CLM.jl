@@ -36,9 +36,12 @@ def load_policy():
                    cwd=ROOT, check=True)
     subprocess.run(["python3", str(ROOT / "scripts/gmd/verify_source_release_policy.py")],
                    cwd=ROOT, check=True)
-    excluded = {rows[key]["path"] for key, value in policy["artifact_actions"].items()
-                if value["action"] == "EXCLUDE"}
-    return policy, rows, excluded
+    excluded_artifacts = {
+        rows[key]["path"] for key, value in policy["artifact_actions"].items()
+        if value["action"] == "EXCLUDE"
+    }
+    excluded_paths = excluded_artifacts | set(policy["repository_path_exclusions"])
+    return policy, rows, excluded_paths
 
 
 def build(output):
@@ -67,6 +70,10 @@ def build(output):
             for key, value in policy["artifact_actions"].items()
             if value["action"] == "EXCLUDE"
         ],
+        "excluded_repository_paths": [
+            {"path": relative, "reason": reason}
+            for relative, reason in policy["repository_path_exclusions"].items()
+        ],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(output, "w:gz") as archive:
@@ -77,7 +84,14 @@ def build(output):
         info.size = len(payload)
         info.mode = 0o644
         archive.addfile(info, io.BytesIO(payload))
-    print(json.dumps({"archive": str(output), "sha256": sha256(output), **manifest}, indent=2))
+    print(json.dumps({
+        "archive": str(output),
+        "sha256": sha256(output),
+        "source_commit": commit,
+        "included_file_count": len(files),
+        "excluded_artifact_count": len(manifest["excluded_artifacts"]),
+        "excluded_repository_path_count": len(manifest["excluded_repository_paths"]),
+    }, indent=2))
 
 
 def main():

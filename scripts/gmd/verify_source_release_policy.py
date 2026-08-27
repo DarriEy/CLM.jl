@@ -3,6 +3,7 @@
 
 import csv
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -29,11 +30,30 @@ def main():
     for relative in policy["required_archive_files"]:
         if not (ROOT / relative).is_file():
             raise AssertionError(f"required archive file missing: {relative}")
+    tracked = set(subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-files"], text=True
+    ).splitlines())
+    path_exclusions = policy["repository_path_exclusions"]
+    for relative, reason in path_exclusions.items():
+        if relative not in tracked:
+            raise AssertionError(f"repository-path exclusion is not tracked: {relative}")
+        if not reason:
+            raise AssertionError(f"repository-path exclusion lacks reason: {relative}")
+    held_paths = {
+        row["path"] for row in rows.values()
+        if row["redistribution_status"] == "HOLD"
+    }
+    overlap = held_paths & set(path_exclusions)
+    if overlap:
+        raise AssertionError(f"held data must be classified by artifact ID: {sorted(overlap)}")
+    if set(policy["required_archive_files"]) & set(path_exclusions):
+        raise AssertionError("required archive files cannot be repository-path exclusions")
     if policy["release_gate_complete"]:
         raise AssertionError("candidate policy must not claim complete release clearance")
     included = sum(item["action"] == "INCLUDE" for item in actions.values())
     excluded = sum(item["action"] == "EXCLUDE" for item in actions.values())
-    print(f"verified source-release policy: {included} data artifact included, {excluded} excluded")
+    print(f"verified source-release policy: {included} data artifact included, "
+          f"{excluded} excluded; {len(path_exclusions)} development paths excluded")
 
 
 if __name__ == "__main__":

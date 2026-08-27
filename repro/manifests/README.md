@@ -29,4 +29,7 @@ python3 scripts/gmd/build_source_archive.py --output /archive/CLM.jl-source.tar.
 ```
 
 The builder reads only tracked files, refuses a dirty checkout or existing output, embeds
-its source commit and exclusions, and cannot include a `HOLD` artifact.
+its source commit and exclusions, and cannot include a `HOLD` artifact. The policy also
+names local development-control files that are tracked in the working repository but are
+deliberately omitted from the publication archive; every such omission has a recorded
+reason and is checked against the Git index.

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "policy_status": "candidate-unfrozen",
   "recorded_on": "2026-08-27",
   "artifact_actions": {
@@ -10,6 +10,14 @@
     "D05": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"},
     "D06": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"},
     "D07": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"}
+  },
+  "repository_path_exclusions": {
+    ".claude/settings.json": "local coding-agent configuration, not part of the scientific source release",
+    ".ralph_last_output.log": "local automation output, not part of the scientific source release",
+    ".ralph_state": "local automation state, not part of the scientific source release",
+    "CLAUDE.md": "local coding-agent instructions, not part of the scientific source release",
+    "ralph_loop.sh": "local development automation, not part of the scientific source release",
+    "ralph_modules.sh": "local development automation, not part of the scientific source release"
   },
   "required_archive_files": [
     "LICENSE",
