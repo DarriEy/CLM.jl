@@ -45,6 +45,13 @@ The three fixture generators now require an explicit source or `SYMFLUENCE_DATA`
 source checksum, and avoid writing absolute source paths. This prevents future privacy
 leakage but does not retroactively clear or alter the held artifacts.
 
+Primary-provider terms were reviewed separately in `upstream_terms_2026-08-27.md` and
+`repro/manifests/upstream_terms.json`. RDRS, WSC, NASA MODIS, and Copernicus DEM have usable
+reuse terms subject to attribution and exact-product confirmation. The exact OpenGeoHub
+MODIS mosaic record displays no licence, and no file-level redistribution statement was
+found for the exact CTSM input surface file. Those unresolved terms keep every held
+derivation on hold.
+
 No staged scientific archive under `SYMFLUENCE_DATA` is approved for redistribution by
 this audit. The definitive archive must extend the ledger to every forcing, restart,
 surface, parameter, observation, reference, and generated-output artifact.

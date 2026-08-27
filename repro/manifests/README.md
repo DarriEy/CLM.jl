@@ -15,3 +15,7 @@ unresolved artifacts as `HOLD`. Verify its coverage and checksums with:
 ```sh
 python3 scripts/gmd/verify_redistribution_manifest.py
 ```
+
+`redistribution_sources.json` connects held artifacts to privacy-safe logical source IDs
+and exact hashes. `upstream_terms.json` records the primary-provider terms review and
+keeps unresolved source terms machine visible.

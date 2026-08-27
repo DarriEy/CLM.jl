@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "repro/manifests/redistribution.csv"
 SOURCES = ROOT / "repro/manifests/redistribution_sources.json"
+TERMS = ROOT / "repro/manifests/upstream_terms.json"
 
 
 def sha256(path):
@@ -24,6 +25,12 @@ def main():
     with MANIFEST.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     source_trace = json.loads(SOURCES.read_text())
+    terms = json.loads(TERMS.read_text())
+    if terms["release_decision"]["all_held_artifacts_cleared"]:
+        raise AssertionError("upstream terms must not claim full clearance")
+    unresolved = set(terms["release_decision"]["unresolved_terms"])
+    if not unresolved:
+        raise AssertionError("unresolved upstream terms unexpectedly empty")
     expected = set()
     for prefix in ("data", "test/reference_data", "test_inputs"):
         expected.update(path.relative_to(ROOT).as_posix() for path in (ROOT / prefix).rglob("*")
@@ -52,6 +59,8 @@ def main():
                 source = source_trace["sources"][source_id]
                 if source["license_evidence_complete"]:
                     raise AssertionError(f"held source unexpectedly claims clearance: {source_id}")
+                if not unresolved.intersection(source["terms_ids"]):
+                    raise AssertionError(f"held source has no unresolved upstream term: {source_id}")
     statuses = {row["redistribution_status"] for row in rows}
     if "HOLD" not in statuses:
         raise AssertionError("release must not appear cleared while unresolved data remain")

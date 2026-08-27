@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-08-27",
+  "review_scope": "Primary-provider terms; provenance review, not legal advice.",
+  "terms": {
+    "T01": {
+      "provider": "Copernicus Data Space Ecosystem",
+      "material": "Copernicus DEM GLO-30/GLO-90",
+      "url": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "redistribution_assessment": "permitted-with-required-attribution",
+      "required_notice": "Use the applicable unmodified or produced-using Copernicus WorldDEM notice specified by the provider.",
+      "applies_only_if_exact_product_confirmed": true
+    },
+    "T02": {
+      "provider": "NASA Earthdata",
+      "material": "NASA-led MODIS data",
+      "url": "https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy",
+      "redistribution_assessment": "unrestricted-or-CC0-unless-marked-otherwise",
+      "citation_requested": true
+    },
+    "T03": {
+      "provider": "Zenodo / OpenGeoHub",
+      "material": "MODIS MCD12Q1 global mosaics v20230818",
+      "url": "https://zenodo.org/records/8367523",
+      "redistribution_assessment": "unresolved-record-displays-no-license",
+      "doi": "10.5281/zenodo.8367523"
+    },
+    "T04": {
+      "provider": "Environment and Climate Change Canada",
+      "material": "RDRS data served under the ECCC data-server licence",
+      "url": "https://eccc-msc.github.io/open-data/licence/readme_en/",
+      "redistribution_assessment": "permitted-with-attribution-and-third-party-exceptions",
+      "required_notice": "Contains information licenced under the Data Server End-use Licence of Environment and Climate Change Canada."
+    },
+    "T05": {
+      "provider": "Government of Canada / Water Survey of Canada",
+      "material": "Hydrometric monitoring data",
+      "url": "https://open.canada.ca/data/en/dataset/46763060-e859-4812-8da5-2361d99b4c34",
+      "redistribution_assessment": "open-government-licence-canada-with-attribution"
+    },
+    "T06": {
+      "provider": "NCAR / CTSM",
+      "material": "standard CESM/CTSM runtime input files",
+      "url": "https://escomp.github.io/CTSM/lilac/obtaining-building-and-running/setting-ctsm-runtime-options.html",
+      "redistribution_assessment": "unresolved-public-download-is-not-file-level-license"
+    }
+  },
+  "release_decision": {
+    "conditionally_usable_terms": ["T01", "T02", "T04", "T05"],
+    "unresolved_terms": ["T03", "T06"],
+    "all_held_artifacts_cleared": false
+  }
+}
