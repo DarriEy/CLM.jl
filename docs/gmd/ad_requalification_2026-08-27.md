@@ -44,8 +44,13 @@ all remain finite on the previously failing fixture.
 
 The winter failure was an artifact of the qualification harness's shared-state pattern,
 not a model-physics fragility of the smoothed winter trajectory. C03's exclusion of the
-winter regime should be lifted if and only if the unmodified `test_ad_robustness.jl`
-passes all six scenarios under the fixed dual-copy; that run's summary belongs here:
+winter regime is lifted on macOS and awaits the locked-Linux confirmation:
 
-- [ ] `test_ad_robustness.jl` full-file result on macOS (this box)
+- [x] `test_ad_robustness.jl` full-file result on macOS (this box, Apple M5,
+      Julia 1.12.6): **150 pass / 0 fail, all six scenarios** (3m28.8s). Winter
+      (250 K) AD vs smoothed-FD agreement: d(LH)/dT = 0.036 / 0.036,
+      d(SH)/dT = −11.8525 / −11.8525, d(T_grnd)/dT = 0.4691 / 0.4691 —
+      0.0% relative error on all three, versus the morning's 9 non-finite
+      references. (The total rises from 144 to 150 because winter's guarded
+      sign/agreement comparisons now run instead of being skipped on NaN.)
 - [ ] locked-Linux rerun as part of the definitive campaign
