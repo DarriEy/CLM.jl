@@ -10,6 +10,8 @@
 # docs/CROP_PARITY.md (US Great Plains point, irrigate=.true.).
 # =====================================================================
 
+include("testdata.jl")
+
 @testset "collapse_crop_types! — static surfdata path" begin
 
     # ------------------------------------------------------------------
@@ -64,16 +66,12 @@
     # Part 2: against the real crop-CFT surfdata and the Fortran reference.
     # Gated on the data files, which are not in the repo.
     # ------------------------------------------------------------------
-    _dataroot = joinpath(homedir(), "Library/CloudStorage",
-                         "GoogleDrive-dareyt@gmail.com", "My Drive", "data",
-                         "SYMFLUENCE_data")
-    _surfdata = joinpath(_dataroot, "crop_cft_surfdata",
-                         "surfdata_cropCFT_USplains_1pt.nc")
-    _paramfile = joinpath(_dataroot, "domain_Aripuana_Amazon", "settings",
-                          "CLM", "parameters", "clm5_params.nc")
+    _surfdata = symfluence_path("crop_cft_surfdata",
+                                "surfdata_cropCFT_USplains_1pt.nc")
+    _paramfile = joinpath(domain_params_dir("domain_Aripuana_Amazon"), "clm5_params.nc")
 
     if !(isfile(_surfdata) && isfile(_paramfile))
-        @info "skipping crop-CFT reference test (data files absent)" _surfdata
+        testdata_missing("crop-CFT reference test", _surfdata, _paramfile)
     else
         @testset "US-plains crop point matches the Fortran patch vector" begin
             # Fortran's 8 crop CFT patches. itypes are the crops CLM has

@@ -127,3 +127,13 @@ only because the archived Linux PIO build-compatibility patch disables unavailab
 parallel filters; CLM scientific source is unchanged. The three-cell grass-error spread is
 approximately `5e-16`, so compiler optimization does not explain the residual. The matrix
 does not itself define an acceptance threshold.
+
+The locked Linux strict CPU suite ran from a fresh clone of submission commit `6482aad`.
+The complete invocation exited 0 with 27,758 pass, 0 fail, and 3 hardware-broken markers
+in 252 min 17.3 s. Audit found that 21 crop-CFT real-file assertions had been silently
+omitted by a developer-specific path in their test harness. After routing that harness
+through `SYMFLUENCE_DATA` and the centralized strict-data gate, its whole file passed 27/27
+in the same image; an intentionally missing root produced the required exit-1 failure.
+The composite Linux CPU/data coverage is therefore 27,779 pass plus the same three hardware
+skips as macOS. Exact commands, hashes, and the definitive-rerun qualification are recorded
+in `strict_suite_linux_2026-08-27.md`.

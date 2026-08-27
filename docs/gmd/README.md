@@ -25,7 +25,8 @@ that satisfies the same evidence requirements.
 - [x] Clean clone outside a cloud-synced directory.
 - [x] Submission branch created from current public `main`.
 - [x] Full macOS CPU suite passes with all staged scientific data required.
-- [ ] Full Linux CPU suite passes in the locked clean-room environment.
+- [x] Full Linux CPU/data suite passes in the locked environment (complete run plus audited
+  crop-CFT focused closure; definitive single-command rerun remains required).
 - [x] Exact upstream CTSM source tag/commit identified.
 - [ ] Exact upstream CTSM build and run configuration reproduced and archived.
 - [ ] Experiment protocol reviewed and frozen.
@@ -91,3 +92,9 @@ The corrected strict external-data suite passes its macOS CPU execution gate (27
 0 fail, 3 explicit hardware skips); see `strict_suite_2026-08-25.md`. Derivative acceptance,
 initialization scope, lake/FATES diagnostics, and synthetic multi-parameter recovery remain
 scientific qualification failures and cannot support manuscript claims yet.
+
+The locked Linux ARM64 execution gate also covers 27,779 passing assertions with the same
+three hardware skips; see `strict_suite_linux_2026-08-27.md`. Its complete run exposed one
+crop-CFT test that bypassed strict-data routing. The corrected group passed 27/27 and its
+negative missing-data check fails as required. A definitive one-command rerun remains part
+of the frozen paper campaign.
