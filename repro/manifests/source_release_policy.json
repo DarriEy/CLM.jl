@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "policy_status": "candidate-unfrozen",
+  "recorded_on": "2026-08-27",
+  "artifact_actions": {
+    "D01": {"action": "INCLUDE", "reason": "FATES terms reproduced in LICENSES/FATES.txt"},
+    "D02": {"action": "EXCLUDE", "reason": "S02 source terms unresolved and embedded private path"},
+    "D03": {"action": "EXCLUDE", "reason": "T06 file-level CTSM input-data terms unresolved"},
+    "D04": {"action": "EXCLUDE", "reason": "T03 and T06 terms in the exact DDS generation chain unresolved"},
+    "D05": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"},
+    "D06": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"},
+    "D07": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"}
+  },
+  "required_archive_files": [
+    "LICENSE",
+    "NOTICE",
+    "LICENSES/FATES.txt",
+    "repro/acquisition/README.md",
+    "repro/manifests/redistribution.csv",
+    "repro/manifests/redistribution_sources.json",
+    "repro/manifests/source_release_policy.json",
+    "repro/manifests/upstream_terms.json"
+  ],
+  "release_gate_complete": false
+}
