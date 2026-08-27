@@ -190,7 +190,7 @@ first_grass_efe_absolute_error = 1.0511179482364241e-8
 next_snow_boundary = "closed: all traced HandleNewSnow inputs and outputs match"
 
 [numerical_sensitivity_plan]
-status = "prespecified-before-definitive-linux-runs"
+status = "required-three-cell-matrix-completed-pending-independent-review"
 fixed_target_nstep = 2901
 fixed_metrics = ["BTRAN absolute error by PFT", "iteration count by PFT", "first-iteration EFE absolute error", "maximum injected-state relative error"]
 required_cells = ["locked Linux release flags", "locked Linux no-optimization Fortran", "macOS GNU Fortran release flags"]
@@ -198,6 +198,58 @@ report_all_cells = true
 threshold_from_single_best_cell_forbidden = true
 scientific_state_tolerance_unchanged = 1.0e-9
 btran_acceptance_tolerance = "unfrozen pending matrix and independent review"
+
+[numerical_sensitivity_matrix]
+completed = "2026-08-27"
+cell_count = 3
+cell_ids = ["macos-arm64-gnu15-O-oracle", "linux-arm64-gnu14-O", "linux-arm64-gnu14-O0"]
+linux_image_digest = "sha256:fcecc1f80c4423ce2688bbf7033968f1dccbecbe04bfcbb693e1bed17690316c"
+tree_btran_absolute_error_min = 9.771974895933510e-13
+tree_btran_absolute_error_max = 9.777664788934715e-13
+grass_btran_absolute_error_min = 1.0272300575098203e-5
+grass_btran_absolute_error_max = 1.0272300575597804e-5
+initial_global_max_relative_error_all_cells = 0.0
+interpretation = "The grass residual is invariant to operating system and Fortran optimization at approximately 5e-16 absolute spread; optimization sensitivity is not its cause."
+acceptance_threshold_frozen = false
+next_decision = "Independent land-model and numerical-method review must prespecify acceptance or require a code-level resolution before the annual Bow rerun."
+
+[linux_release_sensitivity_cell]
+completed = "2026-08-27"
+cell_id = "linux-arm64-gnu14-O"
+platform = "Linux arm64 container"
+fortran_compiler = "GNU Fortran 14.3.0 (conda-forge)"
+fortran_flags = "-fconvert=big-endian -ffree-line-length-none -ffixed-line-length-none -O -fallow-argument-mismatch -fallow-invalid-boz"
+steps = 3025
+elapsed_seconds = 4.01
+instrumented_executable_sha256 = "89b80358514b49c138b3586b240c4ec047a592dae11d17bb58d433213b88be83"
+initial_global_max_relative_error = 0.0
+tree_btran_absolute_error = 9.771974895933510e-13
+grass_btran_absolute_error = 1.0272300575597804e-5
+first_tree_efe_absolute_error = 2.9483118169082445e-9
+first_grass_efe_absolute_error = 1.0511179482364241e-8
+result = "repro/results/btran-sensitivity/linux-arm64-gnu14-O/result.json"
+ctsm_reports_dirty = true
+ctsm_dirty_reason = "The archived Linux build-only compatibility patch changes cime/CIME/build_scripts/buildlib.pio; CLM scientific source is unchanged."
+acceptance_tolerance_frozen = false
+
+[linux_o0_sensitivity_cell]
+completed = "2026-08-27"
+cell_id = "linux-arm64-gnu14-O0"
+platform = "Linux arm64 container"
+fortran_compiler = "GNU Fortran 14.3.0 (conda-forge)"
+fortran_flags = "CIME defaults followed by -O0; generated Macros.make records trailing -O0"
+steps = 3025
+elapsed_seconds = 4.49
+instrumented_executable_sha256 = "49b3a8a11b76baeea4ec019914a33ed95b9cc81a86ee04fa804ecd02d3c1a6c4"
+initial_global_max_relative_error = 0.0
+tree_btran_absolute_error = 9.775236176068347e-13
+grass_btran_absolute_error = 1.0272300575098203e-5
+first_tree_efe_absolute_error = 2.948283395198814e-9
+first_grass_efe_absolute_error = 1.0511186587791599e-8
+result = "repro/results/btran-sensitivity/linux-arm64-gnu14-O0/result.json"
+ctsm_reports_dirty = true
+ctsm_dirty_reason = "The archived Linux build-only compatibility patch changes cime/CIME/build_scripts/buildlib.pio; CLM scientific source is unchanged."
+acceptance_tolerance_frozen = false
 
 [macos_sensitivity_cell]
 completed = "2026-08-27"

@@ -82,6 +82,10 @@ deliberately outside that runner until the CIME machine definition and redistrib
 inventory are frozen.
 `scripts/gmd/aggregate_btran_sensitivity.py` combines the prescribed cells while retaining
 every result and intentionally has no mechanism for declaring a tolerance pass.
+The complete 2026-08-27 macOS/Linux release/Linux `-O0` matrix is recorded in
+`repro/configs/bow_btran_oracle.toml` and `provenance.md`. It excludes compiler optimization
+as the source of the stable `1.02723e-5` grass residual; independent review and threshold
+prespecification remain open.
 
 The corrected strict external-data suite passes its macOS CPU execution gate (27,779 pass,
 0 fail, 3 explicit hardware skips); see `strict_suite_2026-08-25.md`. Derivative acceptance,

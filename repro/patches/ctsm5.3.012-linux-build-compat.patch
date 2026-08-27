@@ -1,0 +1,16 @@
+diff --git a/CIME/build_scripts/buildlib.pio b/CIME/build_scripts/buildlib.pio
+index b04367b7b..f65346148 100755
+--- a/CIME/build_scripts/buildlib.pio
++++ b/CIME/build_scripts/buildlib.pio
+@@ -105,7 +105,10 @@ def buildlib(bldroot, installpath, case):
+     elif pio_version == 1:
+         cmake_opts = '"-D GENF90_PATH=$CIMEROOT/CIME/non_py/externals/genf90 "'
+     else:
+-        cmake_opts = '"-D GENF90_PATH=' + srcroot + '/libraries/parallelio/scripts/ "'
++        cmake_opts = (
++            '"-D GENF90_PATH=' + srcroot + '/libraries/parallelio/scripts/ '
++            '-D HAVE_PAR_FILTERS=0 "'
++        )
+ 
+     stdargs = get_standard_makefile_args(case, shared_lib=True)
+ 

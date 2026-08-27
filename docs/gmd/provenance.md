@@ -113,3 +113,17 @@ compatibility patch modifies CIME's PIO invocation; no CLM scientific source is 
 by that patch. The machine-readable result is intentionally ignored as generated data at
 `repro/results/btran-sensitivity/macos-arm64-gnu15-O-oracle/result.json`. No acceptance
 tolerance is inferred from this single platform cell.
+
+The two prescribed Linux ARM64 cells completed on 2026-08-27 in locked container image
+`sha256:fcecc1f80c4423ce2688bbf7033968f1dccbecbe04bfcbb693e1bed17690316c`
+with GNU Fortran 14.3.0. The release executable SHA-256 is
+`89b80358514b49c138b3586b240c4ec047a592dae11d17bb58d433213b88be83`; its 3,025-step
+run took 4.01 s and produced tree/grass BTRAN absolute errors of
+`9.771974895933510e-13` and `1.0272300575597804e-5`. The independently built trailing-`-O0`
+executable SHA-256 is `49b3a8a11b76baeea4ec019914a33ed95b9cc81a86ee04fa804ecd02d3c1a6c4`;
+its run took 4.49 s and produced `9.775236176068347e-13` and
+`1.0272300575098203e-5`. Injected state was exact in both cells. CTSM is recorded dirty
+only because the archived Linux PIO build-compatibility patch disables unavailable
+parallel filters; CLM scientific source is unchanged. The three-cell grass-error spread is
+approximately `5e-16`, so compiler optimization does not explain the residual. The matrix
+does not itself define an acceptance threshold.

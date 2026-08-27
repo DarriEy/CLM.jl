@@ -86,10 +86,13 @@ grass differs by `1.03e-5`, amplified from approximately `1e-8` canopy-energy ar
 
 ## Immediate investigation
 
-1. Repeat the target oracle with the locked Linux compiler and at least one independent
-   compiler/optimization configuration; publish every result rather than selecting the closest.
-2. Prespecify a numerical-sensitivity rule from that matrix before deciding whether the
-   grass residual is within tolerance. Do not derive a threshold from one macOS run.
+1. Completed 2026-08-27: repeat the target oracle with locked Linux GNU Fortran 14.3
+   release and independent trailing-`-O0` builds. Across macOS release, Linux release, and
+   Linux `-O0`, grass absolute error spans only `1.0272300575098203e-5` to
+   `1.0272300575597804e-5`; optimization sensitivity is not the cause.
+2. Obtain independent land-model and numerical-method review and prespecify the disposition
+   of the stable grass residual before deciding whether it is within tolerance. Do not tune
+   a threshold to any one cell.
 3. Add `SNOWDP` explicitly to the frozen paper variable table and label `SNOW_DEPTH` as
    snow-covered-area height everywhere.
 4. Regenerate the Bow annual trajectory with the audited restart fields and namelist controls,

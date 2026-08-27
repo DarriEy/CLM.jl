@@ -39,8 +39,10 @@ Status: **draft — thresholds and experiment membership are not frozen**.
 - **Reference:** CTSM tag `ctsm5.3.012`, commit
   `ab466d6f9789ca3df2c72bda46cf7afed2d04102`; the current macOS build and oracle
   configuration are recorded in `repro/configs/bow_btran_oracle.toml`. The prescribed
-  macOS GNU Fortran 15.3/MPICH 4.3.2 `-O` sensitivity cell completed on 2026-08-27.
-  The definitive Linux compiler/flags remain to be run and frozen.
+  macOS GNU Fortran 15.3/MPICH 4.3.2 `-O`, Linux GNU Fortran 14.3 `-O`, and Linux GNU
+  Fortran 14.3 trailing-`-O0` sensitivity cells completed on 2026-08-27. The locked Linux
+  image digest and exact cell results are recorded there; the acceptance threshold remains
+  unfrozen pending independent scientific and numerical review.
 - **Candidate:** exact CLM.jl submission commit TBD; Julia CPU Float64.
 - **Differentiable candidate:** same commit/configuration with explicitly listed smoothing
   and AD mode.
@@ -99,8 +101,10 @@ definitive run. Both passing and failing cells will be published.
 For process-oracle tolerances, exact agreement is required for discrete control flow,
 configuration, injected state, and declared inputs. Numerical output tolerances will be
 set only after running the same oracle with the locked Linux compiler and an independent
-compiler/optimization configuration. The tolerance study reports the full range and must
-not choose a threshold from whichever configuration most closely matches Julia.
+compiler/optimization configuration. That required matrix is complete: the grass absolute
+error spans only `1.0272300575098203e-5` to `1.0272300575597804e-5` across the three cells.
+The tolerance study reports the full range and must not choose a threshold from whichever
+configuration most closely matches Julia. Independent review is now the remaining decision.
 
 ## 7. Experiments
 

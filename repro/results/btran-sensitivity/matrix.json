@@ -1,0 +1,41 @@
+{
+  "acceptance_threshold_frozen": false,
+  "btran_by_patch": {
+    "1": {
+      "absolute_error_max": 0.0,
+      "absolute_error_min": 0.0,
+      "all_absolute_errors": {
+        "linux-arm64-gnu14-O": 0.0,
+        "linux-arm64-gnu14-O0": 0.0,
+        "macos-arm64-gnu15-O-oracle": 0.0
+      }
+    },
+    "2": {
+      "absolute_error_max": 9.777664788934715e-13,
+      "absolute_error_min": 9.77197489593351e-13,
+      "all_absolute_errors": {
+        "linux-arm64-gnu14-O": 9.77197489593351e-13,
+        "linux-arm64-gnu14-O0": 9.775236176068347e-13,
+        "macos-arm64-gnu15-O-oracle": 9.777664788934715e-13
+      }
+    },
+    "3": {
+      "absolute_error_max": 1.0272300575597804e-05,
+      "absolute_error_min": 1.0272300575098203e-05,
+      "all_absolute_errors": {
+        "linux-arm64-gnu14-O": 1.0272300575597804e-05,
+        "linux-arm64-gnu14-O0": 1.0272300575098203e-05,
+        "macos-arm64-gnu15-O-oracle": 1.0272300575542292e-05
+      }
+    }
+  },
+  "cell_count": 3,
+  "cell_ids": [
+    "macos-arm64-gnu15-O-oracle",
+    "linux-arm64-gnu14-O",
+    "linux-arm64-gnu14-O0"
+  ],
+  "experiment": "bow-btran-n2901-numerical-sensitivity-matrix",
+  "note": "All supplied cells are retained; this file does not choose a best configuration.",
+  "schema_version": 1
+}
