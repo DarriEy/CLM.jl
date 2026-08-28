@@ -216,9 +216,13 @@ function test_pc_beta(to, ::Type{FT}, I, dt) where {FT}
         CLM._phase_change_beta_kernel!(backend)(lyr, colv, pin, tmp, imelt,
             _dev(to_, I.mask), _dev(to_, I.urbpoi), _dev(to_, I.snl), _dev(to_, I.landunit),
             _dev(to_, I.itype), _dev(to_, I.lun_itype), dt, NLEVSNO, NLEVGRND, NLEVURB, NLEVMAX,
-            # Same host-hoisted PHASE_CHANGE_MASS_K trailing scalar as the fn7 call
-            # above (real launch: soil_temperature.jl:2192).
-            convert(FT, CLM.PHASE_CHANGE_MASS_K[]);
+            # Same host-hoisted trailing smoothing scalars as the real launch:
+            # PHASE_CHANGE_MASS_K, plus PHASE_CHANGE_TEMP_K added by the #321
+            # temperature-axis imelt smoothing — the kernel gained the second
+            # scalar after this harness was written (17 args against an 18-arg
+            # kernel, MethodError before anything ran).
+            convert(FT, CLM.PHASE_CHANGE_MASS_K[]),
+            convert(FT, CLM.PHASE_CHANGE_TEMP_K[]);
             ndrange = nc)
         KernelAbstractions.synchronize(backend)
     end

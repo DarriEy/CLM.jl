@@ -23,6 +23,8 @@ from pathlib import Path
 HARDWARE_GATED = {
     "gpu_validate_cuda": "requires NVIDIA CUDA hardware",
     "gpu_validate_amdgpu": "requires AMD ROCm hardware",
+    "gpu_ad_reverse_driver_validate": "CUDA-targeted reverse-AD driver harness"
+                                      " (errors 'CUDA is not functional' on a Metal box)",
 }
 
 
