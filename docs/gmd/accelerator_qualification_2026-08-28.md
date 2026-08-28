@@ -65,3 +65,12 @@ The crossover column count, not only the peak speedup, is part of the record.
   backend-capable design unless separately qualified.
 - C07 (crossover/scaling): evidence recorded by the E9 runner; threshold-free (the
   record reports the measured crossover and dispersion, no pass/fail tuning).
+
+## Post-fix full-suite check (macOS)
+
+The complete CPU suite at commit `e540468` (which includes the lnd2glc/lnd2atm device
+fixes, the calibration override fixes, and the dual-copy state-isolation fix) passes
+**27,764 / 0 fail / 4 broken** in 32m19s under `--check-bounds=yes` on the M5 with the
+locally staged data (Bow, Aripuanã; the broken markers are the three hardware skips plus
+data-gated skips for domains not staged on this box). The locked-Linux full-archive
+strict rerun remains the definitive-campaign gate.
