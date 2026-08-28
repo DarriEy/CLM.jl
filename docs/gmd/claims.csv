@@ -4,6 +4,6 @@ C02,Annual simulations complete with conservation checks active,PASS-QUALIFICATI
 C03,Differentiable formulation has verified derivatives,PASS-QUALIFICATION-MACOS,E5-E6,docs/gmd/ad_requalification_2026-08-27.md,All six regimes pass 150/150 after the dual-copy state-aliasing fix; winter FAIL was a harness artifact; locked-Linux rerun pending
 C04,Smoothing introduces quantified acceptable bias,TBD,E5,TBD,Threshold requires scientific review
 C05,Gradient calibration recovers synthetic parameters,PASS-QUALIFICATION-MACOS,E7,docs/gmd/calibration_requalification_2026-08-27.md,Joint Medlyn/Vcmax recovery passes 19/19 after the PHS overrides-forwarding and LUNA vcmax-scale fixes; locked-Linux rerun pending
-C06,Demonstrated accelerator reproduces CPU pathway,TBD,E8,TBD,Matched precision comparison
-C07,Accelerator becomes faster above a measured workload,TBD,E9,TBD,Only tested hardware/software
+C06,Demonstrated accelerator reproduces CPU pathway,PASS-QUALIFICATION-METAL,E8,docs/gmd/accelerator_qualification_2026-08-28.md,127/129 exit-zero on Apple M5 Metal (2 CUDA-gated); whole-driver composites pass incl. CN (754 outputs) and FATES; scope = tested M-series Metal devices
+C07,Accelerator becomes faster above a measured workload,EVIDENCE-RECORDED,E9,repro/results/metal-fleet/metal_scaling_1dcd5c9.json,Median+IQR crossover record on Apple M5 Metal; threshold-free
 C08,Paper results are independently reproducible,PARTIAL-QUALIFICATION,clean-room,docs/gmd/strict_suite_linux_2026-08-27.md,Locked Linux CPU/data execution completed; definitive one-command campaign DOI and independent reproduction remain open

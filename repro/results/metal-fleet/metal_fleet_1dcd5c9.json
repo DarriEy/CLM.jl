@@ -1,0 +1,1182 @@
+{
+  "schema_version": 1,
+  "kind": "metal-device-fleet",
+  "recorded_utc": "2026-08-28T02:13:49+00:00",
+  "source_commit": "1dcd5c9b3af0c0211420be6cec9896e30336ff83",
+  "tree_dirty": false,
+  "platform": {
+    "os": "Darwin 25.5.0",
+    "machine": "arm64"
+  },
+  "harness_project": "scripts (see scripts/Manifest.toml at source_commit)",
+  "totals": {
+    "harnesses": 129,
+    "exit_zero": 127,
+    "hardware_gated_nonzero": 2,
+    "unexplained_nonzero": 0
+  },
+  "unexplained_failures": [],
+  "rows": [
+    {
+      "harness": "gpu_validate_alloc_pipeline_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_alloc_pipeline_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_altcalc_e2e",
+      "exit_status": 0,
+      "wall_s": 12,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_altcalc_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_bareground_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_bareground_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_bgc_pipeline_decomp_e2e",
+      "exit_status": 0,
+      "wall_s": 41,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_bgc_pipeline_decomp_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_bgc_pipeline_e2e",
+      "exit_status": 0,
+      "wall_s": 32,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_bgc_pipeline_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_bgc_summaries",
+      "exit_status": 0,
+      "wall_s": 12,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_bgc_summaries.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_building_temp",
+      "exit_status": 0,
+      "wall_s": 13,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_building_temp.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_c_iso_flux_e2e",
+      "exit_status": 0,
+      "wall_s": 13,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_c_iso_flux_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_canopy_e2e",
+      "exit_status": 0,
+      "wall_s": 25,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_canopy_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_canopyintercept_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_canopyintercept_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_carbon_isotopes_e2e",
+      "exit_status": 0,
+      "wall_s": 554,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_carbon_isotopes_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ch4_e2e",
+      "exit_status": 0,
+      "wall_s": 25,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ch4_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ch4aere_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ch4aere_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ch4diag_e2e",
+      "exit_status": 0,
+      "wall_s": 314,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ch4diag_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ch4oxid_e2e",
+      "exit_status": 0,
+      "wall_s": 13,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ch4oxid_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ch4prod_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ch4prod_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ch4tran_e2e",
+      "exit_status": 0,
+      "wall_s": 1073,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ch4tran_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_clmdrv_cn_e2e",
+      "exit_status": 0,
+      "wall_s": 219,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_clmdrv_cn_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_clmdrv_e2e",
+      "exit_status": 0,
+      "wall_s": 163,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_clmdrv_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_clmdrv_fates_e2e",
+      "exit_status": 0,
+      "wall_s": 269,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_clmdrv_fates_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_clmdrv_realinit_e2e",
+      "exit_status": 0,
+      "wall_s": 188,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_clmdrv_realinit_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_clmdrvinit_e2e",
+      "exit_status": 0,
+      "wall_s": 22,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_clmdrvinit_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_clusterC_misc",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_clusterC_misc.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cn_annual_update_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cn_annual_update_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cn_balance_check_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cn_balance_check_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cn_products_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cn_products_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cn_veg_matrix",
+      "exit_status": 0,
+      "wall_s": 26,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cn_veg_matrix.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cndv_light_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cndv_light_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cnprecision_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cnprecision_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cnveg_summaries",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cnveg_summaries.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_combinedivide_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_combinedivide_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_computewf2_e2e",
+      "exit_status": 0,
+      "wall_s": 13,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_computewf2_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cstateupdate0_dyn_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cstateupdate0_dyn_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cstateupdate1_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cstateupdate1_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cstateupdate2_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cstateupdate2_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cstateupdate3_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cstateupdate3_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_cuda",
+      "exit_status": 2,
+      "wall_s": 3,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_cuda.log",
+      "hardware_gated": "requires NVIDIA CUDA hardware"
+    },
+    {
+      "harness": "gpu_validate_daylength_e2e",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_daylength_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decomp_e2e",
+      "exit_status": 0,
+      "wall_s": 26,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decomp_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decompbgc_e2e",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decompbgc_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decompcompetition_e2e",
+      "exit_status": 0,
+      "wall_s": 20,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decompcompetition_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decompmimics_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decompmimics_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decomppotential_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decomppotential_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decompvprofile_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decompvprofile_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_decprecision_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_decprecision_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_depvel",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_depvel.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_downscale_forcings",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_downscale_forcings.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_drainage_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_drainage_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dustdrydep_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dustdrydep_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dustleung_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dustleung_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dyn_cnbal_col_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dyn_cnbal_col_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dyn_cnbal_patch_carbon_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dyn_cnbal_patch_carbon_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dyn_cnbal_patch_e2e",
+      "exit_status": 0,
+      "wall_s": 22,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dyn_cnbal_patch_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dyn_column_state_updater",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dyn_column_state_updater.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dyn_patch_state_updater",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dyn_patch_state_updater.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dyngru_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dyngru_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_dynharvest_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_dynharvest_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fire_area_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fire_area_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fire_area_li2016_e2e",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fire_area_li2016_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fire_area_li2021_e2e",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fire_area_li2021_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fire_area_li2024_e2e",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fire_area_li2024_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fire_fluxes_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fire_fluxes_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fire_transient_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fire_transient_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_flexiblecn",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_flexiblecn.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_fun_e2e",
+      "exit_status": 0,
+      "wall_s": 24,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_fun_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_gap_mortality_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_gap_mortality_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_glacier_smb",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_glacier_smb.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_growth_resp_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_growth_resp_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_gw_irrig",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_gw_irrig.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_handlenewsnow_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_handlenewsnow_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_infexcessrunoff_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_infexcessrunoff_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_irrigation_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_irrigation_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_irrigation_needed",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_irrigation_needed.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_lake",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_lake.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_lake_e2e",
+      "exit_status": 0,
+      "wall_s": 27,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_lake_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_lakefluxes_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_lakefluxes_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_lateralflow_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_lateralflow_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_littervert_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_littervert_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_luna",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_luna.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_maint_resp_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_maint_resp_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_matrixcn_driver_e2e",
+      "exit_status": 0,
+      "wall_s": 45,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_matrixcn_driver_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_matrixcn_e2e",
+      "exit_status": 0,
+      "wall_s": 40,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_matrixcn_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_n_dynamics_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_n_dynamics_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_n_leaching_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_n_leaching_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ndemand_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ndemand_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_nitrif_denitrif_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_nitrif_denitrif_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_nstateupdate1_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_nstateupdate1_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_nstateupdate2_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_nstateupdate2_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_nstateupdate3_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_nstateupdate3_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_nutrient_comp_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_nutrient_comp_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_ozonestress_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_ozonestress_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_phenology_e2e",
+      "exit_status": 0,
+      "wall_s": 22,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_phenology_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_photosynthesis_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_photosynthesis_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_phs_cpu_oracle",
+      "exit_status": 0,
+      "wall_s": 7,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_phs_cpu_oracle.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_phs_e2e",
+      "exit_status": 0,
+      "wall_s": 24,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_phs_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_phs_hostloop",
+      "exit_status": 0,
+      "wall_s": 8,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_phs_hostloop.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_preflux_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_preflux_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_rootmoiststress_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_rootmoiststress_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_roughlengths_e2e",
+      "exit_status": 0,
+      "wall_s": 13,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_roughlengths_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_satellite_phenology_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_satellite_phenology_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_satexcessrunoff_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_satexcessrunoff_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_snicar_e2e",
+      "exit_status": 0,
+      "wall_s": 95,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_snicar_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_snowcompaction_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_snowcompaction_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_snowcoverfrac_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_snowcoverfrac_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_snowfiltercapping_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_snowfiltercapping_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_snowpercolation_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_snowpercolation_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soilevapresis_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soilevapresis_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soilfluxes_e2e",
+      "exit_status": 0,
+      "wall_s": 21,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soilfluxes_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soilhydrology_e2e",
+      "exit_status": 0,
+      "wall_s": 27,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soilhydrology_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soiltemp",
+      "exit_status": 0,
+      "wall_s": 25,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soiltemp.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soiltemp_e2e",
+      "exit_status": 0,
+      "wall_s": 31,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soiltemp_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soilwater",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soilwater.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soilwater_e2e",
+      "exit_status": 0,
+      "wall_s": 21,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soilwater_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_soilwater_mf_e2e",
+      "exit_status": 0,
+      "wall_s": 19,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_soilwater_mf_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_surfacehumidity_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_surfacehumidity_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_surfacerad_e2e",
+      "exit_status": 0,
+      "wall_s": 18,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_surfacerad_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_tridiag_jtop",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_tridiag_jtop.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_urban_albedo",
+      "exit_status": 0,
+      "wall_s": 20,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_urban_albedo.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_urbanfluxes_e2e",
+      "exit_status": 0,
+      "wall_s": 22,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_urbanfluxes_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_urbanradiation_e2e",
+      "exit_status": 0,
+      "wall_s": 17,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_urbanradiation_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_veg_compute_seed",
+      "exit_status": 0,
+      "wall_s": 13,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_veg_compute_seed.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_veg_struct_update",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_veg_struct_update.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_verttransink_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_verttransink_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_voc_emission_e2e",
+      "exit_status": 0,
+      "wall_s": 14,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_voc_emission_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_watertable_e2e",
+      "exit_status": 0,
+      "wall_s": 16,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_watertable_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_validate_watertablevariants_e2e",
+      "exit_status": 0,
+      "wall_s": 15,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_validate_watertablevariants_e2e.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_ad_reverse_driver_validate",
+      "exit_status": 1,
+      "wall_s": 27,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_ad_reverse_driver_validate.log",
+      "hardware_gated": "CUDA-targeted reverse-AD driver harness (errors 'CUDA is not functional' on a Metal box)"
+    },
+    {
+      "harness": "gpu_ad_reverse_validate",
+      "exit_status": 0,
+      "wall_s": 27,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_ad_reverse_validate.log",
+      "hardware_gated": null
+    },
+    {
+      "harness": "gpu_ad_validate",
+      "exit_status": 0,
+      "wall_s": 24,
+      "timed_out": false,
+      "retried_nanozone": false,
+      "log": "logs/gpu_ad_validate.log",
+      "hardware_gated": null
+    }
+  ]
+}
