@@ -38,3 +38,17 @@ only the model-side defects they exposed were repaired (see
   Linux — scalar and joint recovery.
 - Both remain subject to the frozen definitive campaign like every other claim; this
   record retires their "locked-Linux rerun pending" condition.
+
+## Full strict-suite single-invocation rerun (same day)
+
+The complete suite at the same commit, image, manifest, and data controls, in one
+invocation (`julia --project=. --check-bounds=yes -e 'using Test; include("test/runtests.jl")'`):
+
+- **27,785 pass / 0 fail / 3 hardware-broken (27,788 total), exit 0, 69m29.1s**;
+- +6 assertions over the 2026-08-27 composite total (27,779): the winter AD guarded
+  comparisons that previously skipped on non-finite references now execute;
+- log SHA-256 `5cab008a8b02ac26aefb4f40702a63680c40f25a765c94d24fbd199c46adad69`.
+
+This closes the 2026-08-27 record's "complete run in one invocation" caveat at the
+current tip; the definitive campaign still reruns it through `run_campaign.py` after
+the protocol freeze.

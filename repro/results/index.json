@@ -6,12 +6,18 @@
   "claim_ledger": "docs/gmd/claims.csv",
   "gates": {
     "linux_cpu_data": {
-      "status": "pass-composite-qualification",
-      "passed": 27779,
+      "status": "pass-complete-single-invocation",
+      "passed": 27785,
       "failed": 0,
       "hardware_broken": 3,
-      "evidence": "docs/gmd/strict_suite_linux_2026-08-27.md",
-      "definitive_single_command_rerun_required": true
+      "commit": "46ef5cb",
+      "elapsed": "69m29.1s",
+      "image_digest": "sha256:fcecc1f80c4423ce2688bbf7033968f1dccbecbe04bfcbb693e1bed17690316c",
+      "manifest_sha256": "94ea12b7e1a720df91489ef969b3a9ef6f1ecd485a1563998043618726d258b3",
+      "log_sha256": "5cab008a8b02ac26aefb4f40702a63680c40f25a765c94d24fbd199c46adad69",
+      "evidence": "docs/gmd/linux_requalification_2026-08-31.md",
+      "definitive_single_command_rerun_required": true,
+      "note": "complete strict run in ONE invocation (the 2026-08-27 caveat's missing piece); the definitive rerun still executes via run_campaign.py after protocol freeze"
     },
     "bow_btran_process_oracle": {
       "status": "matrix-complete-threshold-unfrozen",
