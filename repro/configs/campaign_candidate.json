@@ -15,11 +15,64 @@
   "steps": [
     {
       "id": "results-index",
-      "argv": ["python3", "scripts/gmd/verify_results_index.py"]
+      "argv": [
+        "python3",
+        "scripts/gmd/verify_results_index.py"
+      ]
+    },
+    {
+      "id": "redistribution-manifest",
+      "argv": [
+        "python3",
+        "scripts/gmd/verify_redistribution_manifest.py"
+      ]
+    },
+    {
+      "id": "source-release-policy",
+      "argv": [
+        "python3",
+        "scripts/gmd/verify_source_release_policy.py"
+      ]
     },
     {
       "id": "strict-cpu-data",
-      "argv": ["julia", "--project=.", "--check-bounds=yes", "-e", "using Test; include(\"test/runtests.jl\")"]
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/runtests.jl\")"
+      ]
+    },
+    {
+      "id": "gate-ad-robustness",
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/test_ad_robustness.jl\")"
+      ]
+    },
+    {
+      "id": "gate-parameter-recovery",
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/test_parameter_recovery.jl\")"
+      ]
+    },
+    {
+      "id": "gate-calibration",
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/test_calibration.jl\")"
+      ]
     }
   ]
 }
