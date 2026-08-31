@@ -51,7 +51,15 @@
       "passed_cells": 204,
       "total_cells": 207,
       "evidence": "docs/gmd/qualification_2026-08-25.md",
-      "claim_supported": false
+      "claim_supported": false,
+      "audited_bow_rerun": {
+        "date": "2026-08-31",
+        "commit": "46ef5cb",
+        "controls": "scripts/parity_run_domain.jl audited registry (post-8595fa0/b9e558c)",
+        "result": "full 8760-step year completes in 213.5 s; unchanged gate reproduces 204/207 with the identical three cells",
+        "bow_btran_cell": "+4.2% annual / 0.21 nRMSE \u2014 unchanged; disposition now rests solely on independent scientific review",
+        "evidence": "docs/gmd/bow_audited_rerun_2026-08-31.md"
+      }
     },
     "metal_device_fleet": {
       "status": "pass-qualification",
@@ -75,8 +83,7 @@
     }
   },
   "open_release_requirements": [
-    "independent disposition of the stable Bow grass BTRAN residual",
-    "audited Bow annual rerun with frozen controls and unchanged 207-cell gate",
+    "independent disposition of the stable Bow grass BTRAN residual (now the ONLY blocker for C01)",
     "redistribution and licence clearance",
     "frozen single-command campaign and persistent archive identifiers",
     "independent domain and numerical review"
