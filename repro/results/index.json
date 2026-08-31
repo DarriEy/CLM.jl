@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "index_status": "qualification-checkpoint-not-definitive-campaign",
-  "recorded_on": "2026-08-27",
-  "source_commit_basis": "96609ab",
+  "recorded_on": "2026-08-31",
+  "source_commit_basis": "46ef5cb",
   "claim_ledger": "docs/gmd/claims.csv",
   "gates": {
     "linux_cpu_data": {
@@ -24,22 +24,27 @@
       "claim_supported": false
     },
     "automatic_differentiation": {
-      "status": "fail-qualification",
-      "passing_regime_assertions": 125,
-      "winter_passed": 10,
-      "winter_failed": 9,
-      "evidence": "docs/gmd/ad_qualification_2026-08-27.md",
-      "seasonal_cycle_claim_supported": false
+      "status": "pass-qualification",
+      "macos_passed": 150,
+      "macos_failed": 0,
+      "linux_passed": 150,
+      "linux_failed": 0,
+      "regimes": 6,
+      "evidence": "docs/gmd/linux_requalification_2026-08-31.md",
+      "root_cause_record": "docs/gmd/ad_requalification_2026-08-27.md",
+      "seasonal_cycle_claim_supported": true
     },
     "synthetic_parameter_recovery": {
-      "status": "fail-joint-recovery",
+      "status": "pass-qualification",
+      "macos_passed": 19,
+      "macos_failed": 0,
+      "linux_passed": 19,
+      "linux_failed": 0,
       "scalar_csoilc": "pass",
-      "joint_passed": 3,
-      "joint_failed": 4,
-      "medlyn_relative_error": 0.25,
-      "vcmax_relative_error": 0.23076923076923078,
-      "evidence": "docs/gmd/calibration_qualification_2026-08-27.md",
-      "joint_recovery_claim_supported": false
+      "joint_medlyn_vcmax": "pass",
+      "evidence": "docs/gmd/linux_requalification_2026-08-31.md",
+      "root_cause_record": "docs/gmd/calibration_requalification_2026-08-27.md",
+      "joint_recovery_claim_supported": true
     },
     "strict_scientific_parity": {
       "status": "fail-qualification",
@@ -47,14 +52,31 @@
       "total_cells": 207,
       "evidence": "docs/gmd/qualification_2026-08-25.md",
       "claim_supported": false
+    },
+    "metal_device_fleet": {
+      "status": "pass-qualification",
+      "harnesses": 129,
+      "exit_zero": 127,
+      "hardware_gated_nonzero": 2,
+      "unexplained_nonzero": 0,
+      "device": "Apple M5 (AGXG17GDevice, Metal 4)",
+      "evidence": "docs/gmd/accelerator_qualification_2026-08-28.md",
+      "record": "repro/results/metal-fleet/metal_fleet_1dcd5c9.json",
+      "claim_supported": true,
+      "scope": "tested M-series Metal devices only; CUDA remains backend-capable design"
+    },
+    "metal_scaling": {
+      "status": "evidence-recorded",
+      "crossover_columns": 16384,
+      "speedup_at_65536": 2.24,
+      "statistic": "median over 11 reps, IQR dispersion, transfers excluded",
+      "record": "repro/results/metal-fleet/metal_scaling_1dcd5c9.json",
+      "claim_supported": true
     }
   },
   "open_release_requirements": [
     "independent disposition of the stable Bow grass BTRAN residual",
-    "audited Bow annual rerun with frozen controls",
-    "finite winter AD reference or explicit narrowed experiment protocol",
-    "identifiable joint calibration observation design or claim exclusion",
-    "real accelerator qualification",
+    "audited Bow annual rerun with frozen controls and unchanged 207-cell gate",
     "redistribution and licence clearance",
     "frozen single-command campaign and persistent archive identifiers",
     "independent domain and numerical review"

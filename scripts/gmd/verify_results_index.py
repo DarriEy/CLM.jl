@@ -36,18 +36,30 @@ def main():
 
     with CLAIMS_PATH.open(newline="") as stream:
         claims = {row["claim_id"]: row for row in csv.DictReader(stream)}
-    for claim_id in ("C01", "C03", "C05"):
-        if claims[claim_id]["status"] != "FAIL-QUALIFICATION":
-            raise AssertionError(f"open failed claim is not marked failed: {claim_id}")
+
+    # Invariants that hold until their specific evidence exists — update these
+    # TOGETHER with the recorded evidence, never to tidy a red result away.
+    if claims["C01"]["status"] != "FAIL-QUALIFICATION":
+        raise AssertionError("C01 stays failed until the audited Bow annual rerun "
+                             "passes the unchanged 207-cell gate")
     if claims["C08"]["status"] != "PARTIAL-QUALIFICATION":
         raise AssertionError("reproducibility must remain partial before the DOI campaign")
-
-    if gates["automatic_differentiation"]["seasonal_cycle_claim_supported"]:
-        raise AssertionError("winter AD failure cannot support a seasonal-cycle claim")
-    if gates["synthetic_parameter_recovery"]["joint_recovery_claim_supported"]:
-        raise AssertionError("failed joint recovery cannot support an identifiability claim")
     if gates["strict_scientific_parity"]["claim_supported"]:
         raise AssertionError("204/207 parity cannot support the scoped parity claim")
+
+    # Data-driven consistency: a gate may support a claim only from a passing
+    # status, and every PASS-QUALIFICATION claim row must resolve to an
+    # existing evidence file.
+    for name, gate in gates.items():
+        supported = gate.get("claim_supported") or \
+            gate.get("seasonal_cycle_claim_supported") or \
+            gate.get("joint_recovery_claim_supported")
+        status = gate.get("status", "")
+        if supported and not (status.startswith("pass") or status == "evidence-recorded"):
+            raise AssertionError(f"gate {name} supports a claim from status {status!r}")
+    for claim_id, row in claims.items():
+        if row["status"].startswith("PASS-QUALIFICATION"):
+            require_path(row["evidence_artifact"])
 
     print(f"verified {len(gates)} gates and {len(claims)} claims")
 
