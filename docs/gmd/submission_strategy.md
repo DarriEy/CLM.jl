@@ -17,10 +17,14 @@ and its verification methodology. The defensible core is narrower than the repos
 - differentiability and accelerator results only if their dedicated gates pass before
   protocol freeze.
 
-Do not claim general CLM5 equivalence, production/global readiness, observational skill,
-seasonal-cycle differentiability, joint parameter recovery, or accelerator correctness or
-speed from the current qualification checkpoint. Those claims are failed or unqualified in
-`claims.csv`.
+Do not claim general CLM5 equivalence, production/global readiness, or observational
+skill. Seasonal-cycle differentiability (C03), joint parameter recovery (C05), Metal
+accelerator correctness (C06), and the measured scaling crossover (C07) reached
+qualification passes on 2026-08-28/31 (see `claims.csv` and the requalification
+records), so they are candidates for retention — but like every claim they enter the
+manuscript only if they pass the frozen definitive campaign, and the accelerator claim
+is scoped to the tested M-series Metal devices (CUDA stays backend-capable design
+only).
 
 ## Current journal requirements that shape the package
 
