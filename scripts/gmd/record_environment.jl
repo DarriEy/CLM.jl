@@ -3,7 +3,6 @@
 """Emit a machine-readable environment record for a GMD experiment run."""
 
 using Dates
-using JSON
 using Pkg
 using SHA
 
@@ -81,5 +80,43 @@ function environment_record(root)
 end
 
 root = normpath(joinpath(@__DIR__, "..", ".."))
-JSON.print(stdout, environment_record(root), 2)
+# Stdlib-only JSON emission. The original `using JSON` resolved through the
+# DEPOT DEFAULT environment, not the locked project Manifest — an
+# undocumented dependency that broke the first frozen campaign preflight in
+# the clean container (exactly the defect class this runner exists to
+# catch). The environment record must not depend on anything outside the
+# frozen project + stdlib.
+function _json(io::IO, x; indent::Int = 0)
+    pad = "  "^indent
+    if x isa AbstractDict
+        print(io, "{\n")
+        for (i, k) in enumerate(sort!(collect(keys(x)); by = string))
+            i > 1 && print(io, ",\n")
+            print(io, pad, "  ", repr(string(k)), ": ")
+            _json(io, x[k]; indent = indent + 1)
+        end
+        print(io, "\n", pad, "}")
+    elseif x isa AbstractVector
+        print(io, "[\n")
+        for (i, v) in enumerate(x)
+            i > 1 && print(io, ",\n")
+            print(io, pad, "  ")
+            _json(io, v; indent = indent + 1)
+        end
+        print(io, "\n", pad, "]")
+    elseif x isa AbstractString || x isa Symbol || x isa VersionNumber
+        print(io, repr(string(x)))
+    elseif x === nothing
+        print(io, "null")
+    elseif x isa Bool || x isa Integer
+        print(io, x)
+    elseif x isa Real
+        print(io, isfinite(x) ? string(x) : repr(string(x)))
+    else
+        print(io, repr(string(x)))
+    end
+end
+
+_json(stdout, environment_record(root))
+println()
 println()
