@@ -78,7 +78,14 @@ const LAKE_FORC_EXACT = get(ENV, "LAKE_FORC_EXACT", "") == "1"
 # every Julia step against the Fortran state ONE STEP BEHIND it.
 const LAKE_REC_SHIFT = parse(Int, get(ENV, "LAKE_REC_SHIFT", "1"))
 
-const LAKE   = joinpath(@__DIR__, "..", "test_inputs", "lake", "surfdata_lake100.nc")
+# The Fortran reference (H0 below) was generated from the Bow-DERIVED lake
+# surfdata, which since the 2026-09-02 redistribution synthesis pass lives only
+# in the staged data archive (clm_lake_run/surfdata_lake100.nc — the byte-exact
+# file the reference run read), not in the repo. The tracked
+# test_inputs/lake/surfdata_lake100.nc is now fully synthetic and would not
+# match the reference. Resolve from the archive, env-overridable.
+const LAKE   = get(ENV, "CLM_LAKE_SURFDATA",
+    symfluence_path("clm_lake_run", "surfdata_lake100.nc"))
 const FP     = joinpath(domain_params_dir("domain_Bow_at_Banff_lumped"), "clm5_params.nc")
 const FFORC  = bow_forcing("clmforc.2003.nc")
 const H0     = get(ENV, "CLM_LAKE_H0", symfluence_path("clm_lake_run",

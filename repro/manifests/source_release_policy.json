@@ -1,15 +1,36 @@
 {
   "schema_version": 2,
   "policy_status": "candidate-unfrozen",
-  "recorded_on": "2026-08-27",
+  "recorded_on": "2026-09-02",
   "artifact_actions": {
-    "D01": {"action": "INCLUDE", "reason": "FATES terms reproduced in LICENSES/FATES.txt"},
-    "D02": {"action": "EXCLUDE", "reason": "S02 source terms unresolved and embedded private path"},
-    "D03": {"action": "EXCLUDE", "reason": "T06 file-level CTSM input-data terms unresolved"},
-    "D04": {"action": "EXCLUDE", "reason": "T03 and T06 terms in the exact DDS generation chain unresolved"},
-    "D05": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"},
-    "D06": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"},
-    "D07": {"action": "EXCLUDE", "reason": "S01 includes the unlicensed T03 mosaic dependency"}
+    "D01": {
+      "action": "INCLUDE",
+      "reason": "FATES terms reproduced in LICENSES/FATES.txt"
+    },
+    "D02": {
+      "action": "INCLUDE",
+      "reason": "fully synthetic since 2026-09-02 \u2014 contains no upstream data values (see redistribution.csv)"
+    },
+    "D03": {
+      "action": "INCLUDE",
+      "reason": "fully synthetic since 2026-09-02 \u2014 contains no upstream data values (see redistribution.csv)"
+    },
+    "D04": {
+      "action": "EXCLUDE",
+      "reason": "T03 and T06 terms in the exact DDS generation chain unresolved; excluded with a lawful regeneration recipe (scripts/gmd/extract_bow_reference.jl + the banked CTSM recipe) and a stated restriction in Code and data availability"
+    },
+    "D05": {
+      "action": "INCLUDE",
+      "reason": "fully synthetic since 2026-09-02 \u2014 contains no upstream data values (see redistribution.csv)"
+    },
+    "D06": {
+      "action": "INCLUDE",
+      "reason": "fully synthetic since 2026-09-02 \u2014 contains no upstream data values (see redistribution.csv)"
+    },
+    "D07": {
+      "action": "INCLUDE",
+      "reason": "fully synthetic since 2026-09-02 \u2014 contains no upstream data values (see redistribution.csv)"
+    }
   },
   "repository_path_exclusions": {
     ".claude/settings.json": "local coding-agent configuration, not part of the scientific source release",

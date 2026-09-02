@@ -1,43 +1,93 @@
 {
-  "schema_version": 1,
-  "recorded_on": "2026-08-27",
-  "privacy_policy": "No absolute developer or archive paths are recorded.",
-  "sources": {
-    "S01": {
-      "logical_name": "Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc",
-      "sha256": "34857076ba099138f7a0cf43dfd29e3965229745b0570b5fa3dd64055531c3a8",
-      "declared_generation_sources": ["Copernicus DEM", "MODIS land cover", "SYMFLUENCE"],
-      "terms_ids": ["T01", "T02", "T03"],
-      "license_evidence_complete": false
-    },
-    "S02": {
-      "logical_name": "domain_Aripuana_Amazon/settings/CLM/parameters/surfdata_clm.nc",
-      "sha256": "b4996dcf418007d2b2cd59aeaed6b2e11dd50af88d81f7e4e88c25cc07e57e6f",
-      "terms_ids": ["T01", "T02", "T03"],
-      "license_evidence_complete": false
-    },
-    "S03": {
-      "logical_name": "cesm-inputdata/lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc",
-      "sha256": "72b56c8967fb6aefc12ccc12a55b197d046f9b6a70184bb39fd3ead20d837869",
-      "terms_ids": ["T06"],
-      "license_evidence_complete": false
-    },
-    "S04": {
-      "logical_name": "Bow CLM DDS final-evaluation chain",
-      "exact_history_file": "Bow_at_Banff_lumped.clm2.h0.2008-12-30-00000.nc",
-      "exact_history_sha256": "6793ab309c9da08a5e18e7acc79c488b9758f16cee4f21ccedfb20794cc9734b",
-      "declared_generation_sources": ["RDRS hourly forcing", "WSC station 05BB001", "Copernicus DEM", "MODIS land cover", "CTSM release-clm5.0.30", "SYMFLUENCE"],
-      "terms_ids": ["T01", "T02", "T03", "T04", "T05", "T06"],
-      "exact_extraction_recipe_identified": true,
-      "license_evidence_complete": false
-    }
+ "schema_version": 1,
+ "recorded_on": "2026-09-02",
+ "privacy_policy": "No absolute developer or archive paths are recorded.",
+ "sources": {
+  "S01": {
+   "logical_name": "Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc",
+   "sha256": "34857076ba099138f7a0cf43dfd29e3965229745b0570b5fa3dd64055531c3a8",
+   "declared_generation_sources": [
+    "Copernicus DEM",
+    "MODIS land cover",
+    "SYMFLUENCE"
+   ],
+   "terms_ids": [
+    "T01",
+    "T02",
+    "T03"
+   ],
+   "license_evidence_complete": false
   },
-  "derivations": {
-    "D02": {"source_ids": ["S02"], "copied_values": ["LONGXY", "LATIXY"], "coordinate_identity_verified": true},
-    "D03": {"source_ids": ["S03"], "copied_values": ["LONGXY", "LATIXY"], "coordinate_identity_verified": true},
-    "D04": {"source_ids": ["S04"], "exact_extraction_recipe_identified": true, "recipe": "scripts/gmd/extract_bow_reference.jl", "all_28_arrays_bit_identical": true},
-    "D05": {"source_ids": ["S01"], "byte_copy_then_changed_variables": ["PCT_GLACIER", "PCT_NATVEG"], "all_other_variables_identical": true},
-    "D06": {"source_ids": ["S01"], "byte_copy_then_changed_variables": ["PCT_LAKE", "PCT_NATVEG"], "all_other_variables_identical": true},
-    "D07": {"source_ids": ["S01"], "byte_copy_then_changed_variables": ["PCT_LAKE", "PCT_NATVEG"], "all_other_variables_identical": true}
+  "S02": {
+   "logical_name": "domain_Aripuana_Amazon/settings/CLM/parameters/surfdata_clm.nc",
+   "sha256": "b4996dcf418007d2b2cd59aeaed6b2e11dd50af88d81f7e4e88c25cc07e57e6f",
+   "terms_ids": [
+    "T01",
+    "T02",
+    "T03"
+   ],
+   "license_evidence_complete": false
+  },
+  "S03": {
+   "logical_name": "cesm-inputdata/lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc",
+   "sha256": "72b56c8967fb6aefc12ccc12a55b197d046f9b6a70184bb39fd3ead20d837869",
+   "terms_ids": [
+    "T06"
+   ],
+   "license_evidence_complete": false
+  },
+  "S04": {
+   "logical_name": "Bow CLM DDS final-evaluation chain",
+   "exact_history_file": "Bow_at_Banff_lumped.clm2.h0.2008-12-30-00000.nc",
+   "exact_history_sha256": "6793ab309c9da08a5e18e7acc79c488b9758f16cee4f21ccedfb20794cc9734b",
+   "declared_generation_sources": [
+    "RDRS hourly forcing",
+    "WSC station 05BB001",
+    "Copernicus DEM",
+    "MODIS land cover",
+    "CTSM release-clm5.0.30",
+    "SYMFLUENCE"
+   ],
+   "terms_ids": [
+    "T01",
+    "T02",
+    "T03",
+    "T04",
+    "T05",
+    "T06"
+   ],
+   "exact_extraction_recipe_identified": true,
+   "license_evidence_complete": false
   }
+ },
+ "derivations": {
+  "D02": {
+   "source_ids": [],
+   "status": "superseded 2026-09-02: all upstream-derived values replaced by analytic/synthetic content; see redistribution.csv origin and the generating script"
+  },
+  "D03": {
+   "source_ids": [],
+   "status": "superseded 2026-09-02: all upstream-derived values replaced by analytic/synthetic content; see redistribution.csv origin and the generating script"
+  },
+  "D04": {
+   "source_ids": [
+    "S04"
+   ],
+   "exact_extraction_recipe_identified": true,
+   "recipe": "scripts/gmd/extract_bow_reference.jl",
+   "all_28_arrays_bit_identical": true
+  },
+  "D05": {
+   "source_ids": [],
+   "status": "superseded 2026-09-02: all upstream-derived values replaced by analytic/synthetic content; see redistribution.csv origin and the generating script"
+  },
+  "D06": {
+   "source_ids": [],
+   "status": "superseded 2026-09-02: all upstream-derived values replaced by analytic/synthetic content; see redistribution.csv origin and the generating script"
+  },
+  "D07": {
+   "source_ids": [],
+   "status": "superseded 2026-09-02: all upstream-derived values replaced by analytic/synthetic content; see redistribution.csv origin and the generating script"
+  }
+ }
 }

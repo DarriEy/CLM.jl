@@ -68,3 +68,37 @@ either obtain and record source-specific permission for D02-D07 and regenerate p
 clean files, or exclude those files and provide lawful acquisition/generation recipes that
 still permit reproduction. Human review must confirm whether input terms attach to the
 derived NetCDF products.
+
+## Addendum — 2026-09-02 synthesis pass
+
+D02, D03, D05, D06, and D07 are **CLEARED by content replacement**, not by permission:
+
+- The three surfdata fixtures (D05-D07) were regenerated from scratch by
+  `scripts/gen_synthetic_surfdata.jl` — every value is a constant, a standard
+  pedotransfer formula on a synthetic loam texture, or an analytic seasonal cycle, at a
+  generic synthetic point (45 N, 262.5 E). No S01 bytes remain. Their consumers pass
+  unchanged (lake water balance 4/4, eddy ks 14/14, 2-m diagnostics 48/48, glacier
+  robustness 3/3, init-cold wiring 36/36 + NaN gate 3/3, run_clm harness 15/15), and the
+  subgrid structure they exercise is identical to the replaced fixtures.
+- The two hillslope fixtures (D02-D03) had exactly two upstream-derived arrays each
+  (LONGXY/LATIXY) plus a leaked absolute base path in a global attribute.
+  `scripts/gmd/synthesize_hillslope_grid.jl` replaced the coordinates with analytic
+  values (generic (-10, 300) for the single-point file; a Fibonacci sphere lattice of
+  the same 488-cell count for the unstructured file) and removed the leaked attribute.
+  The catena geometry was always synthetic. Their consumers pass unchanged (hillslope
+  hydrology 45/45, end-to-end 44/44, full-driver E2E 21/21).
+- Real-site/real-grid variants for Fortran-side parity remain locally regenerable via
+  `scripts/gen_lake_surfdata.jl`, `scripts/gen_glacier_surfdata.jl`, and
+  `scripts/make_hillslope_surfdata.jl` from `SYMFLUENCE_DATA`; those outputs are not
+  tracked.
+- **D04 keeps HOLD** with a recorded disposition: exclude from public archives and ship
+  the lawful regeneration path (`scripts/gmd/extract_bow_reference.jl` plus the banked
+  CTSM no-rebuild recipe), stating the restriction in Code and data availability with a
+  reviewer-access route — the GMD-policy-compliant form of a restriction outside the
+  authors' control.
+
+`verify_redistribution_manifest.py` and `verify_source_release_policy.py` (both
+unmodified) pass: 6 cleared / 1 held, 6 includable artifacts, release gate still
+fail-closed on D04 as designed. The remaining human item from the original audit is
+unchanged: confirm the exact upstream products used for the big experiment archive
+match the reviewed provider terms before the experiment deposit is registered.
