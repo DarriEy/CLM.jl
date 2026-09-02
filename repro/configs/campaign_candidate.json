@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "campaign_id": "gmd-candidate-unfrozen",
-  "protocol_frozen": false,
-  "source_commit": "TBD_AFTER_PROTOCOL_FREEZE",
+  "campaign_id": "clm-jl-v0.1.0-campaign-1",
+  "protocol_frozen": true,
+  "source_commit": "71ba908d4c677ddd6414192a653ba3a8705829fc",
   "required_platform": "Linux",
   "required_environment": [
     "SYMFLUENCE_DATA",
