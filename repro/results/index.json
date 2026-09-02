@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "index_status": "qualification-checkpoint-not-definitive-campaign",
+  "index_status": "definitive-campaign-passed-pending-persistent-archives",
   "recorded_on": "2026-08-31",
   "source_commit_basis": "46ef5cb",
   "claim_ledger": "docs/gmd/claims.csv",
@@ -92,12 +92,31 @@
       "statistic": "median over 11 reps, IQR dispersion, transfers excluded",
       "record": "repro/results/metal-fleet/metal_scaling_1dcd5c9.json",
       "claim_supported": true
+    },
+    "definitive_campaign": {
+      "status": "pass",
+      "campaign_id": "clm-jl-v0.1.0-campaign-1",
+      "frozen_source_commit": "9b7c43fda9b575acb48968c2fded30fcc4b5cc0b",
+      "executed_at_commit": "9787b7c (freeze commit; parent = frozen source per preflight contract)",
+      "started_utc": "2026-09-02T10:39:57Z",
+      "finished_utc": "2026-09-02T12:53:32Z",
+      "steps_exit_zero": 7,
+      "steps_total": 7,
+      "strict_suite": {
+        "passed": 27785,
+        "failed": 0,
+        "hardware_broken": 3,
+        "elapsed": "115m06.7s"
+      },
+      "record": "repro/results/campaign-1/campaign.json",
+      "raw_output_dir_pending_archive": "/private/tmp/gmd-campaign-1/run-1 (goes into the experiment deposit)",
+      "claim_supported": true
     }
   },
   "open_release_requirements": [
     "BTRAN residual: dispositioned 2026-09-02 by author-level rescope of C01 (no external reviewers available); final independent scrutiny deferred to GMD open peer review and disclosed",
     "human confirmation that the exact upstream products in the experiment archive match the reviewed provider terms (committed-data side cleared 2026-09-02: 6/7 artifacts synthetic or licensed, D04 excluded-with-recipe)",
-    "frozen single-command campaign and persistent archive identifiers",
-    "independent domain and numerical review: NOT AVAILABLE pre-submission \u2014 replaced by author review plus GMD interactive open peer review, with explicit disclosure in the manuscript and cover letter"
+    "independent domain and numerical review: NOT AVAILABLE pre-submission \u2014 replaced by author review plus GMD interactive open peer review, with explicit disclosure in the manuscript and cover letter",
+    "persistent archive identifiers (software deposit from tag v0.1.0; experiment deposit from the campaign-1 raw output)"
   ]
 }

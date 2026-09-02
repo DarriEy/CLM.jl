@@ -1,0 +1,117 @@
+{
+  "campaign_id": "clm-jl-v0.1.0-campaign-1",
+  "environment_exit_code": 0,
+  "environment_sha256": "c26bddfca2aeb95505558ec52ec9968fbc888ea6f3e6b6f46cfc4b924b51ce3e",
+  "environment_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "finished_utc": "2026-09-02T12:53:32.473988Z",
+  "manifest_sha256": "94ea12b7e1a720df91489ef969b3a9ef6f1ecd485a1563998043618726d258b3",
+  "project_sha256": "06e66cc43c48f36a4939cc05c61579e09e0bab74491d5803e020d596e23e4376",
+  "required_environment": {
+    "CESM_INPUTDATA": "/data/cesm-inputdata",
+    "SYMFLUENCE_DATA": "/data/SYMFLUENCE_data"
+  },
+  "schema_version": 1,
+  "source_commit": "9787b7cd39e9d499ca5732b6f8665260a760840c",
+  "spec": "repro/configs/campaign_candidate.json",
+  "spec_sha256": "1a5c340cc76cc8df144afb1a59a5fb8df37ff83590be8c3c9042631bd2400016",
+  "started_utc": "2026-09-02T10:39:57.725363Z",
+  "status": "pass",
+  "steps": [
+    {
+      "argv": [
+        "python3",
+        "scripts/gmd/verify_results_index.py"
+      ],
+      "elapsed_seconds": 0.01183354199997666,
+      "exit_code": 0,
+      "id": "results-index",
+      "log": "results-index.log",
+      "log_sha256": "939be191551ad125742b3e230641d31a9fd9f981cae3346990d0548ce7c405bd",
+      "started_utc": "2026-09-02T10:39:58.880233Z"
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/gmd/verify_redistribution_manifest.py"
+      ],
+      "elapsed_seconds": 0.01602895900009571,
+      "exit_code": 0,
+      "id": "redistribution-manifest",
+      "log": "redistribution-manifest.log",
+      "log_sha256": "240ebd0d7a3eac28f37efae95164f3196264d30eeed807b637c142b902813b13",
+      "started_utc": "2026-09-02T10:39:58.892563Z"
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/gmd/verify_source_release_policy.py"
+      ],
+      "elapsed_seconds": 0.015554374999965148,
+      "exit_code": 0,
+      "id": "source-release-policy",
+      "log": "source-release-policy.log",
+      "log_sha256": "2134480f6352156610637f8ba3e28a4365f040c477d6c3c22be358ee8c6017bd",
+      "started_utc": "2026-09-02T10:39:58.909242Z"
+    },
+    {
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/runtests.jl\")"
+      ],
+      "elapsed_seconds": 3653.973919085,
+      "exit_code": 0,
+      "id": "strict-cpu-data",
+      "log": "strict-cpu-data.log",
+      "log_sha256": "4c3110369e9d8108c9e01b356d0426a4b9348e05a636d13fdc939daab8f51f5a",
+      "started_utc": "2026-09-02T10:39:58.925226Z"
+    },
+    {
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/test_ad_robustness.jl\")"
+      ],
+      "elapsed_seconds": 271.73119937499996,
+      "exit_code": 0,
+      "id": "gate-ad-robustness",
+      "log": "gate-ad-robustness.log",
+      "log_sha256": "c48a8db03bfaec6ef9bdf1186c0d56c8438e6fdf3525a840ba08db4d26c40b91",
+      "started_utc": "2026-09-02T12:36:55.182202Z"
+    },
+    {
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/test_parameter_recovery.jl\")"
+      ],
+      "elapsed_seconds": 455.7414963750007,
+      "exit_code": 0,
+      "id": "gate-parameter-recovery",
+      "log": "gate-parameter-recovery.log",
+      "log_sha256": "93967c8234e2db60ad2ce1761109ef5397ed7bd1607ba605d6c0b2bb05a60610",
+      "started_utc": "2026-09-02T12:41:26.910706Z"
+    },
+    {
+      "argv": [
+        "julia",
+        "--project=.",
+        "--check-bounds=yes",
+        "-e",
+        "using Test; include(\"test/test_calibration.jl\")"
+      ],
+      "elapsed_seconds": 269.80787841300025,
+      "exit_code": 0,
+      "id": "gate-calibration",
+      "log": "gate-calibration.log",
+      "log_sha256": "ed437d0160bec0b94e7f283f22302e80090b14dcecfbbb33dc90ab3eedff66c7",
+      "started_utc": "2026-09-02T12:49:02.647890Z"
+    }
+  ]
+}

@@ -1,0 +1,919 @@
+{
+  "environment": {
+    "manifest_sha256": "94ea12b7e1a720df91489ef969b3a9ef6f1ecd485a1563998043618726d258b3",
+    "packages": [
+      {
+        "direct": true,
+        "name": "Adapt",
+        "tree_hash": "daa72978cd7a624246e894a4f4f067706d4e17e2",
+        "uuid": "79e6a3ab-5dfb-504d-930d-738a2a938a0e",
+        "version": "4.7.0"
+      },
+      {
+        "direct": false,
+        "name": "ArgTools",
+        "tree_hash": null,
+        "uuid": "0dad84c5-d112-42e6-8d28-ef12dabb789f",
+        "version": "1.1.2"
+      },
+      {
+        "direct": false,
+        "name": "Artifacts",
+        "tree_hash": null,
+        "uuid": "56f22d72-fd6d-98f1-02f0-08ddc0907c33",
+        "version": "1.11.0"
+      },
+      {
+        "direct": true,
+        "name": "Atomix",
+        "tree_hash": "b8651b2eb5796a386b0398a20b519a6a6150f75c",
+        "uuid": "a9b6321e-bd34-4604-b9c9-b65b8de01458",
+        "version": "1.1.3"
+      },
+      {
+        "direct": false,
+        "name": "Base64",
+        "tree_hash": null,
+        "uuid": "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Blosc_jll",
+        "tree_hash": "535c80f1c0847a4c967ea945fca21becc9de1522",
+        "uuid": "0b7ba130-8d10-5ba8-a3d6-c5182647fed9",
+        "version": "1.21.7+0"
+      },
+      {
+        "direct": false,
+        "name": "Bzip2_jll",
+        "tree_hash": "1b96ea4a01afe0ea4090c5c8039690672dd13f2e",
+        "uuid": "6e34b625-4abd-537c-b88f-471c36dfa7a0",
+        "version": "1.0.9+0"
+      },
+      {
+        "direct": false,
+        "name": "CEnum",
+        "tree_hash": "389ad5c84de1ae7cf0e28e381131c98ea87d54fc",
+        "uuid": "fa961155-64e5-5f13-b03f-caf6b980ea82",
+        "version": "0.5.0"
+      },
+      {
+        "direct": false,
+        "name": "CFTime",
+        "tree_hash": "fad2f199d1f1ae0c8e820ab68f81f6dbf62e60b2",
+        "uuid": "179af706-886a-5703-950a-314cd64e0468",
+        "version": "0.2.10"
+      },
+      {
+        "direct": false,
+        "name": "CommonDataModel",
+        "tree_hash": "54d50f8a0a68ff4160564dfa09fc5de32465cfca",
+        "uuid": "1fbeeb36-5f17-413c-809b-666fb144f157",
+        "version": "0.4.4"
+      },
+      {
+        "direct": false,
+        "name": "CommonSubexpressions",
+        "tree_hash": "cda2cfaebb4be89c9084adaca7dd7333369715c5",
+        "uuid": "bbf7d656-a473-5ed7-a52c-81e309532950",
+        "version": "0.3.1"
+      },
+      {
+        "direct": false,
+        "name": "CompilerSupportLibraries_jll",
+        "tree_hash": null,
+        "uuid": "e66e0078-7015-5450-92f7-15fbd957f2ae",
+        "version": "1.3.0+1"
+      },
+      {
+        "direct": false,
+        "name": "ConstructionBase",
+        "tree_hash": "b4b092499347b18a015186eae3042f72267106cb",
+        "uuid": "187b0558-2788-49d3-abe0-74a17ed4e7c9",
+        "version": "1.6.0"
+      },
+      {
+        "direct": false,
+        "name": "DataStructures",
+        "tree_hash": "b0bc6d2cad1fed8b7fd59a1551a991cb3d2809e6",
+        "uuid": "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8",
+        "version": "0.19.6"
+      },
+      {
+        "direct": true,
+        "name": "Dates",
+        "tree_hash": null,
+        "uuid": "ade2ca70-3891-5945-98fb-dc099432e06a",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "DiffResults",
+        "tree_hash": "782dd5f4561f5d267313f23853baaaa4c52ea621",
+        "uuid": "163ba53b-c6d8-5494-b064-1a9d43ac40c5",
+        "version": "1.1.0"
+      },
+      {
+        "direct": false,
+        "name": "DiffRules",
+        "tree_hash": "79a2aca180a85c690c58a020d47b426954b590f8",
+        "uuid": "b552c78f-8df3-52c6-915a-8e097449b14b",
+        "version": "1.16.0"
+      },
+      {
+        "direct": false,
+        "name": "DiskArrays",
+        "tree_hash": "9903195c34a488c5265d9a105f39718b7a2b3568",
+        "uuid": "3c3547ce-8d99-4f5e-a174-61eb10b00ae3",
+        "version": "0.4.22"
+      },
+      {
+        "direct": false,
+        "name": "Distributed",
+        "tree_hash": null,
+        "uuid": "8ba89e20-285c-5b6f-9357-94700520ee1b",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "DocStringExtensions",
+        "tree_hash": "7442a5dfe1ebb773c29cc2962a8980f47221d76c",
+        "uuid": "ffbed154-4ef7-542d-bbb7-c09d3a79fcae",
+        "version": "0.9.5"
+      },
+      {
+        "direct": false,
+        "name": "Downloads",
+        "tree_hash": null,
+        "uuid": "f43a241f-c20a-4ad4-852c-f6b1247861c6",
+        "version": "1.7.0"
+      },
+      {
+        "direct": true,
+        "name": "Enzyme",
+        "tree_hash": "343abf30455adeac7fc5fcd9f8d488926368718a",
+        "uuid": "7da242da-08ed-463a-9acd-ee780be4f1d9",
+        "version": "0.13.199"
+      },
+      {
+        "direct": false,
+        "name": "EnzymeCore",
+        "tree_hash": "971d7831cc85f43bc9f51d615a3f7f21270c2f1d",
+        "uuid": "f151be2c-9106-41f4-ab19-57ee4f262869",
+        "version": "0.8.21"
+      },
+      {
+        "direct": false,
+        "name": "Enzyme_jll",
+        "tree_hash": "91cb0e3af6172671bfc66f3ea5737ee6760cdf70",
+        "uuid": "7cc45869-7501-5eee-bdea-0790c847d4ef",
+        "version": "0.0.290+0"
+      },
+      {
+        "direct": false,
+        "name": "ExprTools",
+        "tree_hash": "d2e49e7efd29719d6f28b891b0e0e159daa9d2b4",
+        "uuid": "e2ba6199-217a-4e67-a87a-7c52f15ade04",
+        "version": "0.1.11"
+      },
+      {
+        "direct": false,
+        "name": "FileWatching",
+        "tree_hash": null,
+        "uuid": "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee",
+        "version": "1.11.0"
+      },
+      {
+        "direct": true,
+        "name": "ForwardDiff",
+        "tree_hash": "1b86cca764a61dcac4fef4c5e16e378e5ed6953c",
+        "uuid": "f6369f11-7733-5829-9624-2563aa707210",
+        "version": "1.4.5"
+      },
+      {
+        "direct": true,
+        "name": "GPUArraysCore",
+        "tree_hash": "83cf05ab16a73219e5f6bd1bdfa9848fa24ac627",
+        "uuid": "46192b85-c4d5-4398-a991-12ede77f4527",
+        "version": "0.2.0"
+      },
+      {
+        "direct": false,
+        "name": "GPUCompiler",
+        "tree_hash": "5e54ec63c34bcc878558b173c411b8efe6b08344",
+        "uuid": "61eb1bfa-7361-4325-ad38-22787b887f55",
+        "version": "1.23.0"
+      },
+      {
+        "direct": false,
+        "name": "HDF5_jll",
+        "tree_hash": "8dd4e7d13617134fccede29e5b576380ab5d9199",
+        "uuid": "0234f1f7-429e-5d53-9886-15a909be8d59",
+        "version": "2.2.1+0"
+      },
+      {
+        "direct": false,
+        "name": "Hwloc_jll",
+        "tree_hash": "c35847ca5b4997fc8418836354a56c459bcf48d8",
+        "uuid": "e33a78d0-f292-5ffc-b300-72abe9b543c8",
+        "version": "2.14.0+0"
+      },
+      {
+        "direct": false,
+        "name": "InteractiveUtils",
+        "tree_hash": null,
+        "uuid": "b77e0a4c-d291-57a0-90e8-8db25a27a240",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "IrrationalConstants",
+        "tree_hash": "b2d91fe939cae05960e760110b328288867b5758",
+        "uuid": "92d709cd-6900-40b7-9082-c6be49f344b6",
+        "version": "0.2.6"
+      },
+      {
+        "direct": false,
+        "name": "JLLWrappers",
+        "tree_hash": "7204148362dafe5fe6a273f855b8ccbe4df8173e",
+        "uuid": "692b3bcd-3c85-4b1f-b108-f13ce0eb3210",
+        "version": "1.8.0"
+      },
+      {
+        "direct": true,
+        "name": "JSON",
+        "tree_hash": "c7345ab1a7ca4dc8a02c9f6510da0d9857bbe513",
+        "uuid": "682c06a0-de6a-54ab-a142-c8b1cf79cde6",
+        "version": "1.7.1"
+      },
+      {
+        "direct": false,
+        "name": "JuliaSyntaxHighlighting",
+        "tree_hash": null,
+        "uuid": "ac6e5ff7-fb65-4e79-a425-ec3bc9c03011",
+        "version": "1.12.0"
+      },
+      {
+        "direct": true,
+        "name": "KernelAbstractions",
+        "tree_hash": "a5b87110fa95d711355af44832497745aa93fb52",
+        "uuid": "63c18a36-062a-441e-b654-da1e3ab1ce7c",
+        "version": "0.9.42"
+      },
+      {
+        "direct": false,
+        "name": "LLVM",
+        "tree_hash": "5f708df9df936ff026cc6232e187ddf93f343430",
+        "uuid": "929cbde3-209d-540e-8aea-75f648917ca0",
+        "version": "9.13.0"
+      },
+      {
+        "direct": false,
+        "name": "LLVMExtra_jll",
+        "tree_hash": "23caf34b74ef5d02b03f2c2853724df7cf6ec3ca",
+        "uuid": "dad2f222-ce93-54a1-a47d-0025e8a3acab",
+        "version": "0.0.46+0"
+      },
+      {
+        "direct": false,
+        "name": "LRUCache",
+        "tree_hash": "5519b95a490ff5fe629c4a7aa3b3dfc9160498b3",
+        "uuid": "8ac3fa9e-de4c-5943-b1dc-09c6b5f20637",
+        "version": "1.6.2"
+      },
+      {
+        "direct": false,
+        "name": "LazyArtifacts",
+        "tree_hash": null,
+        "uuid": "4af54fe1-eca0-43a8-85a7-787d91b784e3",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "LibCURL",
+        "tree_hash": null,
+        "uuid": "b27032c2-a3e7-50c8-80cd-2d36dbcbfd21",
+        "version": "0.6.4"
+      },
+      {
+        "direct": false,
+        "name": "LibCURL_jll",
+        "tree_hash": null,
+        "uuid": "deac9b47-8bc7-5906-a0fe-35ac56dc84c0",
+        "version": "8.15.0+0"
+      },
+      {
+        "direct": false,
+        "name": "LibGit2",
+        "tree_hash": null,
+        "uuid": "76f85450-5226-5b5a-8eaa-529ad045b433",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "LibGit2_jll",
+        "tree_hash": null,
+        "uuid": "e37daf67-58a4-590a-8e99-b0245dd2ffc5",
+        "version": "1.9.0+0"
+      },
+      {
+        "direct": false,
+        "name": "LibSSH2_jll",
+        "tree_hash": null,
+        "uuid": "29816b5a-b9ab-546f-933c-edad1886dfa8",
+        "version": "1.11.3+1"
+      },
+      {
+        "direct": false,
+        "name": "LibTracyClient_jll",
+        "tree_hash": "d4e20500d210247322901841d4eafc7a0c52642d",
+        "uuid": "ad6e5548-8b26-5c9f-8ef3-ef0ad883f3a5",
+        "version": "0.13.1+0"
+      },
+      {
+        "direct": false,
+        "name": "Libdl",
+        "tree_hash": null,
+        "uuid": "8f399da3-3557-5675-b5ff-fb832c97cbdb",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Libiconv_jll",
+        "tree_hash": "be484f5c92fad0bd8acfef35fe017900b0b73809",
+        "uuid": "94ce4f54-9a6c-5748-9c1c-f9c7231a4531",
+        "version": "1.18.0+0"
+      },
+      {
+        "direct": true,
+        "name": "LinearAlgebra",
+        "tree_hash": null,
+        "uuid": "37e2e46d-f89d-539d-b4ee-838fcccc9c8e",
+        "version": "1.12.0"
+      },
+      {
+        "direct": false,
+        "name": "LogExpFunctions",
+        "tree_hash": "bba2d9aa057d8f126415de240573e86a8f39d2a1",
+        "uuid": "2ab3a3ac-af41-5b50-aa03-7779005ae688",
+        "version": "1.0.1"
+      },
+      {
+        "direct": false,
+        "name": "Logging",
+        "tree_hash": null,
+        "uuid": "56ddb016-857b-54e1-b83d-db4d58db5568",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Lz4_jll",
+        "tree_hash": "191686b1ac1ea9c89fc52e996ad15d1d241d1e33",
+        "uuid": "5ced341a-0733-55b8-9ab6-a4889d929147",
+        "version": "1.10.1+0"
+      },
+      {
+        "direct": true,
+        "name": "MPI",
+        "tree_hash": "3197540ffa29866930fedc8929903b9410ecf303",
+        "uuid": "da04e1cc-30fd-572f-bb4f-1f8673147195",
+        "version": "0.20.27"
+      },
+      {
+        "direct": false,
+        "name": "MPIABI_jll",
+        "tree_hash": "c0ab44a826d1a8219715078f79c265a11292db86",
+        "uuid": "b5ada748-db0f-5fc0-8972-9331c762740c",
+        "version": "1.0.0+0"
+      },
+      {
+        "direct": false,
+        "name": "MPICH_jll",
+        "tree_hash": "07dbec8aab01696edc0151a401a6cdfe95b9b885",
+        "uuid": "7cb0a576-ebde-5e09-9194-50597f1243b4",
+        "version": "5.0.1+0"
+      },
+      {
+        "direct": false,
+        "name": "MPIPreferences",
+        "tree_hash": "8e98d5d80b87403c311fd51e8455d4546ba7a5f8",
+        "uuid": "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267",
+        "version": "0.1.12"
+      },
+      {
+        "direct": false,
+        "name": "MPItrampoline_jll",
+        "tree_hash": "675df097f8eeb28998b2cfe3b25655af73d5f7df",
+        "uuid": "f1f71cc9-e9ae-5b93-9b94-4fe0e1ad3748",
+        "version": "5.5.6+0"
+      },
+      {
+        "direct": false,
+        "name": "MacroTools",
+        "tree_hash": "1e0228a030642014fe5cfe68c2c0a818f9e3f522",
+        "uuid": "1914dd2f-81c6-5fcd-8719-6d5c9610ff09",
+        "version": "0.5.16"
+      },
+      {
+        "direct": false,
+        "name": "Markdown",
+        "tree_hash": null,
+        "uuid": "d6f4376e-aef5-505a-96c1-9c027394607a",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "MicrosoftMPI_jll",
+        "tree_hash": "bc95bf4149bf535c09602e3acdf950d9b4376227",
+        "uuid": "9237b28f-5490-5468-be7b-bb81f5f5e6cf",
+        "version": "10.1.4+3"
+      },
+      {
+        "direct": false,
+        "name": "Mmap",
+        "tree_hash": null,
+        "uuid": "a63ad114-7e13-5084-954f-fe012c677804",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "MozillaCACerts_jll",
+        "tree_hash": null,
+        "uuid": "14a3606d-f60d-562e-9121-12d972cd8159",
+        "version": "2025.11.4"
+      },
+      {
+        "direct": true,
+        "name": "NCDatasets",
+        "tree_hash": "5eb7747d10437f5acb2675c1f865ffa0353f3f9c",
+        "uuid": "85f8d34a-cbdd-5861-8df4-14fed0d494ab",
+        "version": "0.14.15"
+      },
+      {
+        "direct": false,
+        "name": "NaNMath",
+        "tree_hash": "dbd2e8cd2c1c27f0b584f6661b4309609c5a685e",
+        "uuid": "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3",
+        "version": "1.1.4"
+      },
+      {
+        "direct": false,
+        "name": "NetCDF_jll",
+        "tree_hash": "bbd7ae15594503021b388a1090cca6ea431e0a8f",
+        "uuid": "7243133f-43d8-5620-bbf4-c2c921802cf3",
+        "version": "401.1000.101+0"
+      },
+      {
+        "direct": false,
+        "name": "NetworkOptions",
+        "tree_hash": null,
+        "uuid": "ca575930-c2e3-43a9-ace4-1e988b2c1908",
+        "version": "1.3.0"
+      },
+      {
+        "direct": false,
+        "name": "ObjectFile",
+        "tree_hash": "23c4d109603f7a7bfe888c1f63c5ab7be6183d0b",
+        "uuid": "d8793406-e978-5875-9003-1fc021f44a92",
+        "version": "0.5.1"
+      },
+      {
+        "direct": false,
+        "name": "OffsetArrays",
+        "tree_hash": "117432e406b5c023f665fa73dc26e79ec3630151",
+        "uuid": "6fe1bfb0-de20-5000-8ca7-80f57d26f881",
+        "version": "1.17.0"
+      },
+      {
+        "direct": false,
+        "name": "OpenBLAS_jll",
+        "tree_hash": null,
+        "uuid": "4536629a-c528-5b80-bd46-f80d51c5b363",
+        "version": "0.3.29+0"
+      },
+      {
+        "direct": false,
+        "name": "OpenLibm_jll",
+        "tree_hash": null,
+        "uuid": "05823500-19ac-5b8b-9628-191a04bc5112",
+        "version": "0.8.7+0"
+      },
+      {
+        "direct": false,
+        "name": "OpenMPI_jll",
+        "tree_hash": "6d6c0ca4824268c1a7dca1f4721c535ac63d9074",
+        "uuid": "fe0851c0-eecd-5654-98d4-656369965a5c",
+        "version": "5.0.11+0"
+      },
+      {
+        "direct": false,
+        "name": "OpenSSL_jll",
+        "tree_hash": null,
+        "uuid": "458c3c95-2e84-50aa-8efc-19380b2a3a95",
+        "version": "3.5.4+0"
+      },
+      {
+        "direct": false,
+        "name": "OpenSpecFun_jll",
+        "tree_hash": "1346c9208249809840c91b26703912dff463d335",
+        "uuid": "efe28fd5-8261-553b-a9e1-b2916fc3738e",
+        "version": "0.5.6+0"
+      },
+      {
+        "direct": false,
+        "name": "OrderedCollections",
+        "tree_hash": "05f45c2e0de6259db764adbfd2f1dc6d3f8de13c",
+        "uuid": "bac558e1-5e72-5ebc-8fee-abe8a469f55d",
+        "version": "2.0.1"
+      },
+      {
+        "direct": false,
+        "name": "Parsers",
+        "tree_hash": "3de8f5e6e90ebfa8d6d1f86997d6cdcd6a912ff3",
+        "uuid": "69de0a69-1ddd-5017-9359-2bf0b02dc9f0",
+        "version": "2.8.7"
+      },
+      {
+        "direct": false,
+        "name": "Pkg",
+        "tree_hash": null,
+        "uuid": "44cfe95a-1eb2-52ea-b672-e2afdf69b78f",
+        "version": "1.12.1"
+      },
+      {
+        "direct": false,
+        "name": "PkgVersion",
+        "tree_hash": "f9501cc0430a26bc3d156ae1b5b0c1b47af4d6da",
+        "uuid": "eebad327-c553-4316-9ea0-9fa01ccd7688",
+        "version": "0.3.3"
+      },
+      {
+        "direct": false,
+        "name": "PrecompileTools",
+        "tree_hash": "edbeefc7a4889f528644251bdb5fc9ab5348bc2c",
+        "uuid": "aea7be01-6a6a-4083-8856-8a6e6704d82a",
+        "version": "1.3.4"
+      },
+      {
+        "direct": false,
+        "name": "Preferences",
+        "tree_hash": "8b770b60760d4451834fe79dd483e318eee709c4",
+        "uuid": "21216c6a-2e73-6563-6e65-726566657250",
+        "version": "1.5.2"
+      },
+      {
+        "direct": false,
+        "name": "Printf",
+        "tree_hash": null,
+        "uuid": "de0858da-6303-5e67-8744-51eddeeeb8d7",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "REPL",
+        "tree_hash": null,
+        "uuid": "3fa0cd96-eef1-5676-8a61-b3b8758bbffb",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Random",
+        "tree_hash": null,
+        "uuid": "9a3f8284-a2c9-5f02-9a11-845980a1fd5c",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Reexport",
+        "tree_hash": "45e428421666073eab6f2da5c9d310d99bb12f9b",
+        "uuid": "189a3867-3050-52da-a836-e630ba90ab69",
+        "version": "1.2.2"
+      },
+      {
+        "direct": false,
+        "name": "Requires",
+        "tree_hash": "62389eeff14780bfe55195b7204c0d8738436d64",
+        "uuid": "ae029012-a4dd-5104-9daa-d747884805df",
+        "version": "1.3.1"
+      },
+      {
+        "direct": false,
+        "name": "SHA",
+        "tree_hash": null,
+        "uuid": "ea8e919c-243c-51af-8825-aaa63cd721ce",
+        "version": "0.7.0"
+      },
+      {
+        "direct": false,
+        "name": "Scratch",
+        "tree_hash": "9b81b8393e50b7d4e6d0a9f14e192294d3b7c109",
+        "uuid": "6c6a2e73-6563-6170-7368-637461726353",
+        "version": "1.3.0"
+      },
+      {
+        "direct": true,
+        "name": "Serialization",
+        "tree_hash": null,
+        "uuid": "9e88b42a-f829-5b0c-bbe9-9e923198166b",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Sockets",
+        "tree_hash": null,
+        "uuid": "6462fe0b-24de-5631-8697-dd941f90decc",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "SparseArrays",
+        "tree_hash": null,
+        "uuid": "2f01184e-e22b-5df5-ae63-d93ebab69eaf",
+        "version": "1.12.0"
+      },
+      {
+        "direct": false,
+        "name": "SpecialFunctions",
+        "tree_hash": "429071b23f4c9a13fb6582f807cc2ef454082408",
+        "uuid": "276daf66-3868-5448-9aa4-cd146d93841b",
+        "version": "2.9.0"
+      },
+      {
+        "direct": false,
+        "name": "StaticArrays",
+        "tree_hash": "fac51faf3bb96e8bc0bf6f9f39ca4955652776bb",
+        "uuid": "90137ffa-7385-5640-81b9-e52037218182",
+        "version": "1.9.19"
+      },
+      {
+        "direct": false,
+        "name": "StaticArraysCore",
+        "tree_hash": "6ab403037779dae8c514bad259f32a447262455a",
+        "uuid": "1e83bf80-4336-4d27-bf5d-d5a4f845583c",
+        "version": "1.4.4"
+      },
+      {
+        "direct": false,
+        "name": "Statistics",
+        "tree_hash": "ae3bb1eb3bba077cd276bc5cfc337cc65c3075c0",
+        "uuid": "10745b16-79ce-11e8-11f9-7d13ad32a3b2",
+        "version": "1.11.1"
+      },
+      {
+        "direct": false,
+        "name": "StructIO",
+        "tree_hash": "c581be48ae1cbf83e899b14c07a807e1787512cc",
+        "uuid": "53d494c1-5632-5724-8f4c-31dff12d585f",
+        "version": "0.3.1"
+      },
+      {
+        "direct": false,
+        "name": "StructUtils",
+        "tree_hash": "2d0fc55c61321ba245c47be599570d11bac50303",
+        "uuid": "ec057cc2-7a8d-4b58-b3b3-92acb9f63b42",
+        "version": "2.8.5"
+      },
+      {
+        "direct": false,
+        "name": "StyledStrings",
+        "tree_hash": null,
+        "uuid": "f489334b-da3d-4c2e-b8f0-e476e12c162b",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "SuiteSparse_jll",
+        "tree_hash": null,
+        "uuid": "bea87d4a-7f5b-5778-9afe-8cc45184846c",
+        "version": "7.8.3+2"
+      },
+      {
+        "direct": false,
+        "name": "TOML",
+        "tree_hash": null,
+        "uuid": "fa267f1f-6049-4f14-aa54-33bafae1ed76",
+        "version": "1.0.3"
+      },
+      {
+        "direct": false,
+        "name": "Tar",
+        "tree_hash": null,
+        "uuid": "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e",
+        "version": "1.10.0"
+      },
+      {
+        "direct": false,
+        "name": "Tracy",
+        "tree_hash": "73e3ff50fd3990874c59fef0f35d10644a1487bc",
+        "uuid": "e689c965-62c8-4b79-b2c5-8359227902fd",
+        "version": "0.1.6"
+      },
+      {
+        "direct": false,
+        "name": "UUIDs",
+        "tree_hash": null,
+        "uuid": "cf7118a7-6976-5b1a-9a39-7adc72f591a4",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "Unicode",
+        "tree_hash": null,
+        "uuid": "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5",
+        "version": "1.11.0"
+      },
+      {
+        "direct": false,
+        "name": "UnsafeAtomics",
+        "tree_hash": "21b39bfb1fab6156b61fbcba4c86c57b6216d2c3",
+        "uuid": "013be700-e6cd-48c3-b4a1-df204f14c38f",
+        "version": "0.3.2"
+      },
+      {
+        "direct": false,
+        "name": "XML2_jll",
+        "tree_hash": "80d3930c6347cfce7ccf96bd3bafdf079d9c0390",
+        "uuid": "02c8fc9c-b97f-50b9-bbe4-9be30ff0a78a",
+        "version": "2.13.9+0"
+      },
+      {
+        "direct": false,
+        "name": "XZ_jll",
+        "tree_hash": "b29c22e245d092b8b4e8d3c09ad7baa586d9f573",
+        "uuid": "ffd25f8a-64ca-5728-b0f7-c24cf3aae800",
+        "version": "5.8.3+0"
+      },
+      {
+        "direct": false,
+        "name": "Xorg_libpciaccess_jll",
+        "tree_hash": "58972370b81423fc546c56a60ed1a009450177c3",
+        "uuid": "a65dc6b1-eb27-53a1-bb3e-dea574b5389e",
+        "version": "0.19.0+0"
+      },
+      {
+        "direct": false,
+        "name": "Zlib_jll",
+        "tree_hash": null,
+        "uuid": "83775a58-1f1d-513f-b197-d71354ab007a",
+        "version": "1.3.1+2"
+      },
+      {
+        "direct": false,
+        "name": "Zstd_jll",
+        "tree_hash": "446b23e73536f84e8037f5dce465e92275f6a308",
+        "uuid": "3161d3a3-bdf6-5164-811a-617609db77b4",
+        "version": "1.5.7+1"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_auth_jll",
+        "tree_hash": "8cab83c96af80a1be968251ce1a0548a7545484d",
+        "uuid": "2b3700d1-4306-52e2-a478-c162f0c514be",
+        "version": "0.9.6+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_cal_jll",
+        "tree_hash": "22c0f42f4a1f0dc5dcfa8fd267c4ac407c455e7a",
+        "uuid": "70f11efc-bab2-57f1-b0f3-22aad4e67c4b",
+        "version": "0.9.13+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_common_jll",
+        "tree_hash": "a759cb9bf456ad792cc7898a81ae333cce9ef02a",
+        "uuid": "73048d1d-b8c4-5092-a58d-866c5e8d1e50",
+        "version": "0.12.6+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_compression_jll",
+        "tree_hash": "7910c72f45f44afd297c39fe43b99c56d5ed22ec",
+        "uuid": "73a04cd5-f3d7-5bac-9290-e8adb709f224",
+        "version": "0.3.2+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_http_jll",
+        "tree_hash": "3fb8685778068de502c72fec5dd8075e037cee15",
+        "uuid": "3254fc65-9028-534d-aa9d-d76d128babc6",
+        "version": "0.10.15+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_io_jll",
+        "tree_hash": "7e481d474b2087ee8bbf55b81bf9119f21e396d9",
+        "uuid": "13c41daa-f319-5298-b5eb-5754e0170d52",
+        "version": "0.26.3+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_s3_jll",
+        "tree_hash": "3e9917ab25114feba657e71be41cad068b9f6595",
+        "uuid": "bd1f34fb-993f-5903-a121-aaf302eed6d4",
+        "version": "0.11.5+0"
+      },
+      {
+        "direct": false,
+        "name": "aws_c_sdkutils_jll",
+        "tree_hash": "c43dfba2c1ab9ea9f02f2c80e86fa16f6460244e",
+        "uuid": "1282aa60-004d-510b-9f52-12498d409daa",
+        "version": "0.2.4+1"
+      },
+      {
+        "direct": false,
+        "name": "aws_checksums_jll",
+        "tree_hash": "2570c8e23f4771a087b12a47edcaaa670ac05a01",
+        "uuid": "b2a88e68-78e7-5e94-8c20-c02986ec140e",
+        "version": "0.2.10+0"
+      },
+      {
+        "direct": false,
+        "name": "dlfcn_win32_jll",
+        "tree_hash": "e141d67ffe550eadfb5af1bdbdaf138031e4805f",
+        "uuid": "c4b69c83-5512-53e3-94e6-de98773c479f",
+        "version": "1.4.2+0"
+      },
+      {
+        "direct": false,
+        "name": "libaec_jll",
+        "tree_hash": "60f4792734488db6f42e2c7699f1d4594780bd03",
+        "uuid": "477f73a3-ac25-53e9-8cc3-50b2fa2566f0",
+        "version": "1.1.7+0"
+      },
+      {
+        "direct": false,
+        "name": "libblastrampoline_jll",
+        "tree_hash": null,
+        "uuid": "8e850b90-86db-534c-a0d3-1478176c7d93",
+        "version": "5.15.0+0"
+      },
+      {
+        "direct": false,
+        "name": "libzip_jll",
+        "tree_hash": "86addc139bca85fdf9e7741e10977c45785727b7",
+        "uuid": "337d8026-41b4-5cde-a456-74a10e5b31d1",
+        "version": "1.11.3+0"
+      },
+      {
+        "direct": false,
+        "name": "mpif_jll",
+        "tree_hash": "a06fcd368cfe6fe2c0eb7b63320d4d27ddcd010d",
+        "uuid": "9aeb927a-4695-514f-a259-621a69f20ec0",
+        "version": "1.0.0+0"
+      },
+      {
+        "direct": false,
+        "name": "nghttp2_jll",
+        "tree_hash": null,
+        "uuid": "8e850ede-7688-5339-a07c-302acd2aaf8d",
+        "version": "1.64.0+1"
+      },
+      {
+        "direct": false,
+        "name": "p7zip_jll",
+        "tree_hash": null,
+        "uuid": "3f19e933-33d8-53b3-aaab-bd5110c3b7a0",
+        "version": "17.7.0+0"
+      },
+      {
+        "direct": false,
+        "name": "s2n_tls_jll",
+        "tree_hash": "64ae051c6f03044eb7d98027d1b552b4e21e650c",
+        "uuid": "cddc5d3d-934d-5d3a-9747-62fc12ea3f48",
+        "version": "1.7.3+0"
+      }
+    ],
+    "project_sha256": "06e66cc43c48f36a4939cc05c61579e09e0bab74491d5803e020d596e23e4376"
+  },
+  "git": {
+    "branch": "",
+    "clean": true,
+    "commit": "9787b7cd39e9d499ca5732b6f8665260a760840c",
+    "describe": "9787b7c",
+    "remote": "/Users/darri/repos/CLM.jl",
+    "status": [
+
+    ]
+  },
+  "host": {
+    "cpu": "generic",
+    "hostname": "1881e7b7507f",
+    "os_version": null
+  },
+  "julia": {
+    "architecture": "aarch64",
+    "bindir": "/usr/local/julia/bin",
+    "commit": "15346901f0039751c5488744f1f62de7d87510a8",
+    "cpu_threads": 10,
+    "kernel": "Linux",
+    "machine": "aarch64-linux-gnu",
+    "threads": 1,
+    "version": "1.12.6",
+    "word_size": 64
+  },
+  "recorded_utc": "2026-09-02T10:39:58.507Z",
+  "schema_version": 1
+}
+
