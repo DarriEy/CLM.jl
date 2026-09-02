@@ -65,6 +65,12 @@
         "result": "full 8760-step year completes in 213.5 s; unchanged gate reproduces 204/207 with the identical three cells",
         "bow_btran_cell": "+4.2% annual / 0.21 nRMSE \u2014 unchanged; disposition now rests solely on independent scientific review",
         "evidence": "docs/gmd/bow_audited_rerun_2026-08-31.md"
+      },
+      "scoped_claim_disposition": {
+        "date": "2026-09-02",
+        "decision": "author-level rescope of C01 to the characterized 204/207 claim; no exception added; strict gate unchanged and still fail-closed",
+        "independence": "no external pre-submission reviewers available; GMD interactive open peer review carries the independent review, disclosed in manuscript and cover letter",
+        "evidence": "docs/gmd/btran_disposition_2026-09-02.md"
       }
     },
     "metal_device_fleet": {
@@ -89,9 +95,9 @@
     }
   },
   "open_release_requirements": [
-    "independent disposition of the stable Bow grass BTRAN residual (now the ONLY blocker for C01)",
+    "BTRAN residual: dispositioned 2026-09-02 by author-level rescope of C01 (no external reviewers available); final independent scrutiny deferred to GMD open peer review and disclosed",
     "human confirmation that the exact upstream products in the experiment archive match the reviewed provider terms (committed-data side cleared 2026-09-02: 6/7 artifacts synthetic or licensed, D04 excluded-with-recipe)",
     "frozen single-command campaign and persistent archive identifiers",
-    "independent domain and numerical review"
+    "independent domain and numerical review: NOT AVAILABLE pre-submission \u2014 replaced by author review plus GMD interactive open peer review, with explicit disclosure in the manuscript and cover letter"
   ]
 }

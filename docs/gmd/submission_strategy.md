@@ -59,8 +59,15 @@ Official sources:
 
 ### Stage A — narrow and freeze
 
-1. Obtain domain-science and numerical review of the experiment matrix, metrics, and the
-   stable Bow grass BTRAN residual.
+1. ~~Obtain domain-science and numerical review of the experiment matrix, metrics, and
+   the stable Bow grass BTRAN residual.~~ **2026-09-02: no independent pre-submission
+   reviewers are available to this project.** The recorded substitute
+   (`btran_disposition_2026-09-02.md`): author-level review only; the BTRAN residual is
+   dispositioned by RESCOPING C01 to the characterized 204/207 claim with no gate
+   exception; GMD's interactive open peer review is relied on as the independent
+   scientific and numerical review and this reliance MUST be disclosed in the
+   manuscript and cover letter. The same disclosure covers the whole verification
+   programme: it is internally generated and agent-executed, with open artifacts.
 2. Decide whether E5-E9 are repaired and retained or explicitly removed from v0.1.0 paper
    claims. Exclusion is preferable to an indefinitely expanding campaign.
 3. Freeze the protocol, threshold table, site membership, release-candidate commit, and
@@ -114,7 +121,8 @@ and re-generated results, figures, and manuscript values.
 
 Submission is **NO-GO** today. The minimum transition to GO is:
 
-- protocol and numerical thresholds frozen after recorded human review;
+- protocol and numerical thresholds frozen after recorded review (2026-09-02:
+  author-level, external review unavailable — disclosed; thresholds never tuned);
 - primary CPU equivalence claim passes the definitive campaign;
 - all retained claims pass and all failed/TBD claims are removed from title, abstract,
   conclusions, figures, and tables;

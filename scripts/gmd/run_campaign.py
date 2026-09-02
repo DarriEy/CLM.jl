@@ -80,7 +80,22 @@ def assert_ready(spec):
         blockers.append("source worktree is dirty")
     head = git("rev-parse", "HEAD")
     if re.fullmatch(r"[0-9a-f]{40}", expected) and head != expected:
-        blockers.append(f"HEAD {head} differs from frozen source_commit {expected}")
+        # A committed spec cannot contain its own commit hash, so the original
+        # HEAD == source_commit rule was unsatisfiable for any frozen spec.
+        # The frozen source_commit is the PARENT of the freeze commit — the
+        # release-candidate code state — and the freeze commit itself may only
+        # flip the campaign configuration under repro/configs/. Anything else
+        # between source_commit and HEAD still fails the preflight.
+        parent = git("rev-parse", "HEAD^")
+        if parent != expected:
+            blockers.append(f"HEAD {head} and its parent {parent} both differ "
+                            f"from frozen source_commit {expected}")
+        else:
+            changed = git("diff", "--name-only", f"{expected}..HEAD").splitlines()
+            outside = [f for f in changed if not f.startswith("repro/configs/")]
+            if outside:
+                blockers.append("freeze commit touches files outside repro/configs/: "
+                                + ", ".join(outside))
     for name in spec["required_environment"]:
         value = os.environ.get(name, "")
         if not value:
