@@ -2,7 +2,7 @@
   "schema_version": 1,
   "campaign_id": "clm-jl-v0.1.0-campaign-1",
   "protocol_frozen": true,
-  "source_commit": "71ba908d4c677ddd6414192a653ba3a8705829fc",
+  "source_commit": "9b7c43fda9b575acb48968c2fded30fcc4b5cc0b",
   "required_platform": "Linux",
   "required_environment": [
     "SYMFLUENCE_DATA",
