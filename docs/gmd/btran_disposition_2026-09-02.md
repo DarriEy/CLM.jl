@@ -54,11 +54,11 @@ canopy-energy/PHS solve) remains possible and unresolved.
 
 ## Ledger and verifier consequence
 
-- `claims.csv` C01 → `PASS-QUALIFICATION-SCOPED`, evidence this memo; the strict
-  204/207 gate output remains the recorded measurement.
-- `verify_results_index.py`'s C01 rule changes from "must be FAIL" to "must be the
-  SCOPED status and this memo must exist" — updated together with this record, per the
-  script's own contract. The strict-parity gate's `claim_supported` stays **false**:
-  204/207 cannot and does not support the unscoped parity claim.
+- `claims.csv`: **C01 stays FAIL-QUALIFICATION** — the unscoped 207/207 claim was
+  never achieved and the ledger keeps saying so. The manuscript claim is the new row
+  **C01a** (`PASS-QUALIFICATION-SCOPED`, evidence this memo). No verifier rule changes:
+  `verify_results_index.py`'s C01-must-fail invariant remains true and enforced, and
+  the strict-parity gate's `claim_supported` stays **false** — 204/207 cannot and does
+  not support the unscoped parity claim.
 - The manuscript may not use the word "parity" for C01 without the 204/207
   qualification attached.
