@@ -90,7 +90,7 @@
   },
   "open_release_requirements": [
     "independent disposition of the stable Bow grass BTRAN residual (now the ONLY blocker for C01)",
-    "redistribution and licence clearance",
+    "human confirmation that the exact upstream products in the experiment archive match the reviewed provider terms (committed-data side cleared 2026-09-02: 6/7 artifacts synthetic or licensed, D04 excluded-with-recipe)",
     "frozen single-command campaign and persistent archive identifiers",
     "independent domain and numerical review"
   ]
