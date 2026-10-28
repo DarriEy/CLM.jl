@@ -418,6 +418,10 @@ using CLM
     # nsites=2 on two FATES columns and loops clm_drv! >= 1 day, asserting both run
     # finite + the daily step advances both sites.
     include("test_fates_multipatch.jl")
+    # use_fates_bgc host coupling: FATES litter -> CLM decomposition pools
+    # (UpdateC/NLitterFluxes), driver config defaults, and a data-gated live run that
+    # closes the soil C budget and tracks the Fortran fates_parity_1pt soil BGC.
+    include("test_fates_soilbgc_coupling.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

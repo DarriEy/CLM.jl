@@ -2802,9 +2802,10 @@ Filled:
   * TVEG (instantaneous veg temp from `bc_in.t_veg_pa`)
   * VIS/NIR radiation conservation error (age-area weighted across patches)
 
-Where a per-step source is unavailable in the carbon-only path it is handled
-exactly as Fortran would with a zero/ignore value: `tot_het_resp` defaults to
-zero (no use_fates_bgc heterotrophic respiration), so NEP == GPP-AR and HR == 0.
+`tot_het_resp` is the host's column heterotrophic respiration, handed over by
+`fates_wrap_update_hifrq_hist!` (the Fortran `wrap_update_hifrq_hist`) after the
+CLM soil-BGC step; it is zero only without soil decomposition (use_fates_bgc off),
+in which case NEP == GPP-AR and HR == 0.
 """
 function update_history_hifrq1!(this::fates_history_interface_type, nc, nsites, sites, bc_in, bc_out, dt_tstep)
     h_gpp        = this.hvars[this.ih[:ih_gpp_si]].r81d

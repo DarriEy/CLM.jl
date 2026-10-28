@@ -1026,3 +1026,83 @@ holds none of the three FATES domains. They live under the Drive root. This is w
 reported "Tropical Aripuana data is absent in this environment" and skipped the tropical
 arm: the domain existed all along. Now honours `SYMFLUENCE_DATA` like every other
 harness (`test/testdata.jl::symfluence_data_root`).
+
+---
+
+# SOIL-BGC COUPLING (2026-10-28): FATES litter -> CLM decomposition, validated
+
+## What was missing
+
+CTSM runs every non-SP FATES case with `use_fates_bgc = .not. use_fates_sp`
+(`controlMod.F90:474-479`) and `soil_decomp_method = 'CENTURYKoven2013'`. The archived
+`fates_parity_1pt` case (and therefore every reference dump in this directory) has the
+coupling on. The port did not. `CLMDriverConfig(use_fates=true)` defaulted
+`use_fates_bgc=false`. FATES computed `bc_out%litt_flux_{lab,cel,lig}_c_si`, but nothing
+outside `src/fates/` read them. No decomposition cascade was built for FATES columns, and
+soil HR (and so `FATES_HET_RESP`) was identically 0. The scorecards above covered FATES
+*vegetation* only.
+
+## What is connected now (Fortran reference -> port)
+
+| Fortran (ctsm5.3.012) | port |
+|---|---|
+| `controlMod` `use_fates_bgc = .not. use_fates_sp`; suplnitro must be `'ALL'` for `fates_parteh_mode=1` | `CLMDriverConfig` / `clm_initialize!(use_fates=true)` default `use_fates_bgc`; `soil_bgc_competition_init!(suplnitro=SUPLN_ALL)`, and `carbon_only` is now passed to `soil_bgc_competition!` (it never was, so fpi = 0 blocked every litter transition) |
+| `init_decomp_cascade_constants`: 6 pools / 8 transitions under FATES-BGC (no CWD) | `CLMDriverConfig.ndecomp_pools/transitions`; `init_decomp_cascade_bgc!(use_fates=true)`; the unused CWD slot of the CN-sized arrays is held at 0 |
+| `clm_varpar`: `nlevdecomp = nlevsoi`; `use_vertsoilc=1`, `decomp_method='CENTURY'` passed to FATES | `clm_fates_init!(use_vertsoilc=true, decomp_method="CENTURY")`, `bc_in.nlevdecomp = nlevsoi` |
+| `init_soil_depths` (real `zi/dz/z`, `dz_decomp_sisl`, `decomp_id(j)=j`) | `fates_init_soil_depths!` (replaces the synthetic 0.1 m layering under FATES-BGC) |
+| `CStateUpdate1` -> `UpdateCLitterFluxes` -> `FluxIntoLitterPools` -> `decomp_cpools_sourcesink` (+ `fates_litter_flux`) | `fates_update_c_litter_fluxes!`, called from `cn_driver_no_leaching!` just before `c_state_update1!` |
+| `NStateUpdate1` -> `UpdateNLitterFluxes` (zeroes N source/sink; N transfer commented out upstream) | `fates_update_n_litter_fluxes!` |
+| `wrap_update_hifrq_hist` (after EcosystemDynamicsPostDrainage: `tot_het_resp/tot_somc/tot_litc`) | `fates_wrap_update_hifrq_hist!`; the hifrq fill moved to the same point of the step |
+| `wrap_update_hlmfates_dyn` `litr_lig_c_to_n_col <- litt_flux_ligc_per_n` | `fates_update_litr_lig_c_to_n!` in the daily step |
+| `CNDriverSummarizeStates` soil C summary at end of step, also for FATES-BGC | the driver's end-of-step soil summary is now gated `use_cn || use_fates_bgc` (FATES columns carry no CN veg C). Without it the reported pools lagged by one step |
+
+The dynamics-driv `w_scalar/t_scalar` pack (already ported, gated on `use_fates_bgc`) now
+receives live decomposition scalars, so FATES litter fragmentation runs on the host's
+soil temperature and moisture, as in Fortran. Default non-FATES paths are unchanged.
+
+## Fortran reference and result
+
+`stage_soilbgc_run.sh` re-runs the archived case with the **uninstrumented**
+`installs/clm/bin/cesm.exe` (FATES is always compiled into CTSM). The setup matches
+`setup_case.sh` (Bow single point, 2002-07-01, 3600 s, `use_lch4` off), with an hourly
+h0 history of HR, pools, scalars and FATES litter fields. Two independent launches
+gave byte-identical output. The scored series are committed as
+`fates_soilbgc_fortran.csv` (240 steps = 10 days):
+
+```bash
+julia +1.12 --project=. scripts/validation/fates_fortran_parity/fates_soilbgc_parity.jl
+```
+
+| field | end (day 10) Fortran / Julia | per-step rel. error from day 2 (max / mean) |
+|---|---|---|
+| HR | 3.8352e-06 / 3.8400e-06 gC/m2/s | 5.2e-2 / 1.9e-2 |
+| LITTERC_HR | 1.5679e-09 / 1.5749e-09 | 8.6e-2 / 1.6e-2 |
+| TOTLITC | 1.6561e-02 / 1.6583e-02 gC/m2 | 2.2e-2 / 6.4e-3 |
+| LIT_MET/CEL/LIG_C | within 2.7e-2 | |
+| TOTSOMC | 910.5446 / 910.5238 gC/m2 | 2.3e-5 / 1.2e-5 |
+| FATES_LITTER_OUT (FATES litter flux into the soil) | 4.4043e-11 / 4.3978e-11 kg/m2/s | 2.7e-2 / 7.1e-3 |
+| FATES_HET_RESP | = HR x 1e-3, both sides | |
+
+Daily HR totals agree within 3.5 % (day 2), tightening to 0.3 % by day 10. Litter enters
+on the same step in both models (nstep 26, the step after the first daily fragmentation).
+**Day 1 is the one open residual.** During the cold-start thaw (nsteps 2-8) Julia's HR is
+0-85 % low, because its top-layer `W_SCALAR` on the 273.15 K melt plateau is 0.02-0.14
+against Fortran's 0.09-0.23. That is the host phase-change residual already documented
+above, not the coupling. `TSOI_1..3` and `T_SCALAR_1..3` track to < 1 % mean.
+
+### Effect on the FATES dynamics scorecard (120-step oracle, same tree +/- this change)
+
+The FATES vegetation now sees the same soil layering, decomposition layers and
+fragmentation scalars as the Fortran reference, and the oracle moves toward Fortran:
+
+| | before | after |
+|---|---|---|
+| site carbon day 1 / day 5 (Fortran 2547.884 / 2600.471) | 2548.095 / 2605.611 (8.3e-5 / 2.0e-3) | 2547.931 / 2605.458 (1.8e-5 / 1.9e-3) |
+| worst field, phases 13-14 (`dndt`) | 2.069e+02 | 2.475e+00 |
+| cohorts day 4 (Fortran 42) | 43 | 43 |
+
+### Still not validated
+* FATES N/P litter coupling: commented out upstream in ctsm5.3 too, so N litter input is 0
+  on both sides and `suplnitro='ALL'` supplements immobilization.
+* MIMICS under FATES (`clm_initialize!` refuses `decomp_method=2` with FATES-BGC).
+* FATES-BGC restarts, and windows longer than 10 days for the soil pools.

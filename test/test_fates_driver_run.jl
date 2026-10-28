@@ -263,7 +263,7 @@ const _C = CLM
         @test inst.fates.nsites == 1
         @test _C.numpft[] == 14
 
-        config = _C.CLMDriverConfig(use_fates=true, use_aquifer_layer=false,
+        config = _C.CLMDriverConfig(use_fates=true, use_fates_bgc=false, use_aquifer_layer=false,
                                     use_hydrstress=false, use_luna=false)
         @test config.use_fates == true
 

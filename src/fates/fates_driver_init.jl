@@ -287,6 +287,8 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
                                        use_tree_damage::Bool = false,
                                        use_planthydro::Bool = false,
                                        use_fixed_biogeog::Bool = false,
+                                       use_vertsoilc::Bool = false,
+                                       decomp_method::AbstractString = "CTC",
                                        do_check::Bool = true)
     set_fates_ctrlparms("flush_to_unset")
 
@@ -318,7 +320,9 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     # Nutrient competition / decomposition.  Carbon-only => N/P spec off, CTC decomp.
     # For CNP, nitrogen_spec/phosphorus_spec select the (nonzero) acquisition specs.
     set_fates_ctrlparms("nu_com";        cval = "RD")
-    set_fates_ctrlparms("decomp_method"; cval = "CTC")
+    # Host soil-decomposition method (clmfates_interfaceMod.F90:431-437 passes
+    # MIMICS / CENTURY / NONE); the legacy no-soil-BGC configuration keeps "CTC".
+    set_fates_ctrlparms("decomp_method"; cval = decomp_method)
     set_fates_ctrlparms("use_tree_damage"; ival = use_tree_damage ? itrue : ifalse)
     set_fates_ctrlparms("nitrogen_spec";   ival = nitrogen_spec)
     set_fates_ctrlparms("phosphorus_spec"; ival = phosphorus_spec)
@@ -335,7 +339,9 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
 
     set_fates_ctrlparms("is_restart"; ival = ifalse)
     set_fates_ctrlparms("use_ch4";        ival = ifalse)
-    set_fates_ctrlparms("use_vertsoilc";  ival = ifalse)
+    # CTSM always passes use_vertsoilc=1 (clmfates_interfaceMod.F90:486-488) with
+    # nlevdecomp = nlevsoi under FATES soil BGC; the legacy one-layer path passes 0.
+    set_fates_ctrlparms("use_vertsoilc";  ival = use_vertsoilc ? itrue : ifalse)
     set_fates_ctrlparms("use_ed_st3";     ival = ifalse)
     set_fates_ctrlparms("use_ed_prescribed_phys"; ival = ifalse)
     set_fates_ctrlparms("use_planthydro"; ival = use_planthydro ? itrue : ifalse)
@@ -405,6 +411,8 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          use_planthydro::Bool = false,
                          fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
                          fates_biogeog_screen::Symbol = :none,
+                         use_vertsoilc::Bool = false,
+                         decomp_method::AbstractString = "CTC",
                          dtime::Real = 1800.0)
 
     # ---- Fixed-biogeography (climate-appropriate PFT screening) config ----------
@@ -446,6 +454,8 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                   use_tree_damage = use_tree_damage,
                                   use_planthydro = use_planthydro,
                                   use_fixed_biogeog = use_fixed_biogeog,
+                                  use_vertsoilc = use_vertsoilc,
+                                  decomp_method = decomp_method,
                                   do_check = !is_cnp)   # CNP: check after the param read
 
     # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
@@ -615,6 +625,11 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         end
     end
 
+    # Fortran `init` follows the per-site bc allocation with init_soil_depths, BEFORE
+    # init_coldstart, so the cold-start site copies the HLM's real soil layering. The
+    # legacy one-decomp-layer path keeps its synthetic 0.1 m layering unchanged.
+    use_vertsoilc && fates_init_soil_depths!(fates, inst)
+
     # ---- W2: cold-start chain (init_coldstart) ----
     sites = fates.sites
     bc_in = fates.bc_in
@@ -683,6 +698,68 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         end
     end
 
+    return fates
+end
+
+"""
+    fates_site_columns(col, lun, nsites) -> Vector{Int}
+
+HLM column hosting each FATES site: the `s`-th natural-vegetation (`ISTSOIL`) column,
+the Fortran `f2hmap%fcolumn` for a single clump (one FATES site per natural-veg column).
+Sites without a host column map to 0.
+"""
+function fates_site_columns(col, lun, nsites::Integer)
+    fc = zeros(Int, nsites)
+    s = 0
+    for c in 1:length(col.landunit)
+        lun.itype[col.landunit[c]] == ISTSOIL || continue
+        s += 1
+        s <= nsites || break
+        fc[s] = c
+    end
+    return fc
+end
+
+"""
+    fates_init_soil_depths!(fates, inst)
+
+Port of `init_soil_depths` (clmfates_interfaceMod.F90:3397-3442): copy the host
+column's soil layering into each FATES site's `bc_in` — interfaces `zi_sisl(0:nlevsoil)`,
+thicknesses `dz_sisl`, node depths `z_sisl`, the decomposition-layer thicknesses
+`dz_decomp_sisl = dzsoi_decomp(1:nlevdecomp)` and the identity soil→decomp map
+`decomp_id(j) = j`. Fortran aborts if a decomposition layer does not coincide with its
+soil layer (FATES assumes they are equal when vertical decomposition is on).
+"""
+function fates_init_soil_depths!(fates, inst::CLMInstances)
+    col = inst.column
+    fcol = fates_site_columns(col, inst.landunit, fates.nsites)
+    joff = varpar.nlevsno
+    dzd = dzsoi_decomp[]
+    for s in 1:fates.nsites
+        c = fcol[s]
+        c == 0 && continue
+        bc = fates.bc_in[s]
+        nlevsoil = bc.nlevsoil
+        nlevdecomp = bc.nlevdecomp
+        for j in 0:nlevsoil
+            bc.zi_sisl[j + 1] = col.zi[c, joff + 1 + j]
+        end
+        for j in 1:nlevsoil
+            bc.dz_sisl[j] = col.dz[c, joff + j]
+            bc.z_sisl[j]  = col.z[c, joff + j]
+        end
+        for j in 1:nlevdecomp
+            bc.dz_decomp_sisl[j] = dzd[j]
+        end
+        for j in 1:nlevsoil
+            bc.decomp_id[j] = j
+            if abs(bc.dz_decomp_sisl[j] - bc.dz_sisl[j]) > 1.0e-10
+                error("fates_init_soil_depths!: with vertical soil decomposition FATES " *
+                      "assumes decomposition depths equal soil depths (layer $j: " *
+                      "dz_decomp=$(bc.dz_decomp_sisl[j]), dz=$(bc.dz_sisl[j]))")
+            end
+        end
+    end
     return fates
 end
 
