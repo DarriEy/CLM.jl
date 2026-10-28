@@ -2,7 +2,7 @@
 
 Follow-on to #277 (`docs/FORTRAN_VALIDATION_BACKLOG.md` D1, PR body §4).
 
-**Status: IN PROGRESS.** This file is the running record; it is written
+**Status: Defect 1 CLOSED (#280). Defect 2 root-caused against a 4-year Fortran reference and fixed (the FATES clock was never advanced). Two residuals remain open; see the last section.** This file is the running record; it is written
 incrementally so the reproduction survives a lost session.
 
 ## The defect, as handed over
@@ -221,3 +221,157 @@ activation and rebuilds a filter; it changes nothing before the patch count cros
 the slot threshold, so it cannot change how many cohorts recruit before then.
 
 **Defect 2 remains open and unattributed.** #280 closes defect 1 only.
+
+## Defect 2 — measured against Fortran, root-caused, fixed (2026-10-28)
+
+Everything above compares Julia with Julia (`main` vs the #252 era). This section
+adds the missing oracle: a **4-year Fortran CTSM-FATES run of the `fates_parity_1pt`
+case** (Bow at Banff, start 2002-07-01, dtime 3600 s, all 14 PFTs, `use_bedrock =
+.false.`; `cesm.exe` ctsm5.3.012, uninstrumented, daily h0 history), and the
+matching Julia run (`scripts/fates_parity_multiyear.jl`, which reuses the
+flag-audited `build()` of `scripts/fates_fortran_parity.jl`, steps a NOLEAP calendar
+and rolls the forcing file each 1 January).
+
+### Reproduce
+
+```bash
+# Fortran (≈5 min for 4 years): stage a copy of the fates_parity_1pt run dir, then
+python3 scripts/validation/fates_fortran_parity/stage_multiyear.py <rundir> 4
+cd <rundir> && MallocNanoZone=0 HWLOC_COMPONENTS=-opencl $SYMFLUENCE_DATA/installs/clm/bin/cesm.exe
+OUT=<rundir>/fortran_daily.csv julia --project=. \
+    scripts/validation/fates_fortran_parity/fates_multiyear_extract.jl <rundir>/*.clm2.h0.*.nc
+# (the result is committed: scripts/validation/fates_fortran_parity/fates_multiyear_fortran_daily.csv.gz)
+
+# Julia (≈40 min for 4 years) and the scorecard:
+FATES_MY_DAYS=1460 FATES_MY_OUT=/path/julia.csv julia --project=. scripts/fates_parity_multiyear.jl
+julia --project=. scripts/fates_multiyear_compare.jl /path/julia.csv
+```
+
+The Fortran history has no per-cohort dbh, so "max dbh" is compared as the largest
+occupied `FATES_NPLANT_SZPF` class (edges 0, 5, 10, 15, 20, 30, …, 100 cm).
+
+### What Fortran says the trajectory should look like
+
+| model yr | recruitment [/m² yr] | NPP [gC/m² d] | max ncoh | woody max dbh class | grass max dbh class |
+|---|---|---|---|---|---|
+| 1 | 6.37 | 0.45 | 177 | 0–5 cm | 10 cm |
+| 2 | 256 | 1.58 | 880 | 0–5 cm | 30 cm |
+| 3 | 396 | 1.49 | 672 | 0–5 cm | **≥ 100 cm** |
+| 4 | 263 | 1.74 | 282 | 0–5 cm | **≥ 100 cm** |
+
+Two things in that table change the reading of this defect:
+
+* **Grass "dbh" in the hundreds of cm is FATES behaviour, not a port bug.** The C4
+  grass (PFT 14) enters the ≥ 100 cm class around model day 750 in *Fortran*. For
+  grasses `structc = 0` and the leaf/fine-root targets saturate at
+  `allom_dbh_maxheight` (20–30 cm), so once past it nearly the whole carbon
+  increment goes to the dbh proxy. The woody PFTs, by contrast, never leave the
+  0–5 cm class in four years. The Aripuanã "maxdbh 1.88 → 935 cm" quoted above is
+  the grass proxy (the pft-13/14 cohort is the largest-dbh cohort from day 1), and
+  is of the same kind as this Fortran result. It does not on its own show a defect.
+* **Hundreds of cohorts and ~1 recruit /m²/day are normal from year 2 on** (Fortran
+  ncoh 880, recruitment 1.2 /m²/d in summer 2003), so the 363 vs 69 cohort counts in
+  the Julia-vs-Julia comparison above are not by themselves evidence of a runaway.
+
+### Before the fix, Julia fell far *below* Fortran in year 2
+
+| window | recruitment J / F | NPP [gC/m² d] J / F | grass max dbh J / F class |
+|---|---|---|---|
+| year 1 (days 1–365) | 5.1 / 6.37 (0.80×) | 0.55 / 0.45 | 9.0 cm / 10 |
+| days 366–669 | **2.39 / 204 (0.012×)** | **0.17 / 1.56** | 8.9 cm / 30 |
+
+Year 1 tracks Fortran, with per-PFT recruitment matching to ~5 % through day 120.
+In spring 2003 Julia recruits almost nothing and is barely productive.
+
+### Root cause: the FATES clock was never advanced
+
+CTSM's FATES host calls `GetAndSetTime` (clmfates_interfaceMod.F90:3730-3786) at
+init (:1774) and **at the top of every daily `dynamics_driv` (:1068)**. It sets
+`hlm_day_of_year = floor(timemgr_datediff(jan01, now))` (0-based), `hlm_model_day`,
+and the current date. The port called `SetFatesTime` **once**, from
+`clm_fates_init!`, with `day_of_year = 1` and `reference_date = 10101`
+hardcoded, and never called it again. For the whole run FATES therefore believed it
+was 2 January:
+
+* `EDPhysiologyMod.F90:1073`: `if (hlm_day_of_year == gddstart) grow_deg_days = 0`.
+  With NH `gddstart = 1`, the growing-degree-day sum was **reset every day**, so after
+  the first cold leaf-off the cold-deciduous leaf-on test
+  (`grow_deg_days > gdd_threshold`, :1130) could never pass. The `ncdstart`
+  chill-day reset (:1045) and the `hlm_day_of_year > 180` GDD guard (:1091) were
+  wrong as well.
+* `EDMainMod.F90:853`: the annual `trim_canopy` (`hlm_day_of_year ==
+  hlm_days_per_year-1`) **never fired**.
+* `EDInitMod.F90:449-454`: the cold-start leaf-on/off dates (`cleafon -
+  hlm_day_of_year`, …) were offset by 180 days for a July start.
+
+The defect is older than the `f2d805c..37db702` window. It does not explain the
+Julia-vs-Julia 5× cohort count; that comparison has no Fortran baseline and is not
+re-attributed here.
+
+**Fix.** `fates_get_and_set_time!(year, mon, day, tod)` (`fates_driver_init.jl`)
+mirrors `GetAndSetTime`. It uses a NOLEAP 0-based day of year, sets `model_day`
+relative to the run-start reference date, and carries the year forward when the host
+does not pass one. `clm_fates_init!` calls it with the start date, and
+`fates_daily_dynamics_step!` calls it every day from the driver's
+`(year, mon, day, secs)`. Callers that drive the daily step directly without a date
+(unit-test fixtures) keep the old behaviour. Non-FATES paths are untouched: the only
+driver edit is a kwarg inside the `config.use_fates` daily block.
+
+The committed 5-day parity window
+(`scripts/fates_fortran_parity.jl compare fates_pdump_fortran.txt.gz`) produces a
+Julia dump that is **byte-identical** before and after the fix: cold start
+7.133e-16, first divergence `npp` 4.9218e-09 at step 0. Over those five days nothing
+that is dumped depends on the calendar.
+
+### After the fix
+
+| model yr | recruitment J / F (ratio) | NPP J / F | max ncoh J / F | woody max dbh J | grass max dbh J [class] / F class |
+|---|---|---|---|---|---|
+| 1 | 6.44 / 6.37 (1.01) | 0.84 / 0.45 | 859 / 177 | 1.93 cm | 20 [20] / 10 |
+| 2 | 367 / 256 (1.43) | 2.32 / 1.58 | 873 / 880 | 2.81 cm | 70 [60] / 30 |
+| 3 | 638 / 396 (1.61) | 2.52 / 1.49 | 856 / 672 | 3.88 cm | 241 [100] / 100 |
+| 4 | 568 / 263 (2.16) | 2.56 / 1.74 | 821 / 282 | 4.97 cm | 366 [100] / 100 |
+
+On days 366–669, year-2 recruitment went from **0.012× to 1.36×** of Fortran.
+Woody growth stays in Fortran's 0–5 cm class (≤ 1.1 cm/yr). The grass proxy reaches
+the ≥ 100 cm class in the same model year as Fortran.
+
+### What is still open (residuals, not fixed here)
+
+1. **Julia NPP runs 1.5–1.9× above Fortran from year 1**, and recruitment drifts with
+   it. The first divergence is the **2002-08-09 cold leaf-off**. Fortran fires it on
+   model day 40 (6 of the last 10 days with `tveg24 < 7.5 °C`). Julia's `tveg24`
+   during that cold spell is **0.2–0.6 K warmer** (days 32–39: 7.53/6.12/6.73/4.05/
+   6.71/8.77/7.95/7.58 °C against Fortran's 6.91/5.76/6.11/3.67/6.31/8.91/7.72/7.40),
+   so it counts only 4 cold days and the cold-deciduous PFTs 3, 6, 9 and 11 keep
+   their leaves into autumn. The FATES phenology code matches the Fortran line for
+   line. The cause is a host canopy-temperature residual that lands on a hard
+   threshold.
+2. **Patch count.** From model day 62 Julia keeps one new disturbance patch per day
+   (npatch 2 → 9 by day 79), while Fortran stays at 2 patches until year 2. The new
+   patch's structural-biomass density is 0.00515 kg/m², just above
+   `force_patchfuse_min_biomass = 0.005`, so it is no longer force-fused. Its profile
+   then differs from the parent's by more than `patch_fusion_tol`, so it survives.
+   `fuse_patches`, `patch_pft_size_profile` and `terminate_patches` were diffed
+   against the Fortran and match. This looks like a threshold crossing driven by the
+   ~1 % canopy-layering differences already documented for the 20-day window, but it
+   cannot be confirmed without a per-patch Fortran dump of this window (the
+   instrumented `fates_parity_1pt` build is not present on this box). It is the main
+   source of the 859 vs 177 year-1 cohort count.
+3. Aripuanã has no Fortran reference, and it was not re-run here.
+
+### Regression guard
+
+* `test/test_fates_clock.jl` (always runs) checks the clock semantics: day of year,
+  `model_day`, year wrap, the `trim_canopy` gate, and that the NH GDD reset fires
+  once a year rather than daily.
+* `test/test_fates_multiyear_regression.jl` always self-checks the committed Fortran
+  reference. When given a harness CSV (`FATES_MULTIYEAR_CSV=…`) or asked to run one
+  (`FATES_MULTIYEAR_RUN=1`), it scores each model year:
+  - recruitment within 3× of Fortran (the pre-fix year 2 was 0.012×);
+  - woody max-dbh increment ≤ 5 cm/yr;
+  - woody size class equal to Fortran's;
+  - grass ≥ 60 cm when Fortran reaches ≥ 100 cm.
+
+  Without an input CSV the scoring block reports `@test_skip`; it never passes
+  vacuously.
