@@ -732,6 +732,11 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         fates_pack_bcin_daily!(inst; s=s, c=c, nlevsoil=nlevsoil,
                                nlevdecomp=nlevdecomp, use_fates_bgc=use_fates_bgc,
                                fire_weather=fire_weather)
+        # Plant hydraulics: the daily soil hydraulic properties + liquid water
+        # (dynamics_driv, clmfates_interfaceMod.F90:1184-1191).
+        if hlm_use_planthydro[] == itrue
+            fates_pack_bcin_hydro_soil!(fates.bc_in[s], inst; c=c, nlevsoil=nlevsoil)
+        end
 
         site = fates.sites[s]
         bc_in  = fates.bc_in[s]
@@ -768,6 +773,12 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     for s in 1:fates.nsites
         c = site_col[s]
         c == 0 && continue
+        # wrap_update_hlmfates_dyn (clmfates_interfaceMod.F90:1552-1558): the plant
+        # water storage the host column water balance carries.
+        if hlm_use_planthydro[] == itrue
+            inst.water.waterdiagnosticbulk_inst.total_plant_stored_h2o_col[c] =
+                fates.bc_out[s].plant_stored_h2o_si
+        end
         # Fortran flushes the canopy over the column's WHOLE patch range (bare
         # ground included) BEFORE filling the vegetated patches from bc_out, so the
         # bare-ground patch carries elai=esai=0 (not the cold-start NaN) into the
@@ -818,33 +829,33 @@ function fates_hifrq_history_step!(inst::CLMInstances; dt_tstep::Real)
     fates.hist === nothing && return inst
     update_history_hifrq!(fates.hist, 1, fates.nsites, fates.sites,
                           fates.bc_in, fates.bc_out, dt_tstep)
-    # plant-hydraulics history (no-op unless hlm_use_planthydro is on + si_hydr built)
-    update_history_hydraulics!(fates.hist, 1, fates.nsites, fates.sites,
-                               fates.bc_in, dt_tstep)
+    # (The plant-hydraulics history fill runs inside fates_hydraulics_step!, where
+    # the Fortran wrap_hydraulics_drive calls update_history_hydraulics.)
     return inst
 end
 
 """
-    fates_pack_bcin_hydro!(inst; s=1, c=1, p=1, nlevsoil)
+    fates_pack_bcin_hydro!(inst; s=1, c=1, nlevsoil, exposedvegp=nothing)
 
-Fill the FATES plant-hydraulics `bc_in` soil-rhizosphere fields for site `s` from
-CLM column `c` / vegetated patch `p`, packing exactly the inputs the
-`hydraulics_drive` (FillDrainRhizShells + Hydraulics_BC) solve reads:
+Fill the FATES plant-hydraulics `bc_in` for site `s` from CLM column `c`, exactly
+the "Prepare Input Boundary Conditions" block of the CTSM host
+`wrap_hydraulics_drive` (clmfates_interfaceMod.F90:3538-3577):
 
-  * `watsat_sisl` / `eff_porosity_sl` — saturated / effective porosity.
-  * `sucsat_sisl` — minimum soil suction (mm).
-  * `bsw_sisl` — Clapp-Hornberger "b".
-  * `hksat_sisl` — saturated hydraulic conductivity (mm/s).
-  * `h2o_liq_sisl` — liquid water mass in the soil layer (kg/m2).
-  * `smpmin_si` — host minimum soil matric potential (mm).
-  * `qflx_transp_pa[ifp]` — the HLM canopy-solver transpiration demand for the
-    vegetated patch (mm H2O/s, + into root). ifp = 1 for the single veg patch.
+  * `smpmin_si` <- `smpmin_col` (minimum soil matric potential, mm);
+  * per soil layer: `watsat_sisl`, `watres_sisl`, `sucsat_sisl`, `bsw_sisl`,
+    `h2o_liq_sisl` (liquid water, kg/m2) and `eff_porosity_sl`;
+  * per vegetated patch `ifp`: `swrad_net_pa` <- `fsa_patch`, `lwrad_net_pa` <-
+    `eflx_lwrad_net_patch`;
+  * `qflx_transp_pa[ifp]` <- `qflx_tran_veg_patch` for the patches in the
+    exposed-vegetation filter `exposedvegp` (the CanopyFluxes `filterp`). Patches
+    outside it keep the zero set at the start of the canopy-flux step
+    (`prep_canopyfluxes`). `exposedvegp = nothing` packs every vegetated patch.
 
-`zi_sisl`/`dz_sisl` are set once at cold-start and are not re-packed here.
-Gated by the caller behind `config.use_fates && hlm_use_planthydro==itrue`.
+`hksat_sisl` is packed at init and by the daily step, as in the Fortran.
 """
 function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
-                                p::Int = 1, nlevsoil::Int)
+                                nlevsoil::Int,
+                                exposedvegp::Union{Nothing,AbstractVector{Bool}} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_in[s]
@@ -856,67 +867,147 @@ function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     joff = varpar.nlevsno  # snow-layer offset into h2osoi_liq_col
 
+    bc.smpmin_si = ss.smpmin_col[c]
     for j in 1:nlevsoil
         bc.watsat_sisl[j]     = ss.watsat_col[c, j]
-        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
+        # watres is not computed by the host's Clapp-Hornberger configuration (and
+        # FATES never reads it); keep the bc finite.
+        wr = isempty(ss.watres_col) ? 0.0 : ss.watres_col[c, j]
+        bc.watres_sisl[j]     = isfinite(wr) ? wr : 0.0
         bc.sucsat_sisl[j]     = ss.sucsat_col[c, j]
         bc.bsw_sisl[j]        = ss.bsw_col[c, j]
-        bc.hksat_sisl[j]      = ss.hksat_col[c, j]
         bc.h2o_liq_sisl[j]    = wsb.ws.h2osoi_liq_col[c, joff + j]
+        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
     end
 
-    bc.smpmin_si = (!isempty(ss.smpmin_col) && isfinite(ss.smpmin_col[c])) ?
-                   ss.smpmin_col[c] : -1.0e8
-
-    # Patch transpiration demand per vegetated patch (ifp walk → HLM patch p).
     for (ifp, pp) in fates_veg_patches(fates.sites[s], c, col)
-        bc.qflx_transp_pa[ifp] = wfb.wf.qflx_tran_veg_patch[pp]
+        bc.swrad_net_pa[ifp] = inst.solarabs.fsa_patch[pp]
+        bc.lwrad_net_pa[ifp] = inst.energyflux.eflx_lwrad_net_patch[pp]
+        if exposedvegp === nothing || exposedvegp[pp]
+            bc.qflx_transp_pa[ifp] = wfb.wf.qflx_tran_veg_patch[pp]
+        end
     end
 
     return inst
 end
 
 """
-    fates_hydraulics_step!(inst; nlevsoil)
+    fates_pack_bcin_hydro_soil!(bc, inst; c, nlevsoil, coldstart=false)
 
-Run one FATES plant-hydraulics transpiration/uptake step for every FATES site
-attached to `inst`, mirroring the Fortran host's `hydraulics_drive` call from the
-canopy-flux/photosynthesis path:
-
-  1. pack the soil-rhizosphere + transpiration `bc_in` (`fates_pack_bcin_hydro!`)
-     for each site's CLM column / vegetated patch,
-  2. `hydraulics_drive(nsites, sites, bc_in, bc_out, dtime)` — reconcile the
-     rhizosphere shells with the host soil column then run `Hydraulics_BC`, which
-     populates `co_hydr.ftc_ag/ftc_troot/ftc_aroot`, `co_hydr.btran`, and
-     `psi_ag[1]` (leaf_psi) — the fields the mortality + photosynthesis branches
-     consume — and fills `bc_out.qflx_soil2root_sisl` / `plant_stored_h2o_si`.
-
-The site<->column<->veg-patch map mirrors the W3/W4 hooks. Returns `inst`. Gated
-by the caller behind `config.use_fates && hlm_use_planthydro[]==itrue`; a no-op
-when no site has a built `si_hydr`.
+Pack into the FATES site boundary condition `bc` the static + liquid soil fields the FATES hydraulics init / daily /
+restart paths read from CLM column `c`: `hksat_sisl`, `watsat_sisl`, `sucsat_sisl`,
+`bsw_sisl`, `h2o_liq_sisl` and (not on the cold start) `watres_sisl`. With
+`coldstart = true` it also fills `eff_porosity_sl` from the column ice, as
+`init_coldstart` does before `HydrSiteColdStart` (clmfates_interfaceMod.F90:2125-2154):
+`eff_porosity = max(0.01, watsat - min(watsat, h2osoi_ice/(dz*denice)))`.
+Mirrors the planthydro blocks of `dynamics_driv` (:1184-1191), the restart
+(:1968-1990) and `init_coldstart`.
 """
-function fates_hydraulics_step!(inst::CLMInstances; nlevsoil::Int, dtime::Real)
+function fates_pack_bcin_hydro_soil!(bc, inst::CLMInstances; c::Int,
+                                     nlevsoil::Int, coldstart::Bool = false)
+    ss  = inst.soilstate
+    ws  = inst.water.waterstatebulk_inst.ws
+    col = inst.column
+    joff = varpar.nlevsno
+    for j in 1:nlevsoil
+        bc.hksat_sisl[j]   = ss.hksat_col[c, j]
+        bc.watsat_sisl[j]  = ss.watsat_col[c, j]
+        bc.sucsat_sisl[j]  = ss.sucsat_col[c, j]
+        bc.bsw_sisl[j]     = ss.bsw_col[c, j]
+        bc.h2o_liq_sisl[j] = ws.h2osoi_liq_col[c, joff + j]
+        if coldstart
+            vol_ice = min(ss.watsat_col[c, j],
+                          ws.h2osoi_ice_col[c, joff + j] / (col.dz[c, joff + j] * DENICE))
+            bc.eff_porosity_sl[j] = max(0.01, ss.watsat_col[c, j] - vol_ice)
+        else
+            wr = isempty(ss.watres_col) ? 0.0 : ss.watres_col[c, j]
+            bc.watres_sisl[j] = isfinite(wr) ? wr : 0.0
+        end
+    end
+    return inst
+end
+
+"""
+    fates_hydraulics_step!(inst; nlevsoil, dtime, exposedvegp=nothing)
+
+One FATES plant-hydraulics step for every FATES site, the CTSM host
+`wrap_hydraulics_drive` (clmfates_interfaceMod.F90:3508-3615), called at the end
+of CanopyFluxes right after `wrap_accumulatefluxes` (CanopyFluxesMod.F90:1635):
+
+  1. pack the soil + transpiration `bc_in` (`fates_pack_bcin_hydro!`);
+  2. `hydraulics_drive` — `FillDrainRhizShells` (reconcile the rhizosphere shells
+     with the host soil water) then `Hydraulics_BC` (the 1-D Taylor solve per
+     cohort), which fills `co_hydr` (psi/ftc/btran), `bc_out.qflx_soil2root_sisl`
+     and `bc_out.plant_stored_h2o_si`;
+  3. `total_plant_stored_h2o_col(c) = bc_out.plant_stored_h2o_si` (the plant water
+     the host column water balance carries);
+  4. the plant-hydraulics history fill (`update_history_hydraulics!`).
+
+The root uptake reaches the host soil in [`fates_compute_root_soil_flux!`](@ref).
+Gated by the caller on `use_fates` and `hlm_use_planthydro`.
+"""
+function fates_hydraulics_step!(inst::CLMInstances; nlevsoil::Int, dtime::Real,
+                                exposedvegp::Union{Nothing,AbstractVector{Bool}} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     hlm_use_planthydro[] == itrue || return inst
     col = inst.column
 
+    site_col = zeros(Int, fates.nsites)
     s = 0
     for c in 1:length(col.is_fates)
         col.is_fates[c] || continue
         s += 1
         s <= fates.nsites || break
-        # A site without a built hydraulics object (planthydro just toggled, or no
-        # cold-start hydro init) has nothing to solve — skip it.
-        fates.sites[s].si_hydr === nothing && continue
-        # fates_pack_bcin_hydro! walks all the site's vegetated patches internally
-        # (ifp → HLM patch p) for the per-patch transpiration demand.
-        fates_pack_bcin_hydro!(inst; s=s, c=c, nlevsoil=nlevsoil)
+        site_col[s] = c
+        fates_pack_bcin_hydro!(inst; s=s, c=c, nlevsoil=nlevsoil, exposedvegp=exposedvegp)
     end
 
-    # Only drive when at least one site is hydro-enabled.
-    any(site -> site.si_hydr !== nothing, fates.sites) || return inst
     hydraulics_drive(fates.nsites, fates.sites, fates.bc_in, fates.bc_out, dtime)
+
+    wdb = inst.water.waterdiagnosticbulk_inst
+    for s in 1:fates.nsites
+        c = site_col[s]
+        c == 0 && continue
+        wdb.total_plant_stored_h2o_col[c] = fates.bc_out[s].plant_stored_h2o_si
+    end
+
+    if fates.hist !== nothing
+        update_history_hydraulics!(fates.hist, 1, fates.nsites, fates.sites,
+                                   fates.bc_in, dtime)
+    end
+    return inst
+end
+
+"""
+    fates_compute_root_soil_flux!(inst; nlevsoil)
+
+Hand the FATES root water uptake to the host soil: for every FATES site,
+`qflx_rootsoi_col(c, 1:nlevsoil) = bc_out.qflx_soil2root_sisl(1:nlevsoil)`
+[mm H2O/s, + out of the soil]. This replaces the root-fraction x transpiration
+profile `compute_effec_rootfrac_and_vert_tran_sink!` wrote for the column, so the
+Richards solve (`soil_water!`) removes what the plant hydraulics actually took up
+(which differs from the transpiration by the change in plant water storage).
+Mirrors the CTSM host `ComputeRootSoilFlux` (clmfates_interfaceMod.F90:3446-3504),
+called from HydrologyNoDrainage between `Compute_EffecRootFrac_And_VertTranSink`
+and `SoilWater` (HydrologyNoDrainageMod.F90:342-344). Gated on `hlm_use_planthydro`.
+"""
+function fates_compute_root_soil_flux!(inst::CLMInstances; nlevsoil::Int)
+    fates = inst.fates
+    fates === nothing && return inst
+    hlm_use_planthydro[] == itrue || return inst
+    col = inst.column
+    wfb = inst.water.waterfluxbulk_inst
+    s = 0
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        s += 1
+        s <= fates.nsites || break
+        q = fates.bc_out[s].qflx_soil2root_sisl
+        for j in 1:nlevsoil
+            wfb.qflx_rootsoi_col[c, j] = q[j]
+        end
+    end
     return inst
 end
 

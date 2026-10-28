@@ -1738,6 +1738,90 @@ function InitHydrSites(sites::AbstractVector, bc_in::AbstractVector)
 end
 
 """
+    _hydr_set_soil_wtfs!(csite_hydr, bc_in_s; vg_watsat)
+
+Construct the per-rhizosphere-layer soil water retention (WRF) and conductance
+(WKF) functions, with Clapp-Hornberger parameters aggregated onto each rhizosphere
+layer (`AggBCToRhiz`), and point each WKF at its WRF. This is the block shared by
+the Fortran `HydrSiteColdStart` and `RestartHydrStates`; the two differ only in the
+van Genuchten WRF saturation, which the cold start takes from the constant
+`th_sat_vg` and the restart from the layer's `watsat` (`vg_watsat = true`).
+"""
+function _hydr_set_soil_wtfs!(csite_hydr, bc_in_s; vg_watsat::Bool)
+    nlevrhiz = csite_hydr.nlevrhiz
+    # --- Soil Water Retention Functions (WRFs) ---
+    if soil_wrf_type == van_genuchten_type
+        for j in 1:nlevrhiz
+            wrf = wrf_type_vg()
+            vg_thsat = vg_watsat ? AggBCToRhiz(csite_hydr, bc_in_s.watsat_sisl, j, bc_in_s.dz_sisl) : th_sat_vg
+            set_wrf_param!(wrf, [alpha_vg, psd_vg, m_vg, vg_thsat, th_res_vg])
+            csite_hydr.wrf_soil[j] = wrf
+        end
+    elseif soil_wrf_type == campbell_type
+        for j in 1:nlevrhiz
+            wrf = wrf_type_cch()
+            watsat = AggBCToRhiz(csite_hydr, bc_in_s.watsat_sisl, j, bc_in_s.dz_sisl)
+            sucsat = AggBCToRhiz(csite_hydr, bc_in_s.sucsat_sisl, j, bc_in_s.dz_sisl)
+            bsw    = AggBCToRhiz(csite_hydr, bc_in_s.bsw_sisl, j, bc_in_s.dz_sisl)
+            set_wrf_param!(wrf, [watsat,
+                (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw])
+            csite_hydr.wrf_soil[j] = wrf
+        end
+    elseif soil_wrf_type == smooth1_campbell_type || soil_wrf_type == smooth2_campbell_type
+        smooth_order = soil_wrf_type == smooth1_campbell_type ? 1.0 : 2.0
+        for j in 1:nlevrhiz
+            wrf = wrf_type_smooth_cch()
+            watsat = AggBCToRhiz(csite_hydr, bc_in_s.watsat_sisl, j, bc_in_s.dz_sisl)
+            sucsat = AggBCToRhiz(csite_hydr, bc_in_s.sucsat_sisl, j, bc_in_s.dz_sisl)
+            bsw    = AggBCToRhiz(csite_hydr, bc_in_s.bsw_sisl, j, bc_in_s.dz_sisl)
+            set_wrf_param!(wrf, [watsat,
+                (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw, smooth_order])
+            csite_hydr.wrf_soil[j] = wrf
+        end
+    elseif soil_wrf_type == tfs_type
+        fates_endrun("TFS water retention curves not available for soil")
+    end
+
+    # --- Soil Water Conductance (K) Functions (WKFs) ---
+    if soil_wkf_type == van_genuchten_type
+        for j in 1:nlevrhiz
+            wkf = wkf_type_vg()
+            set_wkf_param!(wkf, [alpha_vg, psd_vg, m_vg, th_sat_vg, th_res_vg, soil_tort_vg])
+            csite_hydr.wkf_soil[j] = wkf
+        end
+    elseif soil_wkf_type == campbell_type
+        for j in 1:nlevrhiz
+            wkf = wkf_type_cch()
+            watsat = AggBCToRhiz(csite_hydr, bc_in_s.watsat_sisl, j, bc_in_s.dz_sisl)
+            sucsat = AggBCToRhiz(csite_hydr, bc_in_s.sucsat_sisl, j, bc_in_s.dz_sisl)
+            bsw    = AggBCToRhiz(csite_hydr, bc_in_s.bsw_sisl, j, bc_in_s.dz_sisl)
+            set_wkf_param!(wkf, [watsat,
+                (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw])
+            csite_hydr.wkf_soil[j] = wkf
+        end
+    elseif soil_wkf_type == smooth1_campbell_type || soil_wkf_type == smooth2_campbell_type
+        smooth_order = soil_wkf_type == smooth1_campbell_type ? 1.0 : 2.0
+        for j in 1:nlevrhiz
+            wkf = wkf_type_smooth_cch()
+            watsat = AggBCToRhiz(csite_hydr, bc_in_s.watsat_sisl, j, bc_in_s.dz_sisl)
+            sucsat = AggBCToRhiz(csite_hydr, bc_in_s.sucsat_sisl, j, bc_in_s.dz_sisl)
+            bsw    = AggBCToRhiz(csite_hydr, bc_in_s.bsw_sisl, j, bc_in_s.dz_sisl)
+            set_wkf_param!(wkf, [watsat,
+                (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw, smooth_order])
+            csite_hydr.wkf_soil[j] = wkf
+        end
+    elseif soil_wkf_type == tfs_type
+        fates_endrun("TFS conductance not used in soil")
+    end
+
+    # The FTC functions need psi_min -> point each WKF at its matching WRF.
+    for j in 1:nlevrhiz
+        csite_hydr.wkf_soil[j].wrf = csite_hydr.wrf_soil[j]
+    end
+    return nothing
+end
+
+"""
     HydrSiteColdStart(sites, bc_in)
 
 Cold-start each site's hydraulics: set the rhizosphere shell liquid water from
@@ -1764,74 +1848,66 @@ function HydrSiteColdStart(sites::AbstractVector, bc_in::AbstractVector)
 
         csite_hydr.l_aroot_layer[1:nlevrhiz] .= 0.0
 
-        # --- Soil Water Retention Functions (WRFs) ---
-        if soil_wrf_type == van_genuchten_type
-            for j in 1:nlevrhiz
-                wrf = wrf_type_vg()
-                set_wrf_param!(wrf, [alpha_vg, psd_vg, m_vg, th_sat_vg, th_res_vg])
-                csite_hydr.wrf_soil[j] = wrf
+        _hydr_set_soil_wtfs!(csite_hydr, bc_in[s]; vg_watsat=false)
+    end
+    return nothing
+end
+
+"""
+    RestartHydrStates(sites, nsites, bc_in, bc_out)
+
+Rebuild everything the plant-hydraulics state depends on after a restart read.
+The restart machinery has already restored the prognostic water states
+(`co_hydr.th_ag/th_troot/th_aroot`, the rhizosphere shell water
+`si_hydr.h2osoi_liqvol_shell`) and the plant carbon/geometry; this recomputes, for
+every cohort, the node heights (`UpdatePlantHydrNodes!`), compartment lengths and
+volumes (`UpdatePlantHydrLenVol!`) and maximum conductances (`UpdatePlantKmax!`),
+and sets the "previous" compartment volumes to the current ones. Per site it unsets
+the rhizosphere `*_init` arrays, rebuilds the soil water retention/conductance
+functions (`_hydr_set_soil_wtfs!`, van Genuchten saturation from `watsat`),
+recomputes the rhizosphere geometry (`UpdateSizeDepRhizVolLenCon`), sets the
+previous rhizosphere volumes to the current ones (`SavePreviousRhizVolumes`) so the
+water states are not perturbed, and re-diagnoses the stored plant water
+(`UpdateH2OVeg!` -> `bc_out.plant_stored_h2o_si`).
+
+The host must have packed the soil `bc_in` (`hksat/watsat/watres/sucsat/bsw/
+h2o_liq_sisl`) first. Mirrors the Fortran `RestartHydrStates`
+(FatesPlantHydraulicsMod.F90:312-528), called by the host restart
+(clmfates_interfaceMod.F90:1968-1996).
+"""
+function RestartHydrStates(sites::AbstractVector, nsites::Integer,
+                           bc_in::AbstractVector, bc_out::AbstractVector)
+    for s in 1:nsites
+        csite_hydr = sites[s].si_hydr
+
+        cpatch = sites[s].oldest_patch
+        while cpatch !== nothing
+            ccohort = cpatch.shortest
+            while ccohort !== nothing
+                ccohort_hydr = ccohort.co_hydr
+                # Node heights, then compartment volumes/lengths, then kmax.
+                UpdatePlantHydrNodes!(ccohort, ccohort.pft, ccohort.height, csite_hydr)
+                UpdatePlantHydrLenVol!(ccohort, csite_hydr)
+                UpdatePlantKmax!(ccohort_hydr, ccohort, csite_hydr)
+                # A freshly re-initialized plant: previous volumes = current volumes.
+                SavePreviousCompartmentVolumes!(ccohort_hydr)
+                ccohort = ccohort.taller
             end
-        elseif soil_wrf_type == campbell_type
-            for j in 1:nlevrhiz
-                wrf = wrf_type_cch()
-                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
-                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
-                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
-                set_wrf_param!(wrf, [watsat,
-                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw])
-                csite_hydr.wrf_soil[j] = wrf
-            end
-        elseif soil_wrf_type == smooth1_campbell_type || soil_wrf_type == smooth2_campbell_type
-            smooth_order = soil_wrf_type == smooth1_campbell_type ? 1.0 : 2.0
-            for j in 1:nlevrhiz
-                wrf = wrf_type_smooth_cch()
-                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
-                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
-                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
-                set_wrf_param!(wrf, [watsat,
-                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw, smooth_order])
-                csite_hydr.wrf_soil[j] = wrf
-            end
-        elseif soil_wrf_type == tfs_type
-            fates_endrun("TFS water retention curves not available for soil")
+            cpatch = cpatch.younger
         end
 
-        # --- Soil Water Conductance (K) Functions (WKFs) ---
-        if soil_wkf_type == van_genuchten_type
-            for j in 1:nlevrhiz
-                wkf = wkf_type_vg()
-                set_wkf_param!(wkf, [alpha_vg, psd_vg, m_vg, th_sat_vg, th_res_vg, soil_tort_vg])
-                csite_hydr.wkf_soil[j] = wkf
-            end
-        elseif soil_wkf_type == campbell_type
-            for j in 1:nlevrhiz
-                wkf = wkf_type_cch()
-                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
-                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
-                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
-                set_wkf_param!(wkf, [watsat,
-                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw])
-                csite_hydr.wkf_soil[j] = wkf
-            end
-        elseif soil_wkf_type == smooth1_campbell_type || soil_wkf_type == smooth2_campbell_type
-            smooth_order = soil_wkf_type == smooth1_campbell_type ? 1.0 : 2.0
-            for j in 1:nlevrhiz
-                wkf = wkf_type_smooth_cch()
-                watsat = AggBCToRhiz(csite_hydr, bc_in[s].watsat_sisl, j, bc_in[s].dz_sisl)
-                sucsat = AggBCToRhiz(csite_hydr, bc_in[s].sucsat_sisl, j, bc_in[s].dz_sisl)
-                bsw    = AggBCToRhiz(csite_hydr, bc_in[s].bsw_sisl, j, bc_in[s].dz_sisl)
-                set_wkf_param!(wkf, [watsat,
-                    (-1.0) * sucsat * dens_fresh_liquid_water * grav_earth * mpa_per_pa * m_per_mm, bsw, smooth_order])
-                csite_hydr.wkf_soil[j] = wkf
-            end
-        elseif soil_wkf_type == tfs_type
-            fates_endrun("TFS conductance not used in soil")
-        end
+        fill!(csite_hydr.l_aroot_layer_init, fates_unset_r8)
+        fill!(csite_hydr.r_node_shell_init, fates_unset_r8)
+        fill!(csite_hydr.v_shell_init, fates_unset_r8)
 
-        # The FTC functions need psi_min -> point each WKF at its matching WRF.
-        for j in 1:nlevrhiz
-            csite_hydr.wkf_soil[j].wrf = csite_hydr.wrf_soil[j]
-        end
+        _hydr_set_soil_wtfs!(csite_hydr, bc_in[s]; vg_watsat=true)
+
+        # Static rhizosphere quantities, then previous = current so the restored
+        # shell water states are not perturbed.
+        UpdateSizeDepRhizVolLenCon(sites[s], bc_in[s])
+        SavePreviousRhizVolumes(sites[s])
+
+        UpdateH2OVeg!(sites[s], bc_out[s])
     end
     return nothing
 end

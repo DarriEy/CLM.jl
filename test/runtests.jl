@@ -424,6 +424,10 @@ using CLM
     # (UpdateC/NLitterFluxes), driver config defaults, and a data-gated live run that
     # closes the soil C budget and tracks the Fortran fates_parity_1pt soil BGC.
     include("test_fates_soilbgc_coupling.jl")
+    # FATES plant hydraulics (use_fates_planthydro) connected to the host: soil sink,
+    # plant water in the column budget, hydraulic-failure mortality, RestartHydrStates,
+    # and woody leaf water potential vs the Fortran fates_parity_1pt run (data-gated).
+    include("test_fates_planthydro_coupling.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

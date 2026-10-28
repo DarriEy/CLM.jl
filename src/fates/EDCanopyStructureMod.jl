@@ -36,14 +36,10 @@
 #     test results vs. the two-stream code) is preserved here as a const; the b4b
 #     leaf-area-profile path is the one that runs by default.
 #
-# STUBS (gated, inert by default):
-#   * The hlm_use_planthydro paths in DemoteFromLayer!/PromoteIntoLayer!/
-#     update_hlm_dynamics! do not issue their Fortran calls to InitHydrCohort /
-#     UpdateH2OVeg / RecruitWaterStorage. NOTE: all three ARE ported
-#     (FatesPlantHydraulicsMod.jl — InitHydrCohort, UpdateH2OVeg!,
-#     RecruitWaterStorage); they are simply not wired into these call sites.
-#     Guarded behind `hlm_use_planthydro[] == itrue` (defaults to ifalse) — same
-#     convention as Batches 12-14. See `# TODO Batch NN:` markers.
+# PLANT HYDRAULICS (gated on hlm_use_planthydro, off by default):
+#   * DemoteFromLayer!/PromoteIntoLayer! give a split cohort its hydraulics object
+#     (InitHydrCohort); update_hlm_dynamics! runs the end-of-dynamics water
+#     conservation check (UpdateH2OVeg!, icall=1) and RecruitWaterStorage.
 #
 # Reused (NOT reimplemented) helpers: carea_allom/tree_lai/tree_sai/CrownDepth/
 # VegAreaLayer (FatesAllometryMod); terminate_cohorts/terminate_cohort/
@@ -1276,9 +1272,19 @@ function update_hlm_dynamics!(nsites::Integer, sites::AbstractVector,
             end
         end
 
+        # With hydraulics on, re-diagnose the stored plant water at the very end of
+        # the dynamics cycle (EDCanopyStructureMod.F90:2072-2074):
+        #     call UpdateH2OVeg(sites(s),bc_out(s),bc_out(s)%plant_stored_h2o_si,1)
+        # That call is meant to also check conservation against the previous value,
+        # but `prev_site_h2o` is passed by reference and ALIASES
+        # bc_out%plant_stored_h2o_si, which UpdateH2OVeg itself zeroes and then
+        # overwrites with the new total before comparing -- so in CTSM the check
+        # compares the new value with itself and never fires. (It cannot hold as
+        # written: at the cold start the old value is the zeroed bc_out while the
+        # cold-start cohorts already carry water.) Reproduce the executed behaviour:
+        # the re-diagnosis without the check.
         if hlm_use_planthydro[] == itrue
-            # TODO Batch NN: call UpdateH2OVeg! here. It IS ported
-            # (FatesPlantHydraulicsMod.jl:1856) — just not wired into this gated path.
+            UpdateH2OVeg!(sites[s], bc_out[s])
         end
 
         # Pass FATES harvested C to bc_out.

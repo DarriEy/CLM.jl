@@ -109,6 +109,10 @@ function clm_initialize!(;
     use_fates_bgc::Union{Bool,Nothing} = nothing,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
+    # CTSM use_fates_planthydro (clm_varctl): FATES plant hydraulics, default 1-D
+    # Taylor solver (fates_hydro_solver=1). Requires use_fates (+ the FATES soil BGC
+    # layering). Off by default.
+    use_fates_planthydro::Bool = false,
     # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
     # 178-181): .false. under use_fates / vichydro / phys=clm4_5, .true. otherwise (CLM5).
     # `nothing` reproduces that conditional; pass an explicit Bool to override it. Getting
@@ -235,6 +239,9 @@ function clm_initialize!(;
     _fates_bgc && decomp_method != 1 &&
         error("clm_initialize!: FATES soil BGC is ported for CENTURY (decomp_method=1) only")
     varctl.use_fates_bgc = _fates_bgc
+    use_fates_planthydro && !use_fates &&
+        error("clm_initialize!: use_fates_planthydro requires use_fates")
+    varctl.use_fates_planthydro = use_fates_planthydro
     # The soil-BGC cascade (pools/transitions, decomp params, competition) runs for
     # use_cn OR use_fates_bgc (clm_instMod.F90 / CNDriverInit gate on both).
     _soil_bgc = use_cn || _fates_bgc
@@ -754,6 +761,7 @@ function clm_initialize!(;
                         fates_biogeog_screen = fates_biogeog_screen,
                         use_vertsoilc = _fates_bgc,
                         decomp_method = _fates_bgc ? "CENTURY" : "CTC",
+                        use_planthydro = use_fates_planthydro,
                         dtime = dtime)
     end
 
