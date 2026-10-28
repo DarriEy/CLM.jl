@@ -266,7 +266,7 @@ function run_and_dump(outpath::String; nsteps::Int=NSTEPS)
         calday = dayofyear(cur) + tod / _C.SECSPDAY
         (declin, _e1)   = _C.compute_orbital(calday)
         (declinm1, _e2) = _C.compute_orbital(calday - DTIME / _C.SECSPDAY)
-        _C.init_daylength!(inst.gridcell, declin, declinm1, _C.ORB_OBLIQR_DEFAULT, 1:ng)
+        i <= 1 && _C.init_daylength!(inst.gridcell, declin, declinm1, _C.ORB_OBLIQR_DEFAULT, 1:ng)  # once: update_daylength! in clm_drv! shifts prev_dayl after step 1
         nextsw = calday + DTIME / _C.SECSPDAY
 
         _C.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)

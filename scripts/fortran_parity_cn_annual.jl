@@ -35,9 +35,10 @@
 # Year-1 monthly parity vs Fortran (rel = |J-F|/(1+|F|)): TOTSOMC <=9.5e-6,
 # TOTSOMN <=1.1e-5, TOTECOSYSC <=4.5e-4, TG <=2.4e-3, SMINN <=1.2e-2,
 # EFLX_LH_TOT <=0.11 (Aug), TLAI Jan-Sep <=2.7e-3; GPP Jun -6.6% (ratio).
-# OPEN: autumn leaf offset of the season-deciduous grass does not happen in Julia
-# (Fortran TLAI 0.111 -> 0.030 over Oct-Nov; Julia stays ~0.106), so LEAFC/TLAI/
-# TOTVEGC diverge from October (LEAFC Nov 16.0 vs 4.45). A phenology gap, not PHS.
+# AUTUMN OFFSET FIXED (2026-10-28): this loop re-ran init_daylength! every step, so
+# clm_drv!'s update_daylength! left prev_dayl == dayl, ws_flag stuck at 1, and the
+# season-deciduous grass never dropped its leaves. Seeded once now: TLAI Oct-Dec
+# <=5.8e-3 (was 7.5e-2), LEAFC <=0.14 (was 2.1), TOTVEGC <=4.8e-2 (was 8.3e-2).
 #
 # HISTORY — STATUS (2026-06-20): scaffold complete + the comparison framework works, but it
 # surfaced a BLOCKER on the first end-to-end use_cn=true annual run: the soil
@@ -380,7 +381,16 @@ function run_cn_annual(; ndays::Int = 365)
             calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
             (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
             nextsw = calday + 3600.0 / CLM.SECSPDAY
-            CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+            # Seed daylength ONCE. clm_drv! (is_first_step=false here) runs
+            # update_daylength!, which shifts prev_dayl <- dayl each step
+            # (DaylengthMod.F90:192-202), so seed the step BEFORE the first one and
+            # let the update advance it. Re-seeding every step made prev_dayl == dayl,
+            # pinned ws_flag at 1, and the season-deciduous grass never dropped its
+            # leaves in autumn (CNPhenologyMod.F90:1023-1027, 1182).
+            if d == 1 && h == 1
+                (declinm2, _) = CLM.compute_orbital(calday - 2 * 3600.0 / CLM.SECSPDAY)
+                CLM.init_daylength!(inst.gridcell, declinm1, declinm2, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+            end
             CLM.advance_timestep!(tm)
             CLM.read_forcing_step!(fr, inst.atm2lnd, _force_date(cur), ng, nc)
             CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
@@ -455,7 +465,7 @@ function run_cn_annual(; ndays::Int = 365)
                 d, daily["TOTSOMC"][end], daily["TOTVEGC"][end], daily["GPP"][end],
                 daily["TLAI"][end], daily["TG"][end])
         # phenology-onset evolution probe for the season_decid grass patch (p3)
-        if get(ENV, "CN_PHENO", "") != "" && d % 15 == 0 &&
+        if get(ENV, "CN_PHENO", "") != "" && (d % 15 == 0 || (d >= 240 && d <= 330 && d % 3 == 0)) &&
            hasproperty(inst.bgc_vegetation, :cnveg_state_inst)
             cvs = inst.bgc_vegetation.cnveg_state_inst
             pd = findfirst(p -> inst.patch.active[p] &&
@@ -463,13 +473,13 @@ function run_cn_annual(; ndays::Int = 365)
                 CLM.pftcon.season_decid[inst.patch.itype[p]+1] == 1.0, 1:np)
             if pd !== nothing
                 tg = inst.gridcell.dayl
-                @printf("    [pheno d%3d p%d] dormant=%g gddflag=%g gdd=%.1f days_act=%.1f swi=%.1f onflag=%g oncnt=%.0f offflag=%g leafc=%.2f tlai=%.3f dayl=%.0f\n",
+                @printf("    [pheno d%3d p%d] dormant=%g gddflag=%g gdd=%.1f days_act=%.1f swi=%.1f onflag=%g oncnt=%.0f offflag=%g offcnt=%.0f leafc=%.2f tlai=%.3f dayl=%.0f prev_dayl=%.0f\n",
                     d, pd, cvs.dormant_flag_patch[pd], cvs.onset_gddflag_patch[pd],
                     cvs.onset_gdd_patch[pd], cvs.days_active_patch[pd], cvs.onset_swi_patch[pd],
                     cvs.onset_flag_patch[pd], cvs.onset_counter_patch[pd],
-                    cvs.offset_flag_patch[pd], ccs().leafc_patch[pd],
+                    cvs.offset_flag_patch[pd], cvs.offset_counter_patch[pd], ccs().leafc_patch[pd],
                     inst.canopystate.tlai_patch[pd],
-                    (length(tg) > 0 ? tg[1] : NaN))
+                    (length(tg) > 0 ? tg[1] : NaN), inst.gridcell.prev_dayl[1])
             end
         end
     end

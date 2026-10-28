@@ -88,12 +88,14 @@ function get_curr_date(tm::TimeManager)
 end
 
 """
-    get_curr_calday(tm::TimeManager) -> Float64
+    get_curr_calday(tm::TimeManager; offset=0) -> Float64
 
 Return current calendar day (1.0 = Jan 1 00:00, etc.) for NO_LEAP calendar.
+`offset` (seconds) shifts the time before conversion, as in Fortran
+`get_curr_calday(offset=...)` (used by clm_initializeMod for `caldaym1`).
 """
-function get_curr_calday(tm::TimeManager)
-    dt = tm.current_date
+function get_curr_calday(tm::TimeManager; offset::Integer = 0)
+    dt = tm.current_date + Second(offset)
     doy = dayofyear(dt)
     frac = (hour(dt) * 3600 + minute(dt) * 60 + second(dt)) / SECSPDAY
     return Float64(doy) + frac
