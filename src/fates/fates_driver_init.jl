@@ -503,24 +503,29 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     read_fates_params!(; path = params_path)
 
     # ---- CNP "forced uptake" configuration (CLM only supports prescribed uptake) ----
-    # Under CLM, the live ECA/RD nutrient-acquisition path is NOT host-coupled, so
-    # FATES requires the PRESCRIBED-uptake CNP mode (a parameterized fraction of the
-    # plant's N/P demand is satisfied each day). The default param file ships
-    # prescribed_*uptake = 0 (which the _check_allset gate rejects for parteh mode 2),
-    # so set full prescribed uptake (=1.0) + the prescribed uptake mode Refs here,
-    # then run the deferred check. This mirrors the Fortran host config for a CLM-CNP
-    # run (vmax_nh4/no3/p drive the demand; prescribed_nuptake scales the gain).
+    # The ctsm5.3 host never fills bc_in%plant_nh4/no3/p_uptake_flux (no FATES branch
+    # in SoilBiogeochemCompetition, plant_ndemand_col = 0 for FATES columns,
+    # CNDriverMod.F90:466-468), so check_allset endruns a CLM CNP run unless some
+    # fates_cnp_prescribed_n/puptake > 0 (FatesInterfaceMod.F90:1728-1736). CTSM's
+    # FatesColdPRT2 testmod sets both to 1.0 for all PFTs in the parameter file.
+    # A parameter file that already prescribes uptake is used as-is (the uptake modes
+    # and competitor scaling then follow from it in SetFatesGlobalElements2); the
+    # shipped default file has both at 0, for which the FatesColdPRT2 values (1.0) are
+    # applied here instead of aborting.
     if is_cnp
         evcon = edpftvarcon_inst()
         n = numpft[]
-        evcon.prescribed_nuptake = fill(1.0, n)
-        evcon.prescribed_puptake = fill(1.0, n)
+        if sum(abs, evcon.prescribed_nuptake) < nearzero &&
+           sum(abs, evcon.prescribed_puptake) < nearzero
+            evcon.prescribed_nuptake = fill(1.0, n)
+            evcon.prescribed_puptake = fill(1.0, n)
+        end
+        # FatesInterfaceMod.F90:901-911 (SetFatesGlobalElements2): the uptake modes.
         edp_cnp = ed_params()
-        edp_cnp.n_uptake_mode = prescribed_n_uptake
-        edp_cnp.p_uptake_mode = prescribed_p_uptake
-        # Trivial competitor scaling for prescribed uptake (no live competition).
-        max_comp_per_site[]     = 1
-        fates_np_comp_scaling[] = trivial_np_comp_scaling
+        edp_cnp.n_uptake_mode = any(x -> abs(x) > nearzero, evcon.prescribed_nuptake) ?
+                                prescribed_n_uptake : coupled_n_uptake
+        edp_cnp.p_uptake_mode = any(x -> abs(x) > nearzero, evcon.prescribed_puptake) ?
+                                prescribed_p_uptake : coupled_p_uptake
         # Now run the deferred validation (params + prescribed uptake are in place).
         set_fates_ctrlparms("check_allset")
     end
@@ -593,13 +598,20 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     fates_maxPatchesPerSite[] = p.maxpatch_total + 1
 
     # SetFatesGlobalElements2 derived dims the cold-start chain + bc allocators read.
-    # Carbon-only => one nutrient competitor / trivial competition scaling; the full
-    # SetFatesGlobalElements2 (InitHydroGlobals / fates_history_maps / VAI bins) is
-    # not needed for a finite carbon-only cold start, so set just these directly.
-    max_comp_per_site[]     = 1
-    fates_np_comp_scaling[] = trivial_np_comp_scaling
+    # The full SetFatesGlobalElements2 (InitHydroGlobals / fates_history_maps / VAI
+    # bins) is not needed for the cold start, so set just these directly.
     fates_maxElementsPerSite[] = max(fates_maxPatchesPerSite[] * num_swb,
                                      nlevsclass[] * numpft[] * n_term_mort_types)
+    # Nutrient competitors (FatesInterfaceMod.F90:913-926): one / trivial scaling
+    # except CNP with a coupled (non-prescribed) N or P uptake mode.
+    if is_cnp && (ed_params().n_uptake_mode == coupled_n_uptake ||
+                  ed_params().p_uptake_mode == coupled_p_uptake)
+        max_comp_per_site[]     = fates_maxElementsPerSite[]
+        fates_np_comp_scaling[] = coupled_np_comp_scaling
+    else
+        max_comp_per_site[]     = 1
+        fates_np_comp_scaling[] = trivial_np_comp_scaling
+    end
 
     # ---- W1.2: FATES clock (SetFatesTime) ----
     # Fortran `GetAndSetTime` (clmfates_interfaceMod.F90:3730-3786), called here at

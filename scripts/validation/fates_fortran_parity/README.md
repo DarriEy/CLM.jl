@@ -1106,3 +1106,75 @@ fragmentation scalars as the Fortran reference, and the oracle moves toward Fort
   on both sides and `suplnitro='ALL'` supplements immobilization.
 * MIMICS under FATES (`clm_initialize!` refuses `decomp_method=2` with FATES-BGC).
 * FATES-BGC restarts, and windows longer than 10 days for the soil pools.
+
+---
+
+# FATES CNP (`fates_parteh_mode = 2`, 2026-10-28)
+
+## What the ctsm5.3.012 host actually couples
+
+CNP PARTEH is FATES-internal; the CTSM host connects almost nothing to it, and the port
+now mirrors that rather than inventing a coupling:
+
+| Fortran (ctsm5.3.012) | port |
+|---|---|
+| `bc_in%plant_nh4/no3/p_uptake_flux` are allocated but **never filled** by any host file (no FATES branch in `SoilBiogeochemCompetitionMod`; `plant_ndemand_col = 0` for FATES columns, `CNDriverMod.F90:466-468`) | unchanged: no host uptake. Soil mineral N is not drawn down by FATES plants on either side |
+| `check_allset` endruns CLM CNP unless some `fates_cnp_prescribed_n/puptake > 0` (`FatesInterfaceMod.F90:1728-1736`); testmod `FatesColdPRT2` sets both to 1.0 | `clm_fates_init!`: a parameter file that prescribes uptake is used as-is; the shipped default (both 0) gets the FatesColdPRT2 values instead of aborting |
+| `SetFatesGlobalElements2` uptake modes / `max_comp_per_site` / `fates_np_comp_scaling` (`:901-926`) | derived from the parameter values (previously hard-coded prescribed/trivial) |
+| `UpdateNLitterFluxes`: N litter transfer commented out; `fates_litter_flux = 0` | unchanged (`fates_update_n_litter_fluxes!`, #336) |
+| `wrap_WoodProducts` N products: commented out | nothing to port |
+| `nitrogen_spec` = 1 with nitrif/denitrif else 2, `phosphorus_spec` = 0 (`clmfates_interfaceMod.F90:453-460`) | `clm_initialize!(fates_parteh_mode=2)` -> `_fates_parteh_kwargs` |
+| `FastPRTAllometricCNP` | a no-op stub in Fortran too (`PRTAllometricCNPMod.F90:2005-2015`) |
+| `EDMainMod.F90:707-709` `fates_hist%update_history_nutrflux` | now called (history passed down as `ed_ecosystem_dynamics(...; fates_hist)`). Its never-run port had a level-1 `UndefVarError` (scpf handles only bound at level 2), fixed |
+| `update_history_dyn2` N/P scpf pools and storage fractions (`FatesHistoryInterfaceMod.F90:3338-3341, 3615-3650, 4627-4865`) | filled (`FATES_{VEG,LEAF,FROOT,SAPWOOD,STORE,REPRO}{N,P}_SZPF`, `FATES_STORE{N,P}_TF_{CANOPY,USTORY}_SZPF`) |
+
+Carbon-only runs never reach any of this (all gated on `hlm_parteh_mode == 2` or
+`fates_parteh_mode == 2`).
+
+## Fortran reference and result
+
+`stage_cnp_run.sh` (FatesColdPRT2 settings, 720 hourly steps = 30 days;
+`PARTEH=1` stages the same case carbon-only as a control). The scored series are
+committed as `fates_cnp_fortran.csv`:
+
+```bash
+julia +1.12 --project=. scripts/validation/fates_fortran_parity/fates_cnp_parity.jl
+FATES_CNP_PARTEH=1 julia ... fates_cnp_parity.jl <carbon-only h0.nc> 170   # control
+```
+
+Days 1-10 (steps 1-240), per-step relative error max / mean:
+
+| field | max | mean |
+|---|---|---|
+| FATES_VEGN / VEGP, STOREN / STOREP, LEAFN / LEAFP, FROOTN / FROOTP | 4.3e-3 | 2.9e-3 |
+| FATES_SAPWOODN / P | 9.4e-3 | 6.4e-3 |
+| FATES_STOREN_TF / STOREP_TF | 3.2e-6 | 1.5e-6 |
+| FATES_NH4UPTAKE, NO3UPTAKE, NDEMAND, PDEMAND | 4.0e-3 | 2.4e-3 |
+| FATES_PUPTAKE (net P allocated incl. storage draw-down, a difference of pools) | 1.7e-1 | 4.7e-2 |
+| FATES_VEGC / LEAFC / STOREC / FROOTC | 2.9e-3 / 4.0e-3 / 4.4e-3 / 4.0e-3 | 2.0e-3 / 2.8e-3 / 3.0e-3 / 2.8e-3 |
+| FATES_L2FR | 1.0e-6 | 5.4e-7 |
+| FATES_LAI | 5.4e-3 | 3.7e-3 |
+| FATES_NCOHORTS | 50 / 50 at day 10 | |
+| SMINN (mean), TOTSOMC | 6.4e-2, 2.2e-5 | |
+
+That is the same level as the carbon-only drift on this case, and the CNP-specific
+increment matches: at day 4 (CNP minus carbon-only) VEGC is +2.38e-7 kg/m2 in both
+models, LEAFC +4.0e-8 vs +3.9e-8, STOREC +5.4e-8 vs +5.6e-8, LAI +9.9e-7 vs +1.0e-6.
+
+**Day 11 onward is a threshold bifurcation, not a CNP divergence.** Fortran CNP drops the
+leaves of the five cold-deciduous PFTs on day 11 (COLD_STATUS 2 -> 1, LAI 0.66 -> 0.23).
+Fortran carbon-only does not, and neither does the port in either mode. The cause is
+`EDPhysiologyMod.F90:1150-1153`: leaf-off fires once `model_day > 10` if more than
+`phen_ncolddayslim` (5) of the last 10 daily TVEG24 values are below `phen_coldtemp`
+(7.5 C). Day 6 is the knife edge. Fortran carbon-only has 7.514 C, Fortran CNP has
+7.369 C, and the port has 7.700 C in both modes. The two Fortran runs agree to about
+1e-7 until nstep 139, then jump together in GPP *and soil HR* (a host-side event that
+amplifies the round-off-level CNP perturbation). The port is warmer than both by the
+known ~0.2-0.8 C host vegetation-temperature residual, so it stays on the warm side.
+Over 30 days that gives LAI 0.86 (port) vs 0.28 (Fortran CNP) vs 0.86 (Fortran
+carbon-only).
+
+Not scored: `SMIN_NH4` / `SMIN_NO3`. The port's soil-N summary never fills the column
+NH4/NO3 totals (`use_nitrif_denitrif` is not passed to `soil_bgc_nitrogen_state_summary!`,
+which is a host diagnostic gap outside CNP). The vertically resolved pools and `SMINN` are
+fine.

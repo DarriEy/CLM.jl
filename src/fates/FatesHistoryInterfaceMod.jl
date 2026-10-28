@@ -30,7 +30,7 @@
 #     canopy-layer radiation/respiration disaggregation.
 #   * update_history_nutrflux! — per-cohort CNP flux diagnostics.
 #   * update_history_hydraulics! — plant-hydraulics si_hydr/co_hydr diagnostics.
-#   A handful of CNP-mode / landuse / nocomp SUB-fields remain `# TODO ...-W2b`
+#   A handful of landuse / nocomp SUB-fields remain `# TODO ...-W2b`
 #   (they need state from modes outside the carbon-only path); no fill BODY is a
 #   stub. Fire/damage/hydro fills are gated/guarded so the carbon-only path leaves
 #   them at the flush value while the fill logic is exercised with constructed state.
@@ -1721,6 +1721,22 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
     h_storectfrac_can_scpf = H(:ih_storectfrac_canopy_scpf)
     h_storectfrac_ust_scpf = H(:ih_storectfrac_ustory_scpf)
 
+    # -- N / P scpf pools + storage fractions: registered only when the element is
+    #    tracked (CNP mode, the :has_n / :has_p registry gates). A missing handle is
+    #    never written (the Fortran element loop never reaches that branch). --
+    Hopt(sym) = (haskey(this.ih, sym) && this.ih[sym] > 0) ? H(sym) : nothing
+    has_n_hist = haskey(this.ih, :ih_totvegn_scpf)
+    has_p_hist = haskey(this.ih, :ih_totvegp_scpf)
+    # (totveg, leaf, fnrt, sapw, store, repro) handles by element.
+    npool_scpf = has_n_hist ? map(Hopt, (:ih_totvegn_scpf, :ih_leafn_scpf, :ih_fnrtn_scpf,
+                                          :ih_sapwn_scpf, :ih_storen_scpf, :ih_repron_scpf)) : nothing
+    ppool_scpf = has_p_hist ? map(Hopt, (:ih_totvegp_scpf, :ih_leafp_scpf, :ih_fnrtp_scpf,
+                                          :ih_sapwp_scpf, :ih_storep_scpf, :ih_reprop_scpf)) : nothing
+    h_storentfrac_can_scpf = Hopt(:ih_storentfrac_canopy_scpf)
+    h_storentfrac_ust_scpf = Hopt(:ih_storentfrac_understory_scpf)
+    h_storeptfrac_can_scpf = Hopt(:ih_storeptfrac_canopy_scpf)
+    h_storeptfrac_ust_scpf = Hopt(:ih_storeptfrac_understory_scpf)
+
     # -- tree-damage cross-tab (damage×size×pft = cdpf): only registered when
     #    hlm_use_tree_damage is on (the :treedamage registry gate). --
     dmg_on = hlm_use_tree_damage[] == itrue && haskey(this.ih, :ih_mortality_si_cdpf)
@@ -1880,6 +1896,11 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
 
         storec_canopy_scpf = zeros(npft * nsclass)
         storec_ustory_scpf = zeros(npft * nsclass)
+        # N/P storage-fraction weighting factors (F90 3338-3341).
+        storen_canopy_scpf = zeros(npft * nsclass)
+        storen_ustory_scpf = zeros(npft * nsclass)
+        storep_canopy_scpf = zeros(npft * nsclass)
+        storep_ustory_scpf = zeros(npft * nsclass)
 
         # ---- element diagnostics ----
         has_massbal  = cpos >= 1 && length(site.mass_balance) >= cpos
@@ -2038,8 +2059,21 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                             h_storectfrac_ust_scpf[io_si, scpf] += ccohort.n * store_max
                         end
                     end
-                    # TODO Batch 18-followup-W2b: N/P store fraction weights
-                    # (storen/storep canopy/ustory) — unset in carbon-only.
+                    # N/P storage fraction of the stoich_growth_min target (F90 3615-3650).
+                    if eid == nitrogen_element || eid == phosphorus_element
+                        store_max = GetNutrientTarget(ccohort.prt, eid, store_organ,
+                                                      stoich_growth_min)
+                        isn = eid == nitrogen_element
+                        hcan = isn ? h_storentfrac_can_scpf : h_storeptfrac_can_scpf
+                        hust = isn ? h_storentfrac_ust_scpf : h_storeptfrac_ust_scpf
+                        if ccohort.canopy_layer == 1
+                            (isn ? storen_canopy_scpf : storep_canopy_scpf)[scpf] += ccohort.n * store_m
+                            hcan !== nothing && (hcan[io_si, scpf] += ccohort.n * store_max)
+                        else
+                            (isn ? storen_ustory_scpf : storep_ustory_scpf)[scpf] += ccohort.n * store_m
+                            hust !== nothing && (hust[io_si, scpf] += ccohort.n * store_max)
+                        end
+                    end
                 end
 
                 h_crownarea_pft[io_si, ft] += ccohort.c_area * AREA_INV
@@ -2560,7 +2594,14 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                     @views h_storec_scpf[io_si, :]  .= 0.0
                     @views h_reproc_scpf[io_si, :]  .= 0.0
                 end
-                # TODO Batch 18-followup-W2b: N/P scpf pool zeroing/fill (totvegn/p, ...)
+                # N / P scpf pool states (F90 4627-4644).
+                elpools = eid == nitrogen_element ? npool_scpf :
+                          eid == phosphorus_element ? ppool_scpf : nothing
+                if elpools !== nothing
+                    for hp in elpools
+                        hp === nothing || (@views hp[io_si, :] .= 0.0)
+                    end
+                end
 
                 cpatch = site.oldest_patch
                 while cpatch !== nothing
@@ -2604,6 +2645,14 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                                 h_sapwc_scpf[io_si, i_scpf]   += sapw_m * ccohort.n / m2_per_ha
                                 h_storec_scpf[io_si, i_scpf]  += store_m * ccohort.n / m2_per_ha
                                 h_reproc_scpf[io_si, i_scpf]  += repro_m * ccohort.n / m2_per_ha
+                            elseif elpools !== nothing
+                                # (totveg, leaf, fnrt, sapw, store, repro) — F90 4757-4800.
+                                vals = (total_m, leaf_m, fnrt_m, sapw_m, store_m, repro_m)
+                                for k in 1:6
+                                    hp = elpools[k]
+                                    hp === nothing && continue
+                                    hp[io_si, i_scpf] += vals[k] * ccohort.n / m2_per_ha
+                                end
                             end
                         end
                         ccohort = ccohort.shorter
@@ -2624,6 +2673,18 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                 if h_storectfrac_ust_scpf[io_si, i_scpf] > nearzero
                     h_storectfrac_ust_scpf[io_si, i_scpf] =
                         storec_ustory_scpf[i_scpf] / h_storectfrac_ust_scpf[io_si, i_scpf]
+                end
+            end
+        end
+        # storage-fraction normalization (N / P canopy/ustory; F90 4826-4865)
+        for (hfrac, wts) in ((h_storentfrac_can_scpf, storen_canopy_scpf),
+                             (h_storentfrac_ust_scpf, storen_ustory_scpf),
+                             (h_storeptfrac_can_scpf, storep_canopy_scpf),
+                             (h_storeptfrac_ust_scpf, storep_ustory_scpf))
+            hfrac === nothing && continue
+            for i_scpf in 1:(npft * nsclass)
+                if hfrac[io_si, i_scpf] > nearzero
+                    hfrac[io_si, i_scpf] = wts[i_scpf] / hfrac[io_si, i_scpf]
                 end
             end
         end
@@ -2706,6 +2767,9 @@ function update_history_nutrflux!(this::fates_history_interface_type, csite)
     zero_site_hvars!(this, csite, group_nflx_simple)
 
     do_scpf = hlm_hist_level_dynam[] > 1
+    # (declared here so the accumulation closures below see them at level 1 too)
+    h_nh4_scpf = h_no3_scpf = h_nfix_scpf = h_nefflux_scpf = h_ndemand_scpf = nothing
+    h_puptake_scpf = h_pefflux_scpf = h_pdemand_scpf = nothing
     if do_scpf
         h_nh4_scpf     = H2(:ih_nh4uptake_scpf)
         h_no3_scpf     = H2(:ih_no3uptake_scpf)

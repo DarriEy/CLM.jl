@@ -107,6 +107,10 @@ function clm_initialize!(;
     # the port has no FATES-SP init path). Pass `false` for the legacy FATES-without-
     # soil-BGC configuration.
     use_fates_bgc::Union{Bool,Nothing} = nothing,
+    # CTSM `fates_parteh_mode`: 1 = carbon-only allometric PARTEH (the default),
+    # 2 = CNP (prt_cnp_flex_allom_hyp). Under CLM, CNP runs with prescribed N/P
+    # uptake (fates_cnp_prescribed_nuptake/puptake; see clm_fates_init!).
+    fates_parteh_mode::Int = 1,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
     # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
@@ -754,10 +758,30 @@ function clm_initialize!(;
                         fates_biogeog_screen = fates_biogeog_screen,
                         use_vertsoilc = _fates_bgc,
                         decomp_method = _fates_bgc ? "CENTURY" : "CTC",
-                        dtime = dtime)
+                        dtime = dtime,
+                        _fates_parteh_kwargs(fates_parteh_mode, _fates_bgc)...)
     end
 
     return (inst, bounds, filt, tm)
+end
+
+"""
+    _fates_parteh_kwargs(fates_parteh_mode, use_fates_bgc) -> NamedTuple
+
+`clm_fates_init!` keywords for the PARTEH mode. The carbon-only default passes
+nothing (keeps that path byte-identical). CNP (mode 2) passes `parteh_mode` and the
+nutrient specs CTSM sends (clmfates_interfaceMod.F90:453-460): `nitrogen_spec` = 1
+with nitrification/denitrification (on under FATES soil BGC), else 2;
+`phosphorus_spec` = 0 (P is not tracked in CLM).
+"""
+function _fates_parteh_kwargs(fates_parteh_mode::Integer, use_fates_bgc::Bool)
+    fates_parteh_mode == prt_carbon_allom_hyp && return NamedTuple()
+    fates_parteh_mode == prt_cnp_flex_allom_hyp ||
+        error("clm_initialize!: fates_parteh_mode must be 1 (carbon) or 2 (CNP), " *
+              "got $(fates_parteh_mode)")
+    return (parteh_mode = prt_cnp_flex_allom_hyp,
+            nitrogen_spec = use_fates_bgc ? 1 : 2,
+            phosphorus_spec = 0)
 end
 
 """

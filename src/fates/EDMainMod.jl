@@ -63,10 +63,12 @@
 #     AccumulateMortalityWaterStorage (Tier A, FatesPlantHydraulicsMod) are now wired,
 #     guarded behind `hlm_use_planthydro[] == itrue`.
 #
-# STUBS (gated, inert by default):
-#   * `fates_hist%update_history_nutrflux` (FatesHistoryInterfaceMod) is NOT ported;
-#     it only runs under the prt_cnp_flex_allom_hyp (CNP) mode, which is naturally
-#     inert in the default carbon-only path. Guarded + stubbed.
+# HISTORY (CNP only):
+#   * `fates_hist%update_history_nutrflux` (FatesHistoryInterfaceMod) runs under the
+#     prt_cnp_flex_allom_hyp (CNP) mode only. The Fortran reaches the module-global
+#     `fates_hist`; the port has no history global (the interface lives on
+#     `inst.fates.hist`), so the driver passes it in as the `fates_hist` keyword
+#     (`nothing` = no history interface built, e.g. a hand-driven unit test).
 #
 # Sibling-module calls (ported in PARALLEL in this same batch, resolve at parent
 # integration time — called here by their EXACT Fortran name, NOT redefined):
@@ -100,7 +102,7 @@ const _edmain_final_check_id = -1       # Fortran `final_check_id`
 # ===========================================================================
 
 """
-    ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
+    ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out; fates_hist=nothing)
 
 Core of the FATES demographic model: orchestrates one daily dynamics step for a
 site (phenology -> fire/disturbance -> growth/allocation integration -> mortality
@@ -109,7 +111,8 @@ interleaved with `TotalBalanceCheck` mass-conservation audits. Bypassed (via
 `bypass_dynamics`) in ST3 mode; patch dynamics are turned off in SP/ST3 modes.
 Mirrors the Fortran `ed_ecosystem_dynamics`.
 """
-function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
+function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out;
+                               fates_hist = nothing)
 
     # Zero the per-element mass-balance fluxes and the flux diagnostics.
     # (Consider moving towards the end — some are integrated over the short step.)
@@ -160,7 +163,7 @@ function ed_ecosystem_dynamics(currentSite::ed_site_type, bc_in, bc_out)
         fates_parity_hook(currentSite, bc_in, 12)   # parity: after fire + disturbance_rates
 
         # Integrate state variables from annual rates to the daily timestep.
-        ed_integrate_state_variables(currentSite, bc_in, bc_out)
+        ed_integrate_state_variables(currentSite, bc_in, bc_out; fates_hist = fates_hist)
         fates_parity_hook(currentSite, bc_in, 13)   # parity: after growth/allocation/PRT
 
         # The transition flag is no longer needed once we have integrated.
@@ -250,7 +253,7 @@ end
 # ===========================================================================
 
 """
-    ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
+    ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out; fates_hist=nothing)
 
 Advance every cohort by one daily timestep: compute the mortality derivative,
 maintenance turnover, leaf ageing, the three-phase daily PARTEH allocation (with
@@ -260,7 +263,8 @@ recruit L2FR / stoich, runs SeedUpdate, generates the litter fluxes, and finally
 updates each cohort's number density (`n += dndt*hlm_freq_day`). Mirrors the
 Fortran `ed_integrate_state_variables`.
 """
-function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
+function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out;
+                                      fates_hist = nothing)
 
     current_fates_landuse_state_vector = get_current_landuse_statevector(currentSite)
 
@@ -502,16 +506,9 @@ function ed_integrate_state_variables(currentSite::ed_site_type, bc_in, bc_out)
     # set the L2FRs of newly recruited plants.
     UpdateRecruitL2FR(currentSite)
 
-    # Update Nutrient history diagnostics (if any).
-    if hlm_parteh_mode[] == prt_cnp_flex_allom_hyp
-        # GAP (history-only, CNP mode): fates_hist%update_history_nutrflux is not
-        # ported. It writes N/P FLUX history diagnostics only — it feeds no prognostic
-        # state, so the CNP simulation itself is unaffected; the nutrient-flux history
-        # fields are simply absent. Inert in the default carbon-only mode
-        # (hlm_parteh_mode = prt_carbon_allom_hyp), which never enters this branch.
-        # Closing it = port update_history_nutrflux into FatesHistoryInterfaceMod.jl
-        # alongside the other CNP sub-fields still marked there.
-        # update_history_nutrflux(fates_hist, currentSite)
+    # Update Nutrient history diagnostics (if any). EDMainMod.F90:707-709.
+    if hlm_parteh_mode[] == prt_cnp_flex_allom_hyp && fates_hist !== nothing
+        update_history_nutrflux!(fates_hist, currentSite)
     end
 
     # When plants die, the water goes with them (affects the water balance).

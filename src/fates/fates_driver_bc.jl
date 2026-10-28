@@ -738,7 +738,7 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         bc_out = fates.bc_out[s]
 
         # 2-3. the demographic step + site diagnostics update.
-        ed_ecosystem_dynamics(site, bc_in, bc_out)
+        ed_ecosystem_dynamics(site, bc_in, bc_out; fates_hist = fates.hist)
         ed_update_site(site, bc_in, bc_out, false)
 
         # 4. final mass-conservation audit (throws on imbalance).
