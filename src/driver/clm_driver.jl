@@ -2736,7 +2736,8 @@ function clm_drv_core!(config::CLMDriverConfig,
             fates_daily_dynamics_step!(inst; nlevsoil=varpar.nlevsoi,
                                        nlevdecomp=varpar.nlevdecomp,
                                        use_fates_bgc=config.use_fates_bgc,
-                                       fire_weather=fire_weather)
+                                       fire_weather=fire_weather,
+                                       date=(year, mon, day, secs))
         end
     end
 
