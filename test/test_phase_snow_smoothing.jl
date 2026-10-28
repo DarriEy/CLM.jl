@@ -328,4 +328,50 @@ using CLM
         @test issorted(errs; rev = true)
         @test errs[end] < 1e-3
     end
+
+    # ---------------------------------------------------------------------
+    # tfrz TIE — the θ_snow = 4.981 forward-AD residual (FORWARD_AD_SMOOTHNESS_BOUNDARY §5c).
+    # ForwardDiff >= 1.0 resolves an exact-value tie in `<`/`<=`/`>=` from the PARTIALS. A
+    # melting soil layer is pinned EXACTLY at tfrz, and the phase-change residual heatr is
+    # identically 0 (partials = roundoff noise), so the Dual took the frozen Kersten branch
+    # (thk 0.94) where Float64 / central FD take the thawed one (1.40): FwdDiff 15.68 vs FD 16.42.
+    # `_primal` makes the Dual branch on the primal value, as Float64 does.
+    # ---------------------------------------------------------------------
+    @testset "(tfrz tie) _primal: identity on floats, strips (nested) partials" begin
+        @test CLM._primal(273.15) === 273.15
+        @test CLM._primal(273.15f0) === 273.15f0
+        @test CLM._primal(Dual(273.15, -1e-17)) === 273.15
+        @test CLM._primal(Dual(Dual(1.5, 2.0), Dual(3.0, 4.0))) === 1.5
+        # The hazard itself (documents the ForwardDiff semantics this guards against):
+        noisy = Dual(tfrz, -1e-17)                 # value exactly tfrz, roundoff partial
+        @test !(noisy >= tfrz)                     # tie broken by the partial → "frozen"
+        @test CLM._primal(noisy) >= tfrz           # primal branch → thawed, as Float64
+        @test abs(Dual(0.0, 1e-17)) > 0.0          # zero residual + noise passes `> 0`
+        @test !(abs(CLM._primal(Dual(0.0, 1e-17))) > 0.0)
+    end
+
+    @testset "(tfrz tie) soil thermal conductivity: Dual branch == Float64 at t = tfrz" begin
+        nlevsno, nlevgrnd = 1, 2
+        nl = nlevsno + nlevgrnd
+        function tk_at(tvals::Vector{T}) where {T}
+            thk = zeros(T, 1, nl); bw = zeros(T, 1, nl)
+            t = reshape(copy(tvals), 1, nl)
+            liq = fill(T(10.0), 1, nl); ice = fill(T(20.0), 1, nl)
+            CLM.compute_soil_snow_tk!(thk, bw, trues(1), [1], [1], [CLM.ISTSOIL], [0],
+                fill(T(0.1), 1, nl), [nlevgrnd], [0], t, liq, ice, zeros(T, 1, nlevgrnd),
+                fill(T(0.45), 1, nlevgrnd), fill(T(3.0), 1, nlevgrnd), fill(T(0.25), 1, nlevgrnd),
+                [T(0.0)], nlevsno, nlevgrnd, nlevgrnd, "Jordan1991")
+            thk
+        end
+        tf = [tfrz, tfrz, tfrz]                                  # pinned exactly at tfrz
+        ref = tk_at(tf)                                         # Float64: thawed branch
+        for ∂ in (-1e-17, 0.0, 1e-17)                           # noise of either sign
+            d = tk_at([Dual(x, ∂) for x in tf])
+            @test value.(d[1, 2:end]) == ref[1, 2:end]          # same branch as Float64
+        end
+        # Default path unchanged: off the tie, the branch is the plain `>=` (frozen below tfrz).
+        cold = tk_at(tf .- 0.5)
+        @test cold[1, 2] != ref[1, 2]
+        @test value(tk_at([Dual(x, 1.0) for x in tf .- 0.5])[1, 2]) == cold[1, 2]
+    end
 end
