@@ -99,7 +99,8 @@ using Test, CLM
             else
                 # --- the fix itself, as a value in 1/m -------------------
                 # ks was IDENTICALLY ZERO at every step before this fix.
-                @test length(rep.kss) == 16
+                # 17 entries: model steps s = 0..16 (s = 0 is CTSM's nstep=0 step).
+                @test length(rep.kss) == 17
                 @test all(k -> 1.5 < k < 4.0, rep.kss)
 
                 # --- the surface reaches freezing ------------------------
@@ -109,13 +110,11 @@ using Test, CLM
                 @test minimum(tgJ) < CLM.TFRZ
 
                 # --- and once frozen it tracks the reference in KELVIN ---
-                # Steps 7-16 are deep in the frozen window. With the faithful
-                # molecular-TKWAT cold start (cold_start.jl; the seeded savedtke1
-                # that used to weld the surface warm for ~5 steps is gone) the lake
-                # now freezes at step ~2 instead of 6, so 7-16 track the reference
-                # to ~0.04 K. The residual that remains is an isolated STEP-1
-                # over-cool, asserted separately in test_lake_ref2m.jl.
-                @test maximum(abs.(tgJ[7:16] .- tgF[7:16])) < 0.15
+                # With the faithful molecular-TKWAT cold start, the nstep=0 harness
+                # alignment and the faithful LakeFluxes iteration (qsat, htvp,
+                # per-pass re-linearisation, betaprime), every step -- including
+                # the first -- tracks the float32 reference to ~1e-5 K.
+                @test maximum(abs.(tgJ .- tgF)) < 1.0e-3
 
                 # --- the frozen ROUGHNESS branch is the one being taken --
                 # z0frzlake = 1e-3 (LakeCon.F90:50) vs the unfrozen Charnock
@@ -129,20 +128,20 @@ using Test, CLM
                 # 1e-3. (Previously the port gated on the warm input t_grnd and stayed
                 # on the unfrozen Charnock branch ~3.9e-5 for step 1, leaving rah
                 # ~2.4x too high and over-cooling the skin 265 vs 271 K.)
-                @test all(z -> isapprox(z, CLM.z0frzlake; rtol=1e-12), rep.z0mgs[1:16])
+                @test all(z -> isapprox(z, CLM.z0frzlake; rtol=1e-12), rep.z0mgs)
 
                 # --- which puts rah onto the reference -------------------
                 # rah is inverted from each model's OWN flux definition
                 # (LakeFluxesMod.F90:526), so this compares like with like.
                 # Before the fix: rah_J 296-317 against rah_F 145-160, i.e. 2x.
-                @test all(r -> 100.0 < r < 200.0, rep.rahs[7:16])
+                @test all(r -> 100.0 < r < 200.0, rep.rahs[8:17])
 
                 # --- and lake ice forms ----------------------------------
                 # Before: LAKEICEFRAC_SURF was 0.0 at every one of 47 steps
                 # against a reference reaching 0.36.
                 iceJ = rep.jv["LAKEICE_SRF"]; iceF = rep.fv["LAKEICE_SRF"]
                 @test maximum(iceJ) > 0.2
-                @test maximum(abs.(iceJ .- iceF)) < 0.10
+                @test maximum(abs.(iceJ .- iceF)) < 1.0e-4
             end
         end
     end

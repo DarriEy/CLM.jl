@@ -2224,6 +2224,26 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Lake hydrology
     # ========================================================================
+    # LakeHydrology's new-snow step (LakeHydrologyMod.F90:242-262): copy precip onto
+    # the lake surface, then UpdateQuantitiesForNewSnow + InitializeExplicitSnowPack
+    # over the LAKE filter. handle_new_snow! is that same pair (its thawed-wetland
+    # step is inert on lake columns) and above runs only over nolakec, so until
+    # this call snowfall on a lake was never added: H2OSNO stayed 0 while CTSM
+    # accumulated whatever snowfall exceeded the lake-surface sublimation.
+    if any(filt.lakec)
+        sum_flux_fluxes_onto_ground!(forc_snow_col, forc_rain_col,
+                                     wfb.wf.qflx_snow_grnd_col, wfb.wf.qflx_liq_grnd_col,
+                                     filt.lakec, bc_col)
+        handle_new_snow!(temp, wsb, wdb, col, lun,
+                         filt.lakec, bc_col, dtime, varpar.nlevsno;
+                         forc_t=a2l.forc_t_downscaled_col,
+                         forc_wind=a2l.forc_wind_grc,
+                         qflx_snow_grnd=wfb.wf.qflx_snow_grnd_col,
+                         qflx_snow_drain=wfb.wf.qflx_snow_drain_col,
+                         int_snow=wsb.int_snow_col,
+                         scf_method=inst.scf_method)
+    end
+
     # LakeHydrology — WIRED
     lake_hydrology!(temp, ef, ls, ss, wsb, wdb,
                     inst.water.waterbalancebulk_inst, wfb,

@@ -29,7 +29,7 @@
 
 # Lake-specific constants (normally from LakeCon.F90)
 const EMG_LAKE = 0.97          # lake surface emissivity
-const BETAVIS_LAKE = 0.4       # fraction of visible radiation absorbed at surface
+const BETAVIS_LAKE = 0.0       # LakeCon.F90:45 betavis (was 0.4, which CTSM never uses)
 # LakeCon.F90:143-158 sets fcrit and minz0lake as a PAIR, chosen by the
 # `lake_use_old_fcrit_minz0` namelist flag (default .false., LakeCon.F90:98):
 #   .true.  (Subin et al. 2011)  -> fcrit = 22.0,  minz0lake = 1.0e-5
@@ -54,6 +54,10 @@ const CURM = 0.1               # max Charnock parameter (LakeCon curm; was wrong
 const FCRIT = 100.0            # critical dimensionless fetch for the Charnock parameter
 const BETA1 = 1.0              # coefficient of convective velocity
 const ZETAMAX_LAKE = 0.5       # max zeta under stable conditions
+const KVA0TEMP = 293.15        # 20 C + tfrz: reference temperature for KVA0 (LakeFluxesMod kva0temp)
+const KVA0PRES = 1.013e5       # pressure for KVA0 [Pa] (LakeFluxesMod.F90:192)
+const NU_PARAM_LAKE = 1.5e-5   # clm_varcon nu_param: viscosity in the ZengWang2007 z0hg
+const ZII_LAKE = 1000.0        # convective boundary height [m] (LakeFluxesMod.F90:136)
 
 # --------------------------------------------------------------------------
 # Device-view struct: every array touched by the per-patch loop, bundled into
@@ -75,8 +79,12 @@ Base.@kwdef struct LakeFluxDV{Vi,V,M}
     dz::M; dz_lake::M; t_soisno::M; t_lake::M
     # column vectors
     t_grnd::V
-    # patch solar
+    # patch solar (+ NIR split and SNICAR layer absorption for betaprime)
     sabg::V
+    fsds_nir_d::V; fsds_nir_i::V; fsr_nir_d::V; fsr_nir_i::V
+    sabg_lyr::M
+    # column roughness lengths carried between steps (LakeFluxesMod.F90:327,764-766)
+    z0mg_col::V; z0hg_col::V; z0qg_col::V
     # water state (column, layer)
     h2osoi_liq::M; h2osoi_ice::M
     # forcings (column-indexed)
@@ -130,6 +138,11 @@ function _lake_flux_dv(temperature, energyflux, frictionvel, solarabs, lakestate
         dz = col_data.dz, dz_lake = col_data.dz_lake,
         t_soisno = temperature.t_soisno_col, t_lake = temperature.t_lake_col,
         t_grnd = temperature.t_grnd_col, sabg = solarabs.sabg_patch,
+        fsds_nir_d = solarabs.fsds_nir_d_patch, fsds_nir_i = solarabs.fsds_nir_i_patch,
+        fsr_nir_d = solarabs.fsr_nir_d_patch, fsr_nir_i = solarabs.fsr_nir_i_patch,
+        sabg_lyr = solarabs.sabg_lyr_patch,
+        z0mg_col = frictionvel.z0mg_col, z0hg_col = frictionvel.z0hg_col,
+        z0qg_col = frictionvel.z0qg_col,
         h2osoi_liq = waterstatebulk.ws.h2osoi_liq_col,
         h2osoi_ice = waterstatebulk.ws.h2osoi_ice_col,
         forc_t = forc_t, forc_th = forc_th, forc_q = forc_q, forc_pbot = forc_pbot,
@@ -164,7 +177,7 @@ end
 # type T so no Float64 reaches a Float32-only backend.
 # --------------------------------------------------------------------------
 @kernel function _lake_fluxes_kernel!(d, @Const(mask_lakep), nlevsno_val::Int,
-                                      niters::Int, dtime, a_coef, a_exp)
+                                      niters::Int, dtime, a_coef, a_exp, zsno)
     p = @index(Global)
     @inbounds if mask_lakep[p]
         # ----- alias struct fields to locals (body stays verbatim) -----
@@ -174,6 +187,9 @@ end
         ws_col = d.ws_col; ks_col = d.ks_col; htvp_col = d.htvp_col; ust_lake = d.ust_lake
         dz = d.dz; dz_lake = d.dz_lake; t_soisno = d.t_soisno; t_lake = d.t_lake
         t_grnd = d.t_grnd; sabg_arr = d.sabg
+        fsds_nir_d = d.fsds_nir_d; fsds_nir_i = d.fsds_nir_i
+        fsr_nir_d = d.fsr_nir_d; fsr_nir_i = d.fsr_nir_i; sabg_lyr = d.sabg_lyr
+        z0mg_col = d.z0mg_col; z0hg_col = d.z0hg_col; z0qg_col = d.z0qg_col
         h2osoi_liq = d.h2osoi_liq; h2osoi_ice = d.h2osoi_ice
         grc_lat = d.grc_lat
         forc_t = d.forc_t; forc_th = d.forc_th; forc_q = d.forc_q
@@ -208,120 +224,85 @@ end
 
         # Top layer index (Julia 1-based)
         jtop = snl + 1 + nlevsno_val
+
+        # Solar absorbed at surface (LakeFluxesMod.F90:376-397). NOT clamped:
+        # Fortran uses sabg(p) as-is.
+        sabg = sabg_arr[p]
+
+        # betaprime = fraction of sabg absorbed at the skin (LakeFluxesMod.F90:383-393):
+        #   snow layers -> SNICAR top-layer absorption sabg_lyr(jtop)/sabg;
+        #   no snow     -> the NIR fraction of absorbed solar, + (1-NIR)*betavis.
+        # betavis is 0 in CTSM (LakeCon.F90:45), so betaprime is the NIR fraction --
+        # the SAME `beta` LakeTemperature uses to put the remaining (visible) solar
+        # into the water column. The port had a "simplified" constant 0.4 here,
+        # inconsistent with its own lake_temperature.jl (which already computes the
+        # NIR fraction), so the skin and the column double-booked daytime solar.
         if snl < 0
+            betaprime = sabg_lyr[p, jtop] / max(T(1.0e-5), sabg)
             dzsur = dz[c, jtop] / T(2.0)
         else
+            sabg_nir = fsds_nir_d[p] + fsds_nir_i[p] - fsr_nir_d[p] - fsr_nir_i[p]
+            sabg_nir = min(sabg_nir, sabg)
+            betaprime = sabg_nir / max(T(1.0e-5), sabg)
+            betaprime = betaprime + (one(T) - betaprime) * T(BETAVIS_LAKE)
             dzsur = dz_lake[c, 1] / T(2.0)
         end
 
-        # Surface-layer thermal conductivity + subsurface temperature, per the
-        # LakeFluxesMod 3-branch logic (the previous code used tksur=savedtke1
-        # unconditionally — so a frozen lake used molecular water tk instead of
-        # tkice — and tsur=t_lake[2]/t_soisno[jtop+1], off by one from the first
-        # sub-surface node):
-        #   unfrozen (Tg>tfrz & t_lake[1]>tfrz & no snow) → eddy conductivity savedtke1
-        #   frozen, no snow                               → ice conductivity tkice
-        #   snow layers present                           → snow-layer tk
-        if t_grnd[c] > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl == 0
-            tksur = savedtke1[c]
-            tsur = t_lake[c, 1]
+        # Saturated specific humidity + derivative at the surface -- CLM QSat
+        # (QSatMod.F90: Flatau polynomials, ICE saturation below tfrz), F90:402.
+        # The port used a Tetens water-only formula throughout this kernel, i.e.
+        # liquid-water saturation over a frozen lake skin.
+        (qsatg, _, qsatgdT, _) = qsat(t_grnd[c], forc_pbot[c])
+
+        # Initial roughness lengths (LakeFluxesMod.F90:327-367, z0param_method =
+        # 'ZengWang2007'; use_z0m_snowmelt = .false.):
+        #   unfrozen -> the carried column z0mg_col, classic z0hg/z0qg from ust_lake;
+        #   frozen, no snow -> z0frzlake + ZengWang z0hg with nu_param;
+        #   snow -> zsno + ZengWang z0hg with nu_param.
+        if t_grnd[c] > T(TFRZ)
+            z0mg = z0mg_col[c]
+            kva = T(KVA0) * (t_grnd[c] / T(KVA0TEMP))^T(1.5) * T(KVA0PRES) / forc_pbot[c]
+            sqre0 = (max(z0mg * ust_lake[c] / kva, T(0.1)))^T(0.5)
+            z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
+            z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
+            z0qg = max(z0qg, T(MINZ0LAKE))
+            z0hg = max(z0hg, T(MINZ0LAKE))
         elseif snl == 0
-            tksur = T(TKICE)
-            tsur = t_lake[c, 1]
+            z0mg = T(z0frzlake)
+            z0hg = z0mg / exp(a_coef * (ust_lake[c] * z0mg / T(NU_PARAM_LAKE))^a_exp)
+            z0qg = z0hg
         else
-            bw = (h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]) / dz[c, jtop]
-            tksur = T(TKAIR) + (T(7.75e-5) * bw + T(1.105e-6) * bw^2) * (T(TKICE) - T(TKAIR))
-            tsur = t_soisno[c, jtop]
+            z0mg = zsno
+            z0hg = z0mg / exp(a_coef * (ust_lake[c] * z0mg / T(NU_PARAM_LAKE))^a_exp)
+            z0qg = z0hg
         end
 
-        # Saved ground temperature
-        tgbef = t_grnd[c]
-
-        # Solar absorbed at surface
-        sabg = sabg_arr[p]
-        sabg = max(sabg, zero(T))
-
-        # Betaprime: fraction of solar absorbed at surface
-        if snl < 0
-            betaprime = one(T)  # all absorbed in snow
-        else
-            betaprime = T(BETAVIS_LAKE)  # simplified
-        end
-
-        # Virtual potential temperature
+        # Forcing heights for the roughness lengths (F90:370-372). Fortran adds z0 to
+        # the atmospheric reference heights (forc_hgt_*_patch) and refreshes them at
+        # the end of every pass; thm and zldis are taken ONCE, here.
+        hgt_u = forc_hgt_u_grc[g] + z0mg
+        hgt_t = forc_hgt_t_grc[g] + z0hg
+        hgt_q = forc_hgt_q_grc[g] + z0qg
+        thm = forc_t[c] + T(0.0098) * hgt_t
         thv = forc_th[c] * (one(T) + T(0.61) * forc_q[c])
+
+        # Latent heat by the GROUND temperature (F90:426-430), re-evaluated after
+        # every Newton solve and after the freeze/convection reset. The port keyed it
+        # once per step on the top-layer liquid/ice content.
+        htvp = t_grnd[c] > T(TFRZ) ? T(HVAP) : T(HSUB)
 
         # Wind speed
         ur = max(sqrt(forc_u[g]^2 + forc_v[g]^2), wind_min)
+        dth = thm - t_grnd[c]
+        dqh = forc_q[c] - qsatg
+        dthv = dth * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh
+        zldis = hgt_u - zero(T)
 
-        # Forcing heights
-        forc_hgt_u = forc_hgt_u_grc[g]
-        forc_hgt_t = forc_hgt_t_grc[g]
-        forc_hgt_q = forc_hgt_q_grc[g]
-
-        # Intermediate temperature
-        thm = forc_t[c] + T(0.0098) * forc_hgt_t
-
-        # Kinematic viscosity
-        kva = T(KVA0) * (t_grnd[c] / T(293.15))^T(1.5) * (T(1013.25e2) / forc_pbot[c])
-
-        # Latent heat
-        h2o_liq = h2osoi_liq[c, jtop]
-        h2o_ice = h2osoi_ice[c, jtop]
-        htvp = (h2o_liq <= zero(T) && h2o_ice > zero(T)) ? T(HSUB) : T(HVAP)
-
-        # ============================================================
-        # Initial roughness lengths
-        # ============================================================
-        if tgbef > T(TFRZ)  # Unfrozen
-            z0mg = max(T(MINZ0LAKE), T(CUS) * kva / max(ur * T(0.1), T(1e-4)))   # HARD: MINZ0LAKE=1e-5 m (constant). At k=50 the floor became 0.0139 m — 1390x — giving a lake the roughness of a forest canopy.
-        else  # Frozen
-            if snl < 0
-                z0mg = T(0.00085)  # snow roughness
-            else
-                z0mg = T(0.001)  # ice roughness
-            end
-        end
-
-        # Heat/vapour roughness lengths. LakeFluxesMod uses the carried friction velocity
-        # ust_lake (the previous step's ustar) and BRANCHES on the surface phase:
-        #   unfrozen → the classic smooth/rough z0hg = z0mg·exp(-vkc/prn·(4·sqre0−3.2)) (sqre0
-        #     the roughness-Reynolds root, ust_lake-based — the port used ur·0.1, ~√3 too high);
-        #   frozen (snl==0, ice) → ZengWang2007: z0hg = z0mg/exp(a_coef·(ust_lake·z0mg/ν)^a_exp)
-        #     ("Consistent with BareGroundFluxes"). The port used the classic formula for BOTH,
-        #     giving frozen z0hg ~25× too small (2.9e-5 vs ~7.2e-4) → rah too high → surface
-        #     turbulent fluxes ~18% low → t_grnd too warm → ice formed too slowly.
-        if tgbef > T(TFRZ)
-            sqre0 = sqrt(max(z0mg * ust_lake[c] / kva, T(0.1)))   # HARD: constant 0.1 floor
-            z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
-            z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
-        else
-            z0hg = z0mg / exp(a_coef * (ust_lake[c] * z0mg / kva)^a_exp)
-            z0qg = z0hg
-        end
-        z0mg = max(z0mg, T(1.0e-10))   # HARD: 1e-10 m underflow guard (constant). At k=50 this floor was raised to log(2)/50 = 0.0139 m — 1.4e8x — so a LAKE got the roughness of a forest canopy, wrecking ustar and hence the sensible/latent heat fluxes.
-        z0hg = max(max(z0hg, T(1.0e-10)), T(MINZ0LAKE))   # HARD: constant floors
-        z0qg = max(max(z0qg, T(1.0e-10)), T(MINZ0LAKE))   # HARD: constant floors
-
-        # Reference displacement height (zero for lakes)
+        # Displacement height (zero for lakes)
         displa = zero(T)
 
-        # Monin-Obukhov initialization
-        zldis = forc_hgt_u - displa
-        zldis = max(zldis, z0mg + T(0.01))   # HARD
-        dth = thm - tgbef
-        dqh = forc_q[c] - qsat_water(tgbef, forc_pbot[c])
-        dthv = dth * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * dqh
-
-        # Initial Monin-Obukhov length + wind speed — CLM FrictionVelocityMod
-        # MoninObukIni (bulk-Richardson form). The previous initialization used
-        # obu = -ustar^3*thv/(vkc*grav*thvstar), which gives the WRONG SIGN for
-        # UNSTABLE conditions (it returned positive obu / the stable branch when the
-        # lake surface is warmer than the air, dthv<0). That collapsed ustar to ~0.01
-        # (rah ~ 1e3-1e4), drove the turbulent fluxes to ~0, and let the surface
-        # radiatively over-cool (TG 250 K vs Fortran 271 K). The Richardson form gives
-        # obu<0 + a convective wind speed for unstable, matching Fortran.
-        ustar = max(T(VKC) * ur / log(zldis / z0mg), T(0.001))  # overwritten in the iteration
+        # MoninObukIni (FrictionVelocityMod), bulk-Richardson form.
+        ustar = T(0.06)   # overwritten by FrictionVelocity on pass 1
         if dthv >= zero(T)
             um = max(ur, T(0.1))
         else
@@ -330,98 +311,42 @@ end
         rib = T(GRAV) * zldis * dthv / (thv * um^2)
         if rib >= zero(T)
             zeta = rib * log(zldis / z0mg) / (one(T) - T(5.0) * min(rib, T(0.19)))
-            zeta = clamp(zeta, T(0.01), T(ZETAMAX_LAKE))
+            zeta = min(T(ZETAMAX_LAKE), max(zeta, T(0.01)))
         else
             zeta = rib * log(zldis / z0mg)
-            zeta = clamp(zeta, T(-100.0), T(-0.01))
+            zeta = max(T(-100.0), min(zeta, T(-0.01)))
         end
         obu = zldis / zeta
 
         # ============================================================
-        # Phase 2: Stability iteration
+        # Phase 2: Stability iteration (F90:439-631)
         # ============================================================
-        t_grnd_new = tgbef
-        rah_c = one(T); raw_c = one(T); ram_c = one(T)   # converged resistances (set in loop)
-        # Converged profile coefficients + surface-air differences, carried OUT of
-        # the iteration for the 2-m diagnostics. Fortran computes t_ref2m in the
-        # loop that FOLLOWS the stability iteration (LakeFluxesMod.F90:708), using
-        # temp1/temp12m from the last FrictionVelocity call and dth/dqh as last set
-        # inside the iteration (F90:535-536) — i.e. BEFORE the Phase-3 freeze
-        # corrections adjust t_grnd. So these must be captured here, not recomputed
-        # from the corrected t_grnd.
+        # Fortran re-linearises the surface Newton solve EVERY pass about the latest
+        # ground temperature: `tgbef(c) = t_grnd(c)` at the top of the pass, stftg3
+        # from that tgbef, and qsatg/qsatgdT refreshed by QSat(t_grnd) at the end of
+        # the previous pass (F90:532). The port linearised every pass about the
+        # step's INPUT t_grnd with qsat frozen there, so a skin that moved several K
+        # within the step carried a stale qsat/derivative into its LH and Newton terms.
+        t_grnd_new = t_grnd[c]
+        tgbef = t_grnd_new
+        rah_c = one(T); raw_c = one(T); ram_c = one(T)
         temp1_c = one(T); temp2_c = one(T); temp12m_c = one(T); temp22m_c = one(T)
-        dth_c = zero(T); dqh_c = zero(T)
-        # Converged Monin-Obukhov length / stability parameter. Fortran keeps
-        # these as patch state (`obu`, `zeta` in LakeFluxesMod); the port dropped
-        # them on the floor, which is why the stability REGIME the lake was
-        # actually running in could not be observed from outside the kernel.
-        zeta_conv = zero(T)
+        dth_c = dth; dqh_c = dqh
+        zeta_conv = zeta
+        eflx_sh_grnd_p = zero(T); qflx_evap_soi_p = zero(T)
+        obuold = zero(T); nmozsgn = 0
 
         for iter in 1:niters
-            # Surface-conductivity branch, re-evaluated EACH iteration from the
-            # CURRENT ground temperature (t_grnd_new carries the previous iteration's
-            # solve, = tgbef on iteration 1). Fortran evaluates tksur inside the
-            # stability loop (LakeFluxesMod.F90:470) against the updating t_grnd(c):
-            # a lake that starts a step above freezing (cold-start 277 K) but whose
-            # skin cools below tfrz DURING the step must switch from the eddy
-            # conductivity savedtke1 to tkice mid-iteration. The port had computed
-            # tksur ONCE from the warm input t_grnd, so a freezing-in-step-1 lake kept
-            # molecular savedtke1 (0.57) instead of tkice (2.29) — welding the skin
-            # loosely to the 277 K water and over-cooling t_grnd (265 vs Fortran 271).
-            # From step 2 on the input is already < tfrz so this is unchanged.
-            if t_grnd_new > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl == 0
-                tksur = savedtke1[c]
-                tsur = t_lake[c, 1]
-            elseif snl == 0
-                tksur = T(TKICE)
-                tsur = t_lake[c, 1]
-            else
-                bw = (h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]) / dz[c, jtop]
-                tksur = T(TKAIR) + (T(7.75e-5) * bw + T(1.105e-6) * bw^2) * (T(TKICE) - T(TKAIR))
-                tsur = t_soisno[c, jtop]
-            end
-
-            # Aerodynamic resistances
-            zldis_u = forc_hgt_u - displa
-            zldis_t = forc_hgt_t - displa
-            zldis_q = forc_hgt_q - displa
-            zldis_u = max(zldis_u, z0mg + T(0.01))
-            zldis_t = max(zldis_t, z0hg + T(0.01))
-            zldis_q = max(zldis_q, z0qg + T(0.01))
-
-            # Stability parameter at each reference height.
-            #
-            # These are NOT clamped. The previous code clamped every zeta into
-            # [-100, ZETAMAX_LAKE=0.5] before evaluating the profile, which is
-            # Fortran's clamp on the zeta UPDATE (LakeFluxesMod.F90:544-551,
-            # applied below), not a clamp inside FrictionVelocity — CTSM's
-            # profile relations see the raw zldis/obu. Clamping here truncated
-            # exactly the strongly-convective range the four-regime branch exists
-            # to handle.
+            # ---- FrictionVelocity (FrictionVelocityMod.F90), all four regimes ----
+            zldis_u = hgt_u - displa
+            zldis_t = hgt_t - displa
+            zldis_q = hgt_q - displa
             zeta_u = zldis_u / obu
             zeta_t = zldis_t / obu
             zeta_q = zldis_q / obu
-
-            # Profile relations — ALL FOUR of CTSM's zeta stability regimes
-            # (FrictionVelocityMod.F90:847-861 momentum, :946-960 heat/moisture).
-            # The port previously implemented regime 2 (plain unstable) ONLY, and
-            # `stability_func1/2` clamp their argument at 0, so above neutral the
-            # correction silently vanished and the stable regimes were unreachable.
-            # A 273 K lake under 255 K air is strongly convective: the reference
-            # run sits in regime 1 (very unstable), where CTSM caps the log at the
-            # -zetat transition and adds a free-convection correction the port had
-            # no term for. See docs/LAKE_FLUX_RESIDUAL.md finding C.
             ustar = T(VKC) * um / mo_profile_denom_m(zeta_u, zldis_u, z0mg, obu)
-            ustar = max(ustar, T(0.001))   # HARD: constant 0.001 m/s floor. At k=50 the width 0.0139 m/s is 14x this floor and comparable to ustar itself (~0.03 m/s), so the lake friction velocity was inflated ~8% -> eflx_lh_grnd off by 4.7 W/m2.
-
-            # Transfer coefficients
             temp1 = T(VKC) / mo_profile_denom_h(zeta_t, zldis_t, z0hg, obu)
             temp2 = T(VKC) / mo_profile_denom_h(zeta_q, zldis_q, z0qg, obu)
-
-            # Same profile relations evaluated at 2 m (FrictionVelocityMod.F90:1010-1050).
-            # The 2-m reference height is 2 + z0, and Fortran short-circuits
-            # temp22m = temp12m when z0q == z0h (which is exactly the frozen-lake
-            # branch above, where z0qg is assigned from z0hg).
             zldis_2h = T(2.0) + z0hg
             temp12m = T(VKC) / mo_profile_denom_h(zldis_2h / obu, zldis_2h, z0hg, obu)
             if z0qg == z0hg
@@ -431,168 +356,143 @@ end
                 temp22m = T(VKC) / mo_profile_denom_h(zldis_2q / obu, zldis_2q, z0qg, obu)
             end
 
-            # Aerodynamic resistances
-            ram = one(T) / (ustar * T(VKC) / mo_profile_denom_m(zeta_u, zldis_u, z0mg, obu))
+            # ---- per-pass surface state (F90:460-487) ----
+            tgbef = t_grnd_new
+            if t_grnd_new > T(TFRZ) && t_lake[c, 1] > T(TFRZ) && snl == 0
+                tksur = savedtke1[c]
+                tsur = t_lake[c, 1]
+            elseif snl == 0
+                tksur = T(TKICE)
+                tsur = t_lake[c, 1]
+            else
+                bw = (h2osoi_ice[c, jtop] + h2osoi_liq[c, jtop]) / dz[c, jtop]
+                tksur = T(TKAIR) + (T(7.75e-5) * bw + T(1.105e-6) * bw * bw) * (T(TKICE) - T(TKAIR))
+                tsur = t_soisno[c, jtop]
+            end
+
+            # Aerodynamic resistances (F90:489-491)
+            ram = one(T) / (ustar * ustar / um)
             rah = one(T) / (temp1 * ustar)
             raw = one(T) / (temp2 * ustar)
-            ram = max(ram, one(T))
-            rah = max(rah, one(T))
-            raw = max(raw, one(T))
 
-            # Saturation specific humidity at surface
-            qsatg = qsat_water(tgbef, forc_pbot[c])
-            qsatgdT = qsat_water_dT(tgbef, forc_pbot[c])
-
-            # Newton-Raphson for surface temperature
-            stftg3 = T(EMG_LAKE) * T(SB) * tgbef^3
-
-            ax = betaprime * sabg +
-                 T(EMG_LAKE) * forc_lwrad[c] +
-                 T(3.0) * stftg3 * tgbef +
-                 forc_rho[c] * T(CPAIR) / rah * thm +
-                 tksur * tsur / dzsur -
-                 htvp * forc_rho[c] / raw * (qsatg - qsatgdT * tgbef - forc_q[c])
-
-            bx = T(4.0) * stftg3 +
-                 forc_rho[c] * T(CPAIR) / rah +
-                 htvp * forc_rho[c] / raw * qsatgdT +
-                 tksur / dzsur
-
-            bx = max(bx, T(1.0e-10))
+            # Newton solve for the skin temperature (F90:500-514)
+            stftg3 = T(EMG_LAKE) * T(SB) * tgbef * tgbef * tgbef
+            ax = betaprime * sabg + T(EMG_LAKE) * forc_lwrad[c] + T(3.0) * stftg3 * tgbef +
+                 forc_rho[c] * T(CPAIR) / rah * thm -
+                 htvp * forc_rho[c] / raw * (qsatg - qsatgdT * tgbef - forc_q[c]) +
+                 tksur * tsur / dzsur
+            bx = T(4.0) * stftg3 + forc_rho[c] * T(CPAIR) / rah +
+                 htvp * forc_rho[c] / raw * qsatgdT + tksur / dzsur
             t_grnd_new = ax / bx
 
-            # Surface fluxes
-            eflx_sh = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm) / rah
-            qflx_evap = forc_rho[c] * (qsatg + qsatgdT * (t_grnd_new - tgbef) - forc_q[c]) / raw
+            htvp = t_grnd_new > T(TFRZ) ? T(HVAP) : T(HSUB)
 
-            # Update Obukhov length
-            dth_new = thm - t_grnd_new
-            dqh_new = forc_q[c] - (qsatg + qsatgdT * (t_grnd_new - tgbef))
-            tstar = temp1 * dth_new
-            qstar = temp2 * dqh_new
+            # Surface fluxes, linearised about this pass's tgbef (F90:526-527)
+            eflx_sh_grnd_p = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm) / rah
+            qflx_evap_soi_p = forc_rho[c] * (qsatg + qsatgdT * (t_grnd_new - tgbef) - forc_q[c]) / raw
+
+            # Refresh qsat at the new skin temperature (F90:532-536)
+            (qsatg, _, qsatgdT, _) = qsat(t_grnd_new, forc_pbot[c])
+            dth = thm - t_grnd_new
+            dqh = forc_q[c] - qsatg
+
+            tstar = temp1 * dth
+            qstar = temp2 * dqh
             thvstar = tstar * (one(T) + T(0.61) * forc_q[c]) + T(0.61) * forc_th[c] * qstar
+            zeta = zldis * T(VKC) * T(GRAV) * thvstar / (ustar^2 * thv)
 
-            if abs(thvstar) > T(1e-10)
-                zeta_val = zldis_u * T(VKC) * T(GRAV) * thvstar / (ustar^2 * thv)
+            if zeta >= zero(T)
+                zeta = min(T(ZETAMAX_LAKE), max(zeta, T(0.01)))
+                um = max(ur, T(0.1))
             else
-                zeta_val = zero(T)
+                zeta = max(T(-100.0), min(zeta, T(-0.01)))
+                wc = T(BETA1) * (-T(GRAV) * ustar * thvstar * T(ZII_LAKE) / thv)^T(0.333)
+                um = sqrt(ur * ur + wc * wc)
             end
+            obu = zldis / zeta
+            obuold * obu < zero(T) && (nmozsgn += 1)
+            obuold = obu
 
-            if zeta_val >= zero(T)
-                zeta_val = clamp(zeta_val, T(0.01), T(ZETAMAX_LAKE))
-                um = max(ur, wind_min)
-            else
-                zeta_val = clamp(zeta_val, T(-100.0), T(-0.01))
-                wc = T(BETA1) * (-T(GRAV) * ustar * thvstar * T(1000.0) / thv)^(one(T)/T(3.0))
-                um = sqrt(ur^2 + wc^2)
-            end
-            obu = zldis_u / zeta_val
-            obu = clamp(obu, T(-1e4), T(1e4))
-            zeta_conv = zeta_val
-            rah_c = rah; raw_c = raw; ram_c = ram   # carry converged (log + stability) resistances
+            zeta_conv = zeta
+            rah_c = rah; raw_c = raw; ram_c = ram
             temp1_c = temp1; temp2_c = temp2; temp12m_c = temp12m; temp22m_c = temp22m
-            dth_c = dth_new
-            # Fortran's dqh for the diagnostics is forc_q - QSat(t_grnd) evaluated at
-            # the UPDATED ground temperature (F90:532-536), not the Newton-linearised
-            # qsatg + qsatgdT*dT that dqh_new above carries for the thvstar update.
-            dqh_c = forc_q[c] - qsat_water(t_grnd_new, forc_pbot[c])
+            dth_c = dth; dqh_c = dqh
 
-            # Update roughness lengths from the CURRENT (just-solved) ground
-            # temperature — Fortran recomputes z0 inside the loop against t_grnd(c)
-            # (LakeFluxesMod.F90:558), NOT the fixed input tgbef. The port gated this
-            # on tgbef, so a lake freezing during step 1 stayed on the unfrozen
-            # Charnock branch (z0mg ~3.9e-5) instead of switching to z0frzlake=1e-3,
-            # leaving rah ~2.4x too high and the skin decoupled from the air.
+            # Roughness update from the just-solved skin temperature (F90:558-617)
             if t_grnd_new > T(TFRZ) && snl == 0
-                # Fetch/depth-limited Charnock parameter (Vickers & Mahrt 1997 form,
-                # LakeFluxesMod). The previous code used the constant CUR0 (CURM=0),
-                # so cur*ustar^2/g was ~6x too small and z0mg collapsed toward the
-                # smooth-flow floor → rah too high.
                 cur = T(CUR0) + T(CURM) * exp(max(
-                          -(fetch * T(GRAV) / ustar^2)^(one(T)/T(3.0)) / T(FCRIT),
-                          -sqrt(lakedepth_c * T(GRAV) / ur^2)))
-                z0mg = max(max(T(MINZ0LAKE), T(CUS) * kva / max(ustar, T(1e-4))),
-                           cur * ustar^2 / T(GRAV))
-                sqre0 = sqrt(max(z0mg * ustar / kva, T(0.1)))
+                          -(fetch * T(GRAV) / ustar / ustar)^(one(T) / T(3.0)) / T(FCRIT),
+                          -(lakedepth_c * T(GRAV) / ur / ur)^T(0.5)))
+                kva = T(KVA0) * (t_grnd_new / T(KVA0TEMP))^T(1.5) * T(KVA0PRES) / forc_pbot[c]
+                z0mg = max(T(CUS) * kva / max(ustar, T(1.0e-4)), cur * ustar * ustar / T(GRAV))
+                z0mg = max(z0mg, T(MINZ0LAKE))
+                sqre0 = (max(z0mg * ustar / kva, T(0.1)))^T(0.5)
                 z0hg = z0mg * exp(-T(VKC) / T(PRN_AIR) * (T(4.0) * sqre0 - T(3.2)))
                 z0qg = z0mg * exp(-T(VKC) / T(SCH_WATER) * (T(4.0) * sqre0 - T(4.2)))
-                z0mg = max(z0mg, T(1.0e-10))   # HARD: 1e-10 m underflow guard (constant). At k=50 this floor was raised to log(2)/50 = 0.0139 m — 1.4e8x — so a LAKE got the roughness of a forest canopy, wrecking ustar and hence the sensible/latent heat fluxes.
-                z0hg = max(z0hg, T(1.0e-10))
-                z0qg = max(z0qg, T(1.0e-10))
-            else
-                # Frozen surface (LakeFluxesMod.F90:585-596): snow → 0.00085 m, else
-                # z0frzlake, with the ZengWang2007 heat/vapour roughness using the
-                # ITERATION's ustar (not the carried ust_lake of the pre-loop seed).
-                z0mg = snl < 0 ? T(0.00085) : T(z0frzlake)
-                z0hg = z0mg / exp(a_coef * (ustar * z0mg / kva)^a_exp)
+                z0qg = max(z0qg, T(MINZ0LAKE))
+                z0hg = max(z0hg, T(MINZ0LAKE))
+            elseif snl == 0
+                z0mg = T(z0frzlake)
+                z0hg = z0mg / exp(a_coef * (ustar * z0mg / T(NU_PARAM_LAKE))^a_exp)
                 z0qg = z0hg
-                z0mg = max(z0mg, T(1.0e-10))
-                z0hg = max(max(z0hg, T(1.0e-10)), T(MINZ0LAKE))
-                z0qg = max(max(z0qg, T(1.0e-10)), T(MINZ0LAKE))
+            else
+                # snow layers: z0mg keeps its pre-loop zsno (use_z0m_snowmelt=.false.)
+                z0hg = z0mg / exp(a_coef * (ustar * z0mg / T(NU_PARAM_LAKE))^a_exp)
+                z0qg = z0hg
             end
+            hgt_u = forc_hgt_u_grc[g] + z0mg
+            hgt_t = forc_hgt_t_grc[g] + z0hg
+            hgt_q = forc_hgt_q_grc[g] + z0qg
+
+            # Fortran drops a patch from further passes once obu has changed sign
+            # three times (F90:625-631).
+            nmozsgn >= 3 && break
         end
 
         # ============================================================
-        # Phase 3: Temperature corrections
+        # Phase 3: freeze / convective-mixing resets (F90:654-674). The fluxes are
+        # re-evaluated ONLY when t_grnd is reset, linearised about the pre-reset skin
+        # temperature with the qsat refreshed there; otherwise the last pass's
+        # fluxes stand. (The port recomputed both fluxes from a nonlinear qsat at the
+        # final temperature on every step.)
         # ============================================================
-
-        # Prevent unfreezing when lake/snow is frozen
         if (snl < 0 || t_lake[c, 1] <= T(TFRZ)) && t_grnd_new > T(TFRZ)
+            t_grnd_temp = t_grnd_new
             t_grnd_new = T(TFRZ)
-        end
-
-        # Convective mixing correction
-        if t_lake[c, 1] > t_grnd_new && t_grnd_new > T(TDMAX_LAKE)
+            eflx_sh_grnd_p = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm) / rah_c
+            qflx_evap_soi_p = forc_rho[c] * (qsatg + qsatgdT * (t_grnd_new - t_grnd_temp) - forc_q[c]) / raw_c
+        elseif (t_lake[c, 1] > t_grnd_new && t_grnd_new > T(TDMAX_LAKE)) ||
+               (t_lake[c, 1] < t_grnd_new && t_lake[c, 1] > T(TFRZ) && t_grnd_new < T(TDMAX_LAKE))
+            t_grnd_temp = t_grnd_new
             t_grnd_new = t_lake[c, 1]
-        elseif t_lake[c, 1] < t_grnd_new &&
-               t_lake[c, 1] > T(TFRZ) && t_grnd_new < T(TDMAX_LAKE)
-            t_grnd_new = t_lake[c, 1]
+            eflx_sh_grnd_p = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm) / rah_c
+            qflx_evap_soi_p = forc_rho[c] * (qsatg + qsatgdT * (t_grnd_new - t_grnd_temp) - forc_q[c]) / raw_c
         end
+        htvp = t_grnd_new > T(TFRZ) ? T(HVAP) : T(HSUB)
 
-        # Update ground temperature
         t_grnd[c] = t_grnd_new
 
         # ============================================================
-        # Phase 4: Final flux calculations
+        # Phase 4: final fluxes (F90:685-705)
         # ============================================================
-
-        # Recalculate fluxes at final temperature
-        qsatg_final = qsat_water(t_grnd_new, forc_pbot[c])
-        thm_local = forc_t[c] + T(0.0098) * forc_hgt_t_grc[g]
-
-        # Use the converged resistances from the stability iteration (log profile +
-        # stability corrections). The previous rah_final = zldis_t/(vkc*ustar) dropped
-        # the log(z/z0) factor and the stability functions, inflating the resistance.
-        rah_final = rah_c
-        raw_final = raw_c
-
-        eflx_sh_grnd_p = forc_rho[c] * T(CPAIR) * (t_grnd_new - thm_local) / rah_final
-        qflx_evap_soi_p = forc_rho[c] * (qsatg_final - forc_q[c]) / raw_final
-
-        # Outgoing longwave
         eflx_lwrad_out_p = (one(T) - T(EMG_LAKE)) * forc_lwrad[c] + T(EMG_LAKE) * T(SB) * t_grnd_new^4
 
-        # Ground heat flux (energy balance residual)
-        eflx_soil_grnd_p = betaprime * sabg + forc_lwrad[c] - eflx_lwrad_out_p -
-                         eflx_sh_grnd_p - htvp * qflx_evap_soi_p
+        # eflx_soil_grnd uses the FULL sabg (F90:691) so the energy-balance check
+        # closes; eflx_gnet (F90:743) is the skin flux into the lake, betaprime*sabg.
+        eflx_soil_grnd_p = sabg + forc_lwrad[c] - eflx_lwrad_out_p -
+                           eflx_sh_grnd_p - htvp * qflx_evap_soi_p
 
-        # Store results
         d.eflx_sh_tot[p] = eflx_sh_grnd_p
         d.eflx_sh_grnd[p] = eflx_sh_grnd_p
         d.eflx_lh_tot[p] = htvp * qflx_evap_soi_p
         d.eflx_lh_grnd[p] = htvp * qflx_evap_soi_p
         d.eflx_lwrad_out[p] = eflx_lwrad_out_p
-        # net longwave is upward-positive [+ = to atm] = out - in (LakeFluxesMod.F90:772,
-        # matching soil_fluxes). The previous forc_lwrad - out had the WRONG SIGN, which
-        # made the errlon balance-check diagnostic = 2*(out - forc) instead of ~0 for lakes.
+        # net longwave is upward-positive [+ = to atm] = out - in (LakeFluxesMod.F90:772).
         d.eflx_lwrad_net[p] = eflx_lwrad_out_p - forc_lwrad[c]
         d.eflx_soil_grnd[p] = eflx_soil_grnd_p
-        # eflx_gnet = the actual heat flux from the ground interface into the lake (NOT the
-        # penetrating solar) — LakeFluxesMod.F90:743, identical formula to eflx_soil_grnd_p.
-        # lake_temperature reads eflx_gnet as `fin` (its top-layer BC); the port computed this
-        # value but only stored it as eflx_soil_grnd, leaving eflx_gnet=0 → the lake surface
-        # never cooled t_lake[1] (stuck at 277 → never froze → LAKEICE never formed). Wire it.
-        d.eflx_gnet[p] = eflx_soil_grnd_p
+        # eflx_gnet: lake_temperature reads it as `fin`, its top-layer BC.
+        d.eflx_gnet[p] = betaprime * sabg + forc_lwrad[c] -
+                         (eflx_lwrad_out_p + eflx_sh_grnd_p + htvp * qflx_evap_soi_p)
 
         d.qflx_evap_soi[p] = qflx_evap_soi_p
         d.qflx_evap_tot[p] = qflx_evap_soi_p
@@ -645,6 +545,10 @@ end
         ks_col[c] = sinlat > zero(T) ? T(6.6) * sqrt(sinlat) * u2m^T(-1.84) : zero(T)
 
         htvp_col[c] = htvp
+        # Carry the column roughness lengths to the next step (F90:764-766).
+        z0mg_col[c] = z0mg
+        z0hg_col[c] = z0hg
+        z0qg_col[c] = z0qg
     end
 end
 
@@ -718,7 +622,8 @@ function lake_fluxes!(temperature::TemperatureData,
     # a_coef/a_exp = the BareGround/ZengWang2007 drag params (clm5_params.nc), shared with the
     # canopy roughness formula. Used for the FROZEN-lake heat-roughness z0hg (LakeFluxesMod 'ZengWang2007').
     _lake_fluxes_kernel!(be)(dv, mask_lakep, nlevsno_val, niters, FT(dtime),
-                             FT(canopy_fluxes_params.a_coef), FT(canopy_fluxes_params.a_exp);
+                             FT(canopy_fluxes_params.a_coef), FT(canopy_fluxes_params.a_exp),
+                             FT(frictionvel.zsno);
                              ndrange = np)
     KA.synchronize(be)
 

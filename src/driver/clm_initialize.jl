@@ -552,12 +552,27 @@ function clm_initialize!(;
     end
 
     # ---- Step 15e: Initialize snow cover fraction method ----
+    # accum_factor / n_melt_coef come from the param file (SnowCoverFraction
+    # SwensonLawrence2012Mod ReadParams). They were wired only in clm_run!, so any
+    # caller of clm_initialize! + clm_drv! (the lake / single-step harnesses) ran
+    # the 0.1 / 200 defaults -- e.g. Bow's accum_factor is 0.00176, so new snow on
+    # the Bow lake got a frac_sno ~60x CTSM's.
+    scf_accum, scf_nmelt = 0.1, 200.0
+    try
+        NCDatasets.Dataset(paramfile) do ds
+            haskey(ds, "accum_factor") && (scf_accum = Float64(ds["accum_factor"][1]))
+            haskey(ds, "n_melt_coef") && (scf_nmelt = Float64(ds["n_melt_coef"][1]))
+        end
+    catch e
+        @warn "snow-cover-fraction param wiring failed: $e" maxlog=1
+    end
     scf = SnowCoverFractionSwensonLawrence2012()
     snow_cover_fraction_init!(scf, nc;
         col_lun_itype = inst.column.lun_itype,
         col_gridcell = inst.column.gridcell,
         col_topo_std = inst.column.topo_std,
-        int_snow_max = int_snow_max)
+        int_snow_max = int_snow_max,
+        accum_factor = scf_accum, n_melt_coef = scf_nmelt)
     inst.scf_method = scf
 
     # ---- Step 15f: Initialize decomposition cascade for CN mode ----
