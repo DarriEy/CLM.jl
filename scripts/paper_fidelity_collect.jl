@@ -71,9 +71,9 @@ function run_cn(dir)
     end
 end
 
-const SUMMER = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
-const CLMBGC = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup"
-const AUTUMN = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_autumn"
+const SUMMER = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
+const CLMBGC = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup"
+const AUTUMN = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_autumn"
 
 # The BGC summer window (model 2202, forcing 2002) is staged contiguously across
 # two dirs: bgc_ref_summer holds n1757845..1757872, the top-level clm_bgc_spinup

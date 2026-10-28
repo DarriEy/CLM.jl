@@ -37,7 +37,7 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
-const DUMPDIR_PEAT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firepeat"
+const DUMPDIR_PEAT = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bow_ref_firepeat"
 const N0    = 4720
 const NLAST = 4888
 const DATE0 = DateTime(2003, 7, 16, 16)
@@ -48,9 +48,9 @@ const FFORCING2002 = joinpath(dirname(FFORCING), "clmforc.2002.nc")
 const FORCE_DATE0  = DateTime(2002, 7, 16, 15)
 peat_forcing_date(n::Int) = FORCE_DATE0 + Hour(n - N0)
 
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
-const FIRED = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/firedata"
+const FIRED = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/firedata"
 const FLNFM = joinpath(FIRED, "clmforc.UNIFORM_lnfm_0.9x1.25_CLMjl-parity.nc")
 const FHDM  = joinpath(FIRED, "clmforc.UNIFORM_hdm_0.9x1.25_CLMjl-parity.nc")
 _dv(ds, n) = haskey(ds, n) ? Array(ds[n]) : nothing

@@ -15,8 +15,8 @@
 # ==========================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const AUD_SUM   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
-const AUD_AUT   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_autumn"
+const AUD_SUM   = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
+const AUD_AUT   = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_autumn"
 const AUD_BASE  = 1753153
 const AUD_SUM_N0, AUD_SUM_NSTEPS = 1757845, 28
 const AUD_AUT_N0, AUD_AUT_NSTEPS = 1759897, 480

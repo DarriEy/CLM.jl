@@ -1,7 +1,7 @@
 # Scope the sminn drift: per-step sminn_vr change (Julia vs Fortran before/after
 # dumps) + Julia soil-BGC N-flux terms, to localize which source term drifts.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const NSTEP = 1757852
 const NL = 5   # show top 5 decomp layers
 

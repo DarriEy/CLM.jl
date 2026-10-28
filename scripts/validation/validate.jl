@@ -51,7 +51,7 @@ struct RunBundle
 end
 
 # Symfluence domain layout (shared with scripts/run_clm_streamflow.jl).
-const SYMROOT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+const SYMROOT = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))"
 # Validation-domain symbol → on-disk domain dir name. :bow is special-cased
 # (calibrated parity paths in fortran_parity_common.jl), so it is not listed here.
 const DOMAIN_DIRNAME = Dict(

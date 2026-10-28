@@ -24,8 +24,8 @@ function setup_forcing_conv!(a2l, T_forc, ng)
     end
 end
 
-fsurdat = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-paramfile = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+fsurdat = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
+paramfile = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
 
 T_base = 270.0
 config = CLM.CLMDriverConfig()

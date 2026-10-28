@@ -28,7 +28,7 @@
 
 using NCDatasets
 
-const DEFAULT_SRC = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/" *
+const DEFAULT_SRC = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/" *
                     "domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
 
 const OUTDIR = joinpath(@__DIR__, "..", "test_inputs", "glacier")

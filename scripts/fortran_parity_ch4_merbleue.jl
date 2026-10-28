@@ -51,9 +51,9 @@ using Printf
 # scores CH4 transport, not CN conservation.
 CLM.cn_balance_check_enabled!(false)
 
-const MERB       = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Peatland_MerBleue_Canada"
+const MERB       = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Peatland_MerBleue_Canada"
 const MERB_PAR   = joinpath(MERB, "settings/CLM/parameters")
-const DUMPDIR_CH4 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/merbleue_ref_ch4"
+const DUMPDIR_CH4 = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/merbleue_ref_ch4"
 const M_FSURDAT  = joinpath(MERB_PAR, "surfdata_clm.nc")
 const M_FPARAM   = joinpath(MERB_PAR, "clm5_params.nc")
 const M_FORCING  = joinpath(MERB, "data/forcing/CLM_input/clmforc.2017.nc")
@@ -62,7 +62,7 @@ const NLAST = 4888
 # model year 2017 maps DIRECTLY to forcing year 2017 (year_align=2016, start
 # 2017-01-01), no recycle. n4720 end-of-step = 2017-07-16 16:00.
 const DATE0 = DateTime(2017, 7, 16, 16)
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_ZERO_0.9x1.25_yr2000_CLMjl-parity.nc"
 # MerBleue lnd_in calibration (differs from Bow)
 const M_BASEFLOW = 0.001

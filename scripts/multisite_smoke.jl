@@ -14,7 +14,7 @@
 using CLM, NCDatasets, Dates, Printf
 
 const DATA = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))")
 const ARI = joinpath(DATA, "domain_Aripuana_Amazon")
 const FS  = joinpath(ARI, "settings/CLM/parameters/surfdata_clm.nc")
 const FP  = joinpath(ARI, "settings/CLM/parameters/clm5_params.nc")

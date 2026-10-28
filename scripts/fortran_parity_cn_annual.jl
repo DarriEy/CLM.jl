@@ -128,7 +128,7 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
 
-const CN_DIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_cn_run"
+const CN_DIR  = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_cn_run"
 const CN_RST  = joinpath(CN_DIR, "Bow_at_Banff_lumped.clm2.r.2202-01-01-00000.nc")
 const CN_H0   = joinpath(CN_DIR, "Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.nc")
 const CN_FFORC = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2003.nc")  # 2003 forcing
@@ -151,8 +151,8 @@ function run_cn_annual(; ndays::Int = 365)
     start_date = DateTime(FORCE_YEAR, 1, 1)
     CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
     CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
-    snowopt = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-    snowage = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+    snowopt = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+    snowage = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat = FSURDAT, paramfile = FPARAM,
         start_date = start_date, dtime = 3600, use_cn = true, use_luna = true,
         use_bedrock = true, use_aquifer_layer = false, h2osfcflag = 0,

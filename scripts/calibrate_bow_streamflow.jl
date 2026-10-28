@@ -14,7 +14,7 @@ using Statistics
 using LinearAlgebra
 using Printf
 
-const DATA_DIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const DATA_DIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped"
 const FSURDAT = joinpath(DATA_DIR, "settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = joinpath(DATA_DIR, "settings/CLM/parameters/clm5_params.nc")
 const FORCING = joinpath(DATA_DIR, "data/forcing/CLM_input/clmforc.2000_2004_spinup.nc")

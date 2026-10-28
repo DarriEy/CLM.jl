@@ -35,7 +35,7 @@
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const AUT_DIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_autumn"
+const AUT_DIR  = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_autumn"
 const AUT_BASE = 1753153            # nstep -> DateTime(2202,1,1) + Hour(n - BASE)
 const TRIGGER  = 1759931            # 2202-10-10 10:00 : offset_flag 0 -> 1
 const RAMP_END = 1760291            # 2202-10-25 10:00 : offset_flag 1 -> 0

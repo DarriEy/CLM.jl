@@ -8,6 +8,12 @@ The goal is full process fidelity, GPU execution, and differentiability via AD.
 The original Fortran CLM source is at:
 `/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/`
 
+Scripts and tests take their data roots from env vars, defaulting to the original
+laptop paths above: `SYMFLUENCE_DATA` (domains, `clm_*` Fortran references, `installs/`),
+`CESM_INPUTDATA` (CTSM inputdata), `CLM_SCRATCH` (Aripuanã scratch data). On a new machine,
+point `SYMFLUENCE_DATA` at a root holding `installs/` plus the Drive-migrated domains
+(see `MANIFEST.md` in the Drive copy of `SYMFLUENCE_data`).
+
 ## Architecture & Conventions
 
 ### Module Structure

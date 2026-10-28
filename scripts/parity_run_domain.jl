@@ -26,7 +26,7 @@ const DATA = get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMF
 
 # SNICAR optics/aging (shared); prefer the local copy, fall back to projects.
 _snicar(f) = let d1 = "$DATA/installs/cesm-inputdata/lnd/clm2/snicardata",
-                 d2 = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata"
+                 d2 = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata"
     isfile(joinpath(d1, f)) ? joinpath(d1, f) : joinpath(d2, f)
 end
 

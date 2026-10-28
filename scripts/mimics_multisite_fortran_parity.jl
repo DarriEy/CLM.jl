@@ -23,7 +23,7 @@
 # =============================================================================
 using CLM, NCDatasets, Printf
 
-const PARAM = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/cesm-inputdata/lnd/clm2/paramdata/clm50_params.c260305.nc"
+const PARAM = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/installs/cesm-inputdata/lnd/clm2/paramdata/clm50_params.c260305.nc"
 
 struct Site; name::String; run::String; h0::String; rest::String; surf::String; steps::Vector{Int}; end
 const SITES = [
@@ -31,13 +31,13 @@ const SITES = [
        "/private/tmp/claude-501/mimics_bow_run",
        "Bow_at_Banff_lumped.clm2.h0.2002-07-16-00000.nc",
        "Bow_at_Banff_lumped.clm2.r.2002-07-16-57600.nc",
-       "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters/surfdata_clm.nc",
+       "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters/surfdata_clm.nc",
        [4704, 4705, 4706]),
   Site("Aripuana (wet tropical)",
        "/private/tmp/claude-501/mimics_ari_run",
        "Aripuana_Amazon.clm2.h0.2002-01-01-00000.nc",
        "Aripuana_Amazon.clm2.r.2002-01-03-00000.nc",
-       "/Users/darri.eythorsson/projects/scratch/aripuana_data/params/surfdata_clm.nc",
+       "$(get(ENV, "CLM_SCRATCH", "/Users/darri.eythorsson/projects/scratch"))/aripuana_data/params/surfdata_clm.nc",
        [43, 44, 45]),
 ]
 

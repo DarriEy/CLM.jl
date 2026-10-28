@@ -62,7 +62,7 @@
 using CLM, Printf, Dates, NCDatasets
 const _C = CLM
 
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+const DATA = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))"
 # The site the Fortran case runs (scripts/validation/fates_fortran_parity/setup_case.sh):
 # the proven Bow-at-Banff single-point settings dir + its local ERA5 clmforc.YYYY.nc.
 const SITEDIR   = get(ENV, "FATES_SITEDIR", "$DATA/domain_Bow_at_Banff_lumped_era5/settings/CLM")

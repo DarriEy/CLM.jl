@@ -34,10 +34,10 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
-const DUMPDIR_SUMMER = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_ndep_summer"
-const H1FILE = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_ref_water_summer/" *
+const DUMPDIR_SUMMER = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_ndep_summer"
+const H1FILE = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_ref_water_summer/" *
                "Bow_at_Banff_lumped.clm2.h1.2202-07-16-61200.nc"
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
 
 const N0   = 1757873                       # nstep of h1 record 1

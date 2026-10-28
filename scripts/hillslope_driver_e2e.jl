@@ -8,10 +8,10 @@ using Dates, Printf, NCDatasets, Statistics
 
 const FSURDAT = "/private/tmp/claude-501/hillslope_fortran_run/surfdata_aripuana_hillslope.nc"
 const HILLF   = "/private/tmp/claude-501/hillslope_aripuana_synthetic_c.nc"
-const PARAMF  = "/Users/darri.eythorsson/projects/scratch/aripuana_data/params/clm5_params.nc"
-const FORC    = "/Users/darri.eythorsson/projects/scratch/aripuana_data/forcing/clmforc.2002.nc"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const PARAMF  = "$(get(ENV, "CLM_SCRATCH", "/Users/darri.eythorsson/projects/scratch"))/aripuana_data/params/clm5_params.nc"
+const FORC    = "$(get(ENV, "CLM_SCRATCH", "/Users/darri.eythorsson/projects/scratch"))/aripuana_data/forcing/clmforc.2002.nc"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 const FDUMP   = "/private/tmp/claude-501/hillslope_fortran_run/hillslope_aripuana_SP_fortran_dump.h0.nc"
 const AREA_KM2 = 12259.269   # Fortran grc%area (from ESMF mesh)
 

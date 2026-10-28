@@ -6,10 +6,10 @@ using CLM
 using Dates, Printf
 
 const FSURDAT = "/private/tmp/claude-501/hillslope_fortran_run/surfdata_aripuana_hillslope.nc"
-const PARAMF  = "/Users/darri.eythorsson/projects/scratch/aripuana_data/params/clm5_params.nc"
-const FORC    = "/Users/darri.eythorsson/projects/scratch/aripuana_data/forcing/clmforc.2002.nc"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const PARAMF  = "$(get(ENV, "CLM_SCRATCH", "/Users/darri.eythorsson/projects/scratch"))/aripuana_data/params/clm5_params.nc"
+const FORC    = "$(get(ENV, "CLM_SCRATCH", "/Users/darri.eythorsson/projects/scratch"))/aripuana_data/forcing/clmforc.2002.nc"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 outfile = length(ARGS) >= 1 ? ARGS[1] : "/tmp/default_run.txt"
 
 nsteps = 24; dtime = 1800

@@ -27,7 +27,7 @@ using NCDatasets
 using Printf
 
 const BASE = length(ARGS) >= 1 ? ARGS[1] :
-    "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc"
+    "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/surfdata_esmf/ctsm5.4.0/surfdata_ne3np4_hist_2000_78pfts_c251022.nc"
 const OUT  = length(ARGS) >= 2 ? ARGS[2] :
     "/private/tmp/claude-501/hillslope_ne3np4_synthetic_c.nc"
 

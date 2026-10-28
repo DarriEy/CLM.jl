@@ -13,9 +13,9 @@ include(joinpath(@__DIR__, "gpu_backends.jl"))
 include(joinpath(@__DIR__, "gpu_adapt.jl"))
 mfm(x) = mf(device_array_type(), x)
 const FSURDAT = get(ENV, "CLM_FSURDAT",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
 
 function setup_forcing!(a2l, T0, ng)
     for g in 1:ng

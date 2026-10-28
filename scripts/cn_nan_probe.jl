@@ -1,7 +1,7 @@
 # Localize the post-step CN NaN: run one use_cn step, then scan the CN flux
 # chain (photosynthesis -> allocation -> decomposition) for NaN counts.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const BGC_DUMPDIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_dumps_2202"
+const BGC_DUMPDIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_dumps_2202"
 const NSTEP = 1753153
 
 nanc(a) = count(isnan, Array(a))

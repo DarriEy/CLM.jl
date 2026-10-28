@@ -23,7 +23,7 @@
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const COLD_DUMP = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_cn_coldstart/pdump_before_step_n0.nc"
+const COLD_DUMP = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_cn_coldstart/pdump_before_step_n0.nc"
 
 _rel(f, j) = abs(f - j) / (1.0 + max(abs(f), abs(j)))
 

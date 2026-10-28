@@ -1,8 +1,8 @@
 using CLM, NCDatasets, Dates, Statistics, Printf
 
-const BASE_PF = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
-const BASE_SF = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
-const FORCING = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2000_2004_spinup.nc"
+const BASE_PF = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc"
+const BASE_SF = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
+const FORCING = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2000_2004_spinup.nc"
 
 const DDS = Dict{String,Float64}(
     "baseflow_scalar"=>0.002212,"fff"=>0.10915,"wimp"=>0.01033,
