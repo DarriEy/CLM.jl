@@ -208,7 +208,7 @@ Adapt.@adapt_structure _FlexAllocIn
         end
 
         is_woody = woody[ivt] == one(T)
-        is_crop  = ivt >= npcropmin
+        is_crop  = itype[p] >= npcropmin   # 0-based compare (ivt is 1-based): itype 16 is a GENERIC crop
         crop_alive = is_crop && (croplive[p] != zero(eltype(croplive))) &&
                      !isnan(aleaf[p])
 

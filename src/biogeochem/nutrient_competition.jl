@@ -310,7 +310,7 @@ Adapt.@adapt_structure _CnAllocIn
         cndw = deadwdcn[ivt]
         fcur = fcur_arr[ivt]
 
-        is_crop = ivt >= npcropmin
+        is_crop = itype[p] >= npcropmin   # 0-based compare (ivt is 1-based): itype 16 is a GENERIC crop
         crop_alive = is_crop && (croplive[p] != zero(eltype(croplive))) && !isnan(aleaf[p])
 
         if is_crop  # skip 2 generic crops

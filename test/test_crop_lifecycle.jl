@@ -24,10 +24,9 @@ using CLM
 #     20-yr running means), which is not reconstructible from the dumps. Here
 #     the planting conditions are synthesized; the date is an input, not an
 #     output under test.
-#   * vernalization!. The reference has NO winter-wheat CFT (no itype 21/22) and
-#     its cumvd/hdidx are NaN on every patch. That path is wired but UNVALIDATED.
-#   * n_soyfix!. SOYFIXN == 0 in BOTH reference windows, so there is no non-zero
-#     ground truth; it is deliberately left unwired.
+#   * vernalization! and n_soyfix! -- not in THIS reference (no winter-wheat CFT;
+#     SOYFIXN == 0). Both are validated against a later ctsm5.3.012 reference in
+#     test/test_crop_tails_parity.jl (docs/CROP_LIFECYCLE_MAP.md §3j/§3k).
 # ============================================================================
 
 @testset "Crop lifecycle vs Fortran crop reference" begin
