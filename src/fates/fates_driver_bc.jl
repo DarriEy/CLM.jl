@@ -698,10 +698,17 @@ Returns `inst`. Gated by the caller behind `config.use_fates`.
 """
 function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
                                     nlevdecomp::Int, use_fates_bgc::Bool = false,
-                                    fire_weather::Union{NamedTuple,Nothing} = nothing)
+                                    fire_weather::Union{NamedTuple,Nothing} = nothing,
+                                    date::Union{Nothing,NTuple{4,Int}} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     col = inst.column
+
+    # Fortran `dynamics_driv` opens with `call GetAndSetTime` (clmfates_interfaceMod
+    # .F90:1068): the FATES clock (day_of_year, model_day, current date) advances every
+    # day. `date = (year, mon, day, tod)` from the host; `nothing` (unit-test fixtures
+    # driving the daily step directly) leaves the clock where it is.
+    date === nothing || fates_get_and_set_time!(date...)
 
     # 0. CNP: parse the nutrient-acquisition boundary conditions out to the cohorts
     #    BEFORE the demographic step (sets cohort daily_n/p_demand + daily_*_uptake
