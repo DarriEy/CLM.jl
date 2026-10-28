@@ -672,7 +672,11 @@ function cn_driver_no_leaching!(
                 days_per_year=dayspyr,
                 dt=dt,
                 zsoi_vals=zsoi_vals,
-                col_dz=_col_dz)
+                col_dz=_col_dz,
+                # FATES owns CWD: without this the CWD->litter pathfrac/rf kernel
+                # wrote at cascade index i_cwdl3 - 1 = -1 under FATES soil BGC (an
+                # out-of-bounds @inbounds store that corrupted the heap).
+                use_fates=config.use_fates)
         end
 
         # 2. Potential decomposition and mineral N flux
