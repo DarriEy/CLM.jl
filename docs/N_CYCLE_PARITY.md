@@ -313,3 +313,31 @@ Julia:
 julia --project=. scripts/fortran_parity_ncycle.jl summer 5
 julia --project=. scripts/fortran_parity_ncycle.jl autumn 5
 ```
+
+---
+
+## 8. Annual axis (`fortran_parity_cn_annual.jl`), 2026-10-28
+
+The year-long Bow CN run is no longer blocked. It runs PHS on, starting from the
+2202-01-01 BGC restart (ZERO ndep, clmforc.2003 via `year_align = 2201`, daily-mean
+h0 regenerated with the pristine ctsm5.3.012 `cesm.exe`; the recipe is in
+`scripts/validation/fortran_pdump/regen_parity_references.sh`). Over all 8,760 steps,
+`CN_NANSCAN=1` finds no non-finite value. The PHS-on-frozen-soil NaN was the
+night-branch `qflx_tran_veg` drop that `6238f44` fixed; `test/test_phs_night_frozen.jl`
+pins it.
+
+| field | worst monthly rel (`|J−F|/(1+|F|)`) |
+|---|---|
+| TOTSOMC / TOTSOMN | 9.5e-6 / 1.1e-5 |
+| TOTECOSYSC | 4.5e-4 |
+| SMINN | 1.2e-2 (Julia +1.2% by Dec) |
+| TG | 2.4e-3 |
+| EFLX_LH_TOT | 0.11 (Aug) |
+| TLAI (Jan–Sep) | 2.7e-3 |
+| GPP | Jun −6.6% (ratio) |
+| LEAFC / TLAI / TOTVEGC (Oct–Dec) | **diverge**: no autumn leaf offset in Julia |
+
+The open item is that the season-deciduous grass (p3) never sheds its leaves in Julia.
+In Fortran its TLAI falls from 0.111 to 0.030 over October and November; in Julia it
+stays near 0.106 (LEAFC in November is 16.0 vs 4.45). This is a phenology-offset gap
+and is separate from PHS and the N cycle.

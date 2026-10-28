@@ -15,7 +15,7 @@ namelist and instrumented via native history (`hist_dov2xy=.false.`, `hist_nhtfr
 | MerBleue | boreal peatland | CLM_input |
 | US Plains | temperate cropland (CFT) | CLM_input |
 
-Blocked (forcing not on disk): Krycklan (boreal), Stillwater.
+Blocked (forcing not on disk): Krycklan (boreal). (Stillwater: forcing staged; single-step and 24-step Fortran parity run as of 2026-10-28; see HANDOFF §6 item 5.)
 
 ## Scorecard
 | Subsystem | Site(s) | Verdict | Harness |
