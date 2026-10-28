@@ -679,6 +679,13 @@ function clm_drv!(config::CLMDriverConfig,
                   "soil decomposition cascade, which this instance does not have. Build it " *
                   "with clm_initialize!(use_fates=true), or pass " *
                   "CLMDriverConfig(use_fates=true, use_fates_bgc=false).")
+        # The FATES SP control flag (set at clm_fates_init!) and the driver's SP branch
+        # (host satellite phenology) must agree, or FATES would read a stale LAI.
+        inst.fates !== nothing && hlm_use_sp[] != _ctrl_unset_int &&
+            (hlm_use_sp[] == itrue) != config.use_fates_sp &&
+            error("clm_drv!: CLMDriverConfig(use_fates_sp=$(config.use_fates_sp)) does " *
+                  "not match the FATES instance (clm_initialize!(use_fates_sp=" *
+                  "$(hlm_use_sp[] == itrue)))")
         return GPUArraysCore.@allowscalar clm_drv_core!(config, inst, filt,
             filt_inactive_and_active, bounds_proc, doalb, nextsw_cday, declinp1, declin,
             obliqr, rstwr, nlend, rdate, rof_prognostic, nstep, is_first_step,
@@ -2446,7 +2453,13 @@ function clm_drv_core!(config::CLMDriverConfig,
                              pch, filt.nolakep, bc_patch)
     end
     if config.use_fates_sp && doalb
-        # Placeholder: SatellitePhenology!(bc, ...) [FATES-SP satellite phenology]
+        # FATES-SP (clm_driver.F90:1052): SatellitePhenology over ALL soil patches,
+        # active and inactive — FATES reads HLM PFT ft's LAI from patch patchi+ft
+        # whatever that patch's current weight. use_fates_sp leaves elai/esai/
+        # frac_veg_nosno_alb to FATES.
+        satellite_phenology!(inst.satellite_phenology, cs, wdb,
+                             pch, filt_inactive_and_active.soilp, bc_patch;
+                             use_fates_sp=true)
     end
 
     # Dry deposition velocity — WIRED (only if n_drydep > 0)

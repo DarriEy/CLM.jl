@@ -65,6 +65,47 @@ function fates_maxpatch_total(cdl_path::AbstractString = FATES_PARAMS_DEFAULT_CD
     return 0
 end
 
+"""
+    fates_max_patches_per_site(; use_sp=false, use_nocomp=false, surf_numpft, surf_numcft,
+                               cdl_path=FATES_PARAMS_DEFAULT_CDL) -> Int
+
+`fates_maxPatchesPerSite` as FATES `SetFatesGlobalElements1` sizes it, from a light
+early read of the CDL (`fates_pft` dimension + `fates_maxpatches_by_landuse`), for the
+HLM to reserve its per-FATES-column patch slots before the subgrid build:
+
+  * SP:      `max(surf_numpft + surf_numcft, numpft + 1)` (enough HLM patches to hold
+             the surfdata LAI of every surface PFT/CFT; `surf_numpft` counts bare ground)
+  * nocomp:  `sum(maxpatches_by_landuse) + 1` with the primary-land entry raised to
+             `max(entry, numpft)`
+  * default: `sum(maxpatches_by_landuse) + 1` (= `fates_maxpatch_total() + 1`)
+"""
+function fates_max_patches_per_site(; use_sp::Bool = false, use_nocomp::Bool = false,
+                                    surf_numpft::Integer, surf_numcft::Integer,
+                                    cdl_path::AbstractString = FATES_PARAMS_DEFAULT_CDL)
+    total = fates_maxpatch_total(cdl_path)
+    (use_sp || use_nocomp) || return total + 1
+    numpft = 0
+    by_lu = Float64[]
+    for line in eachline(cdl_path)
+        m = match(r"^\s*fates_pft\s*=\s*(\d+)\s*;", line)
+        m !== nothing && (numpft = parse(Int, m.captures[1]))
+        if occursin("fates_maxpatches_by_landuse", line) && occursin('=', line) &&
+           !occursin("fates_maxpatches_by_landuse:", line)
+            body = split(split(line, '=')[2], ';')[1]
+            by_lu = Float64[v for v in (tryparse(Float64, strip(x)) for x in split(body, ','))
+                            if v !== nothing]
+        end
+    end
+    (numpft > 0 && !isempty(by_lu)) ||
+        error("fates_max_patches_per_site: fates_pft / fates_maxpatches_by_landuse not " *
+              "found in $cdl_path")
+    if use_sp
+        return max(surf_numpft + surf_numcft, numpft + 1)
+    end
+    by_lu[1] = max(by_lu[1], numpft)     # primaryland
+    return round(Int, sum(by_lu)) + 1
+end
+
 # -------------------------------------------------------------------------------------
 # CDL parser
 # -------------------------------------------------------------------------------------

@@ -124,14 +124,23 @@ function fates_flush_hlm_canopy!(inst::CLMInstances; c::Int)
         pf = npc >= 1 ? pi + npc - 1 : pi
     end
 
+    # SP: tlai/tsai/htop are the host's prescribed (satellite-phenology) values,
+    # so Fortran flushes and refills the *_hist copies instead.
+    sp = hlm_use_sp[] == itrue
     for p in pi:pf
         (1 <= p <= length(cs.elai_patch)) || continue
         cs.elai_patch[p] = 0.0
         cs.esai_patch[p] = 0.0
         cs.hbot_patch[p] = 0.0
-        cs.tlai_patch[p] = 0.0
-        cs.tsai_patch[p] = 0.0
-        cs.htop_patch[p] = 0.0
+        if sp
+            cs.tlai_hist_patch[p] = 0.0
+            cs.tsai_hist_patch[p] = 0.0
+            cs.htop_hist_patch[p] = 0.0
+        else
+            cs.tlai_patch[p] = 0.0
+            cs.tsai_patch[p] = 0.0
+            cs.htop_patch[p] = 0.0
+        end
         if !isempty(cs.frac_veg_nosno_alb_patch)
             cs.frac_veg_nosno_alb_patch[p] = 0
         end
@@ -619,6 +628,9 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
     _fates_set_active_suction!(bc, fates.bc_out[s], nlevsoil)
     _fates_pack_smp!(bc, fates.bc_out[s], ss, c, nlevsoil)
 
+    # SP: the host's satellite-phenology LAI/SAI/height (dynamics_driv).
+    hlm_use_sp[] == itrue && fates_pack_bcin_sp!(inst; s = s, c = c)
+
     # Soil-decomposition limitation scalars: live only under use_fates_bgc, else 0
     # (matches the Fortran w_scalar/t_scalar gate in dynamics_driv). Clamp the loop
     # to the FATES bc array length (the cold start sizes these to FATES nlevdecomp,
@@ -660,6 +672,43 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         end
     end
 
+    return inst
+end
+
+"""
+    fates_pack_bcin_sp!(inst; s, c)
+
+FATES satellite-phenology (SP) inputs: copy the host's prescribed LAI / SAI / canopy
+height into `bc_in[s].hlm_sp_tlai/tsai/htop`, mirroring clmfates_interfaceMod
+(`dynamics_driv` and `init_coldstart`):
+
+```fortran
+do ft = surfpft_lb,surfpft_ub
+   p = ft + col%patchi(c)
+   bc_in(s)%hlm_sp_tlai(ft) = canopystate_inst%tlai_patch(p)
+   bc_in(s)%hlm_sp_tsai(ft) = canopystate_inst%tsai_patch(p)
+   bc_in(s)%hlm_sp_htop(ft) = canopystate_inst%htop_patch(p)
+   if (canopystate_inst%htop_patch(p) < 1.0e-20) bc_in(s)%hlm_sp_htop(ft) = 0.01
+end do
+```
+
+The HLM patch at `col.patchi[c] + ft` is the one of PFT type `ft` (the SP FATES column
+is built with one patch per surface PFT, in type order; see `set_landunit_veg_compete!`),
+so this is a read in HLM-PFT space. HLM PFT 0 (bare ground) is never read by FATES and
+is not stored: `hlm_sp_*[k]` holds HLM PFT `k`.
+"""
+function fates_pack_bcin_sp!(inst::CLMInstances; s::Int, c::Int)
+    fates = inst.fates
+    fates === nothing && return inst
+    bc = fates.bc_in[s]
+    cs = inst.canopystate
+    pi = inst.column.patchi[c]
+    for ft in 1:length(bc.hlm_sp_tlai)
+        p = ft + pi
+        bc.hlm_sp_tlai[ft] = cs.tlai_patch[p]
+        bc.hlm_sp_tsai[ft] = cs.tsai_patch[p]
+        bc.hlm_sp_htop[ft] = cs.htop_patch[p] < 1.0e-20 ? 0.01 : cs.htop_patch[p]
+    end
     return inst
 end
 
@@ -1049,9 +1098,17 @@ function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
 
     cs.elai_patch[p]   = bc.elai_pa[ifp]
     cs.esai_patch[p]   = bc.esai_pa[ifp]
-    cs.tlai_patch[p]   = bc.tlai_pa[ifp]
-    cs.tsai_patch[p]   = bc.tsai_pa[ifp]
-    cs.htop_patch[p]   = bc.htop_pa[ifp]
+    if hlm_use_sp[] == itrue
+        # wrap_update_hlmfates_dyn: under SP the FATES totals go to the *_hist copies;
+        # tlai/tsai/htop stay the host's satellite-phenology values.
+        cs.tlai_hist_patch[p] = bc.tlai_pa[ifp]
+        cs.tsai_hist_patch[p] = bc.tsai_pa[ifp]
+        cs.htop_hist_patch[p] = bc.htop_pa[ifp]
+    else
+        cs.tlai_patch[p]   = bc.tlai_pa[ifp]
+        cs.tsai_patch[p]   = bc.tsai_pa[ifp]
+        cs.htop_patch[p]   = bc.htop_pa[ifp]
+    end
     cs.hbot_patch[p]   = bc.hbot_pa[ifp]
     cs.z0m_patch[p]    = bc.z0m_pa[ifp]
     cs.displa_patch[p] = bc.displa_pa[ifp]

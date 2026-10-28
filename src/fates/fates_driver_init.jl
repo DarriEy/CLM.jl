@@ -287,6 +287,8 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
                                        use_tree_damage::Bool = false,
                                        use_planthydro::Bool = false,
                                        use_fixed_biogeog::Bool = false,
+                                       use_nocomp::Bool = false,
+                                       use_sp::Bool = false,
                                        use_vertsoilc::Bool = false,
                                        decomp_method::AbstractString = "CTC",
                                        do_check::Bool = true)
@@ -297,8 +299,10 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     # `use_this_pft` filter (fed from `bc_in.pft_areafrac`) restricts cold-start
     # seeding + runtime recruitment + seed rain to the climatically-present PFTs.
     set_fates_ctrlparms("use_fixed_biogeog"; ival = use_fixed_biogeog ? itrue : ifalse)
-    set_fates_ctrlparms("use_nocomp";        ival = ifalse)
-    set_fates_ctrlparms("use_sp";            ival = ifalse)
+    # nocomp / SP mirror CLMFatesGlobals1 (pass_nocomp / pass_sp); FATES' check_allset
+    # enforces SP => nocomp .and. fixed_biogeog.
+    set_fates_ctrlparms("use_nocomp";        ival = use_nocomp ? itrue : ifalse)
+    set_fates_ctrlparms("use_sp";            ival = use_sp ? itrue : ifalse)
     set_fates_ctrlparms("masterproc";        ival = itrue)
 
     # Radiation bands / soil dims / HLM identity.
@@ -418,9 +422,12 @@ Bootstrap a finite, cold-started, carbon-only FATES interface with `nsites` site
 and attach it to `inst.fates`.  Mirrors the Fortran host sequence
 `CLMFatesGlobals1 -> CLMFatesGlobals2 -> clm_fates%Init -> init_coldstart`.
 
-Carbon-only minimal config (planthydro / SPITFIRE / inventory all OFF; SP / nocomp /
-fixed-biogeog / LUH all OFF) — the default NBG cold start that needs no external
-SP-LAI / inventory / biogeography data.
+Carbon-only minimal config by default (planthydro / SPITFIRE / inventory / LUH OFF; SP /
+nocomp / fixed-biogeog OFF) — the NBG cold start that needs no external data. The
+reduced-complexity modes are opt-in: `use_nocomp`, `use_sp` (requires `use_nocomp` and
+`hlm_pft_areafrac`) and the host fixed biogeography `hlm_pft_areafrac` (per site, the
+surfdata `wt_nat_patch` over HLM PFTs 0:surfpft_ub, mapped by `fates_hlm_pft_map`); SP
+also needs the host satellite phenology to have run (see `clm_initialize!`).
 
 Parameters are read from the REAL FATES default parameter file
 (`data/fates/fates_params_default.cdl`, via [`read_fates_params!`](@ref)) — this
@@ -447,6 +454,10 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          use_planthydro::Bool = false,
                          fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
                          fates_biogeog_screen::Symbol = :none,
+                         use_sp::Bool = false,
+                         use_nocomp::Bool = false,
+                         hlm_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
+                         surf_numpft::Int = 0, surf_numcft::Int = 0,
                          use_vertsoilc::Bool = false,
                          decomp_method::AbstractString = "CTC",
                          dtime::Real = 1800.0)
@@ -469,7 +480,19 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         error("clm_fates_init!: unknown fates_biogeog_screen=$(fates_biogeog_screen) " *
               "(expected :none or :drop_cold_deciduous)")
     end
-    use_fixed_biogeog = (fates_pft_areafrac !== nothing) ||
+    # Host (CTSM) fixed biogeography: `hlm_pft_areafrac[s]` is site s's surfdata
+    # wt_nat_patch over HLM PFTs 0:surfpft_ub (element k+1 <-> HLM PFT k), the
+    # clmfates_interfaceMod `bc_in%pft_areafrac` source. It maps onto FATES PFTs
+    # through the parameter file's fates_hlm_pft_map (NOT the identity crosswalk of
+    # the legacy FATES-PFT-space `fates_pft_areafrac` / screen path below).
+    host_biogeog = hlm_pft_areafrac !== nothing
+    host_biogeog && (fates_pft_areafrac !== nothing || fates_biogeog_screen != :none) &&
+        error("clm_fates_init!: hlm_pft_areafrac cannot be combined with " *
+              "fates_pft_areafrac / fates_biogeog_screen")
+    use_sp && !(use_nocomp && host_biogeog) &&
+        error("clm_fates_init!: use_sp requires use_nocomp and the host fixed " *
+              "biogeography (hlm_pft_areafrac)")
+    use_fixed_biogeog = host_biogeog || (fates_pft_areafrac !== nothing) ||
                         (fates_biogeog_screen != :none)
 
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
@@ -490,6 +513,8 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                   use_tree_damage = use_tree_damage,
                                   use_planthydro = use_planthydro,
                                   use_fixed_biogeog = use_fixed_biogeog,
+                                  use_nocomp = use_nocomp,
+                                  use_sp = use_sp,
                                   use_vertsoilc = use_vertsoilc,
                                   decomp_method = decomp_method,
                                   do_check = !is_cnp)   # CNP: check after the param read
@@ -540,7 +565,7 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # supplies areas in FATES-PFT space" configuration and only runs on this gated
     # path (default path never touches the param-file crosswalk).
     fates_areafrac_vec = Float64[]
-    if use_fixed_biogeog
+    if use_fixed_biogeog && !host_biogeog
         fates_areafrac_vec = zeros(Float64, numpft_resolved)
         if fates_pft_areafrac !== nothing
             length(fates_pft_areafrac) == numpft_resolved ||
@@ -590,7 +615,21 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # fates_maxPatchesPerSite = maxpatch_total + 1).
     p = ed_params()
     p.maxpatch_total = sum(p.maxpatches_by_landuse)
-    fates_maxPatchesPerSite[] = p.maxpatch_total + 1
+    if use_sp
+        # SP: the primary-land patches hold one PFT each; the HLM needs enough patches
+        # to carry the surfdata LAI of every surface PFT/CFT (surf_numpft incl. bare).
+        p.maxpatches_by_landuse[primaryland] = numpft_resolved
+        p.maxpatches_by_landuse[secondaryland:n_landuse_cats] .= 0
+        p.maxpatch_total = numpft_resolved
+        fates_maxPatchesPerSite[] = max(surf_numpft + surf_numcft, p.maxpatch_total + 1)
+    else
+        if use_nocomp
+            p.maxpatches_by_landuse[primaryland] =
+                max(p.maxpatches_by_landuse[primaryland], numpft_resolved)
+            p.maxpatch_total = sum(p.maxpatches_by_landuse)
+        end
+        fates_maxPatchesPerSite[] = p.maxpatch_total + 1
+    end
 
     # SetFatesGlobalElements2 derived dims the cold-start chain + bc allocators read.
     # Carbon-only => one nutrient competitor / trivial competition scaling; the full
@@ -623,12 +662,19 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     allocate_bcpconst(fates.bc_pconst, nlevdecomp)
     set_bcpconst(fates.bc_pconst, nlevdecomp)
 
+    # Surface-PFT span of the per-site pft_areafrac / hlm_sp_* arrays. The host path
+    # carries HLM PFTs 1:surfpft_ub (bare ground, HLM PFT 0, goes to baregroundfrac);
+    # the legacy FATES-PFT-space path keeps 1:numpft.
+    surfpft_ub_bc = host_biogeog ? length(hlm_pft_areafrac[1]) - 1 : numpft_resolved
+    host_biogeog && length(hlm_pft_areafrac) != nsites &&
+        error("clm_fates_init!: hlm_pft_areafrac has $(length(hlm_pft_areafrac)) " *
+              "site vectors; expected nsites=$nsites")
     for s in 1:nsites
         allocate_bcin(fates.bc_in[s], nlevsoil, nlevdecomp,
                       0,   # num_lu_harvest_cats
                       0,   # num_luh2_states
                       0,   # num_luh2_transitions
-                      1, numpft_resolved)  # surfpft_lb, surfpft_ub
+                      1, surfpft_ub_bc)  # surfpft_lb, surfpft_ub
         allocate_bcout(fates.bc_out[s], nlevsoil, nlevdecomp)
         zero_bcs(fates, s)
         set_bcs(fates.bc_in[s])
@@ -655,7 +701,20 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         # is allocated (length numpft) by `allocate_bcin` only when fixed-biogeog is
         # on; `baregroundfrac` must be finite (the no-LUH `_set_site_area_pft!` branch
         # has no NaN guard).  A fully-vegetated FATES column => bareground 0.
-        if use_fixed_biogeog
+        if host_biogeog
+            # clmfates_interfaceMod init: pft_areafrac(ft) = wt_nat_patch(g, ft) over
+            # surfpft_lb:surfpft_ub, endrun unless the areas (bare ground included) sum
+            # to one. The ported _set_site_area_pft! reads bare ground from
+            # baregroundfrac (Fortran: pft_areafrac(0)).
+            wts = hlm_pft_areafrac[s]
+            abs(sum(wts) - 1.0) > 1.0e-13 &&   # clm_varcon sum_to_1_tol
+                error("clm_fates_init!: pft_area error in interfc, site $s: " *
+                      "sum(wt_nat_patch) - 1 = $(sum(wts) - 1.0)")
+            for k in 1:surfpft_ub_bc
+                bc.pft_areafrac[k] = wts[k + 1]
+            end
+            bc.baregroundfrac = wts[1]
+        elseif use_fixed_biogeog
             bc.pft_areafrac   .= fates_areafrac_vec
             bc.baregroundfrac  = 0.0
         end
@@ -674,6 +733,15 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         zero_site!(sites[s])
     end
     set_site_properties!(nsites, sites, bc_in)
+    # SP: hand FATES the HLM satellite-phenology LAI/SAI/height before init_patches
+    # (init_coldstart; the host ran SatellitePhenology just before).
+    if use_sp
+        fcol_sp = fates_site_columns(inst.column, inst.landunit, nsites)
+        for s in 1:nsites
+            fcol_sp[s] == 0 && continue
+            fates_pack_bcin_sp!(inst; s = s, c = fcol_sp[s])
+        end
+    end
     init_patches!(nsites, sites, bc_in)
     for s in 1:nsites
         # CLM has not computed last year's maximum rooting depth yet (it will at the

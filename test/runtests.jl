@@ -423,6 +423,10 @@ using CLM
     # (UpdateC/NLitterFluxes), driver config defaults, and a data-gated live run that
     # closes the soil C budget and tracks the Fortran fates_parity_1pt soil BGC.
     include("test_fates_soilbgc_coupling.jl")
+    # FATES reduced-complexity modes (use_fates_sp / nocomp / fixed_biogeog): the
+    # CTSM mode dependencies, the per-mode HLM patch reservation, and data-gated live
+    # runs of each mode scored against hourly Fortran CTSM extracts.
+    include("test_fates_reduced_modes.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

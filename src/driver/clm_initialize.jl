@@ -101,11 +101,28 @@ function clm_initialize!(;
     use_c13::Bool = false,
     use_c14::Bool = false,
     use_fates::Bool = false,
+    # FATES reduced-complexity modes (CTSM &clm_inparm use_fates_sp /
+    # use_fates_nocomp / use_fates_fixed_biogeog, passed to FATES as
+    # hlm_use_sp / hlm_use_nocomp / hlm_use_fixed_biogeog by clmfates_interfaceMod
+    # CLMFatesGlobals1). All default .false. (the full-competition NBG cold start).
+    #   * use_fates_fixed_biogeog: the per-PFT site areas come from the surfdata
+    #     PCT_NAT_PFT (wt_nat_patch), mapped onto FATES PFTs by fates_hlm_pft_map;
+    #     PFTs with zero area are never seeded or recruited.
+    #   * use_fates_nocomp: one FATES patch per PFT (plus bare ground), no
+    #     competition between PFTs for light.
+    #   * use_fates_sp: satellite phenology. LAI/SAI/height are PRESCRIBED from the
+    #     surfdata MONTHLY_* fields; FATES keeps one cohort per PFT patch. FATES
+    #     enforces SP => nocomp .and. fixed_biogeog (FatesInterfaceMod check_allset).
+    use_fates_sp::Bool = false,
+    use_fates_nocomp::Bool = false,
+    use_fates_fixed_biogeog::Bool = false,
+    # CTSM fates_history_dimlevel (both entries): 1 = site-scalar FATES history only
+    # (the port's historical default), 2 = also the multiplexed (per-PFT, per-size) ones.
+    fates_history_dimlevel::Int = 1,
     # CTSM controlMod.F90:474-479 sets use_fates_bgc = .not. use_fates_sp whenever
     # use_fates: a (non-SP) FATES run carries CLM's CENTURY soil biogeochemistry, fed
-    # by the FATES litter fluxes. `nothing` resolves to that default (= use_fates, as
-    # the port has no FATES-SP init path). Pass `false` for the legacy FATES-without-
-    # soil-BGC configuration.
+    # by the FATES litter fluxes; an SP run has no soil BGC. `nothing` resolves to
+    # that default. Pass `false` for the legacy FATES-without-soil-BGC configuration.
     use_fates_bgc::Union{Bool,Nothing} = nothing,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
@@ -230,8 +247,26 @@ function clm_initialize!(;
     # Without this the HLM reserves only the surfdata natpft count and FATES's extra
     # (disturbance) patches are dropped from the HLM coupling.
     varctl.use_fates = use_fates
-    varctl.fates_maxpatch = use_fates ? fates_maxpatch_total() : 0
-    _fates_bgc = use_fates && (use_fates_bgc === nothing ? true : use_fates_bgc)
+    if use_fates
+        use_fates_sp && !(use_fates_nocomp && use_fates_fixed_biogeog) &&
+            error("clm_initialize!: use_fates_sp requires use_fates_nocomp=true and " *
+                  "use_fates_fixed_biogeog=true (FATES: 'SP cannot be on if nocomp " *
+                  "mode is off' / 'if fixed biogeog mode is off')")
+        use_fates_sp && use_fates_bgc === true &&
+            error("clm_initialize!: use_fates_bgc cannot be true with use_fates_sp " *
+                  "(CTSM controlMod: use_fates_bgc = .not. use_fates_sp)")
+        use_fates_fixed_biogeog && (fates_pft_areafrac !== nothing ||
+                                    fates_biogeog_screen != :none) &&
+            error("clm_initialize!: use_fates_fixed_biogeog reads the PFT areas from the " *
+                  "surfdata; do not combine it with fates_pft_areafrac/fates_biogeog_screen")
+    else
+        (use_fates_sp || use_fates_nocomp || use_fates_fixed_biogeog) &&
+            error("clm_initialize!: use_fates_sp/nocomp/fixed_biogeog require use_fates=true")
+    end
+    varctl.use_fates_sp = use_fates && use_fates_sp
+    varctl.use_fates_nocomp = use_fates && use_fates_nocomp
+    varctl.use_fates_fixed_biogeog = use_fates && use_fates_fixed_biogeog
+    _fates_bgc = use_fates && (use_fates_bgc === nothing ? !use_fates_sp : use_fates_bgc)
     _fates_bgc && decomp_method != 1 &&
         error("clm_initialize!: FATES soil BGC is ported for CENTURY (decomp_method=1) only")
     varctl.use_fates_bgc = _fates_bgc
@@ -242,9 +277,28 @@ function clm_initialize!(;
     # ---- Step 2: Read surface file metadata ----
     (numpft, numcft) = surfrd_get_num_patches(fsurdat)
     nlevurb = surfrd_get_nlevurb(fsurdat)
+    # HLM patch slots per FATES column = fates_maxPatchesPerSite (SetFatesGlobalElements1),
+    # i.e. fates_maxpatch + 1 (the +1 is bare ground). Mode-dependent: nocomp raises the
+    # primary-land patch count to numpft; SP sizes it to hold the surfdata LAI of every
+    # surface PFT+CFT (numpft here is the max natpft index, so the count is numpft+1).
+    varctl.fates_maxpatch = use_fates ?
+        fates_max_patches_per_site(; use_sp = use_fates_sp, use_nocomp = use_fates_nocomp,
+                                   surf_numpft = numpft + 1, surf_numcft = numcft) - 1 : 0
 
     # ---- Step 3: Initialize varpar dimensions ----
     varpar_init!(varpar, 1, numpft, numcft, nlevurb)
+    # Under FATES (create_crop_landunit = .false.) CTSM clm_varpar_init sets
+    # surfpft_ub = surf_numpft + surf_numcft - 1 (the PFT+CFT vector FATES' fixed
+    # biogeography and SP read; here numpft is already the max natpft index) and
+    # maxveg = maxsoil_patches - 1 = fates_maxPatchesPerSite - 1, which bounds the
+    # SP monthly-vegetation read. Applied on the reduced-complexity mode paths only, so
+    # the default FATES configuration keeps its layout byte-identical.
+    if use_fates && (use_fates_sp || use_fates_fixed_biogeog)
+        varpar.surfpft_ub = numpft + numcft
+    end
+    if use_fates && use_fates_sp
+        varpar.maxveg = max(varpar.maxveg, varctl.fates_maxpatch)
+    end
 
     # ---- Step 4: Initialize varcon (vertical coordinate arrays) ----
     varcon_init!()
@@ -742,9 +796,43 @@ function clm_initialize!(;
         # use_fates_sp, and clmfates_interfaceMod passes use_vertsoilc=1. Without soil
         # BGC the legacy one-layer configuration is kept.
         nlevdecomp_fates = _fates_bgc ? varpar.nlevdecomp : 1
+        # Fixed biogeography: each site's PFT areas are its gridcell's surfdata
+        # wt_nat_patch over HLM PFTs 0:surfpft_ub (clmfates_interfaceMod init).
+        hlm_areafrac = nothing
+        if use_fates_fixed_biogeog
+            fcol0 = fates_site_columns(inst.column, inst.landunit, nc)
+            nsurf = varpar.surfpft_ub + 1
+            hlm_areafrac = Vector{Vector{Float64}}(undef, nc)
+            for s in 1:nc
+                v = zeros(nsurf)
+                if fcol0[s] != 0
+                    g = inst.column.gridcell[fcol0[s]]
+                    for k in 1:min(nsurf, size(surf.wt_nat_patch, 2))
+                        v[k] = surf.wt_nat_patch[g, k]
+                    end
+                else
+                    v[1] = 1.0      # no host column: all bare ground
+                end
+                hlm_areafrac[s] = v
+            end
+        end
+        # FATES-SP: interpolate the surfdata monthly vegetation to the start date and
+        # run SatellitePhenology over every soil patch (active AND inactive) BEFORE the
+        # cold start, which hands the resulting LAI/SAI/height to FATES
+        # (clm_initializeMod: interpMonthlyVeg + SatellitePhenology(filter_inactive_
+        # and_active%soilp) ahead of init_coldstart).
+        if use_fates_sp
+            _fates_sp_host_phenology!(inst; mon = month(start_date), day = day(start_date),
+                                      first_read = true)
+        end
         # One FATES site per CLM column (single-site MVP: nc is typically 1). PFT
         # count comes from the parameter file (numpft_in omitted => use the file).
         clm_fates_init!(inst; nsites = nc,
+                        use_sp = use_fates_sp,
+                        use_nocomp = use_fates_nocomp,
+                        hlm_pft_areafrac = hlm_areafrac,
+                        surf_numpft = numpft + 1, surf_numcft = numcft,
+                        hist_dimlevel = fates_history_dimlevel,
                         nlevsoil = nlevsoil_fates,
                         nlevdecomp = nlevdecomp_fates,
                         current_year = year(start_date),
@@ -758,6 +846,48 @@ function clm_initialize!(;
     end
 
     return (inst, bounds, filt, tm)
+end
+
+"""
+    _fates_sp_host_phenology!(inst; mon, day, first_read=false, mask=nothing)
+
+Host satellite phenology for FATES-SP: `interpMonthlyVeg` (reading the two bracketing
+months of surfdata MONTHLY_LAI/SAI/HEIGHT_TOP/HEIGHT_BOT when they change, or always
+when `first_read`) followed by `SatellitePhenology` with `use_fates_sp=true`, which sets
+tlai/tsai/htop/hbot by patch type but leaves elai/esai (FATES's) alone. `mask` defaults
+to every patch on a soil landunit, active or not (CTSM passes
+`filter_inactive_and_active%soilp`: FATES reads the LAI of HLM PFT ft from patch
+`patchi + ft` whether or not that patch currently has weight).
+"""
+function _fates_sp_host_phenology!(inst::CLMInstances; mon::Int, day::Int,
+                                   first_read::Bool = false,
+                                   mask::Union{Nothing,AbstractVector{Bool}} = nothing,
+                                   do_phenology::Bool = true)
+    surf = inst.surfdata
+    surf === nothing && error("FATES-SP needs the surfdata monthly vegetation fields")
+    sp = inst.satellite_phenology
+    pch = inst.patch
+    np = length(pch.itype)
+    months, needs_read = interp_monthly_veg!(sp; kmo = mon, kda = day)
+    if needs_read || first_read
+        read_monthly_vegetation!(sp, inst.canopystate, pch, 1:np;
+            monthly_lai = surf.monthly_lai, monthly_sai = surf.monthly_sai,
+            monthly_height_top = surf.monthly_htop, monthly_height_bot = surf.monthly_hbot,
+            months = months)
+    end
+    do_phenology || return inst
+    if mask === nothing
+        lun = inst.landunit
+        mask = BitVector(undef, np)
+        for p in 1:np
+            l = pch.landunit[p]
+            mask[p] = (1 <= l <= length(lun.itype)) &&
+                      (lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP)
+        end
+    end
+    satellite_phenology!(sp, inst.canopystate, inst.water.waterdiagnosticbulk_inst,
+                         pch, mask, 1:np; use_fates_sp = true)
+    return inst
 end
 
 """
