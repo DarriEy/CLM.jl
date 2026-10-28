@@ -490,6 +490,17 @@ function clm_initialize!(;
         @warn "friction-velocity param wiring failed: $e" maxlog=1
     end
 
+    # ---- Methane parameters (ch4Mod.F90 readParams) ----
+    # Only under use_lch4 (Fortran calls ch4Mod readParams only when use_lch4), so
+    # the default non-CH4 path is byte-identical. Before this, the CH4 model ran on
+    # struct defaults; q10ch4 was 1.5 instead of the paramfile's 1.33.
+    if use_lch4
+        NCDataset(paramfile, "r") do ds
+            read_ch4_params!(inst.ch4_params, ds;
+                             use_aereoxid_prog = inst.ch4_varcon.use_aereoxid_prog)
+        end
+    end
+
     # ---- Step 13: Initialize vertical structure ----
     initVertical!(bounds, inst.gridcell, inst.landunit, inst.column, surf)
 

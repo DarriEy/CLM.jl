@@ -629,6 +629,9 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         ndyn_params::Union{NDynamicsParams, Nothing} = nothing,
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        # Methane state (CH4Data) for the use_lch4 anoxia / nitrif / fphr coupling —
+        # threaded straight to cn_driver_no_leaching!; nothing (default) = no CH4.
+        ch4 = nothing,
         # ---- CN fire (Li family) bundle -----------------------------------
         # Threaded straight through to cn_driver_no_leaching!, whose `_fire_active`
         # gate needs BOTH config.cnfire_method !== :nofire AND every one of these to
@@ -761,6 +764,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         ndyn_params=ndyn_params,
         h2osoi_vol=h2osoi_vol,
         h2osoi_liq=h2osoi_liq,
+        ch4=ch4,
         # CN fire bundle (see the kwarg block above).
         fire_data=fire_data,
         fire_li2014=fire_li2014,
