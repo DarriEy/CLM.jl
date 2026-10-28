@@ -2244,14 +2244,19 @@ function clm_drv_core!(config::CLMDriverConfig,
                          scf_method=inst.scf_method)
     end
 
-    # LakeHydrology — WIRED
+    # LakeHydrology — WIRED. The lake snowpack routines (SnowWater, SnowCapping,
+    # SnowCompaction, Combine/Divide/ZeroEmpty) run inside it, over its lake snow
+    # filters, through this callback (LakeHydrologyMod.F90:404-436).
+    _lake_snow! = (mlsnow, mlnosnow) -> _lake_snow_layer_physics!(inst, mlsnow, mlnosnow,
+                                                                filt.lakec, bc_col, dtime, nstep)
     lake_hydrology!(temp, ef, ls, ss, wsb, wdb,
                     inst.water.waterbalancebulk_inst, wfb,
                     col, pch,
                     filt.lakec, filt.lakep,
                     forc_rain_col, forc_snow_col, qflx_floodg,
                     bc_col, bc_patch, dtime,
-                    varpar.nlevsno, varpar.nlevsoi, varpar.nlevgrnd)
+                    varpar.nlevsno, varpar.nlevsoi, varpar.nlevgrnd;
+                    snow_layer_physics! = _lake_snow!)
 
     # AerosolMasses (lake) — WIRED
     aerosol_masses!(aer,
@@ -3255,3 +3260,133 @@ function clm_drv_core!(config::CLMDriverConfig,
 
     return nothing
 end
+
+# --------------------------------------------------------------------------
+# Lake-column snowpack physics, called from inside lake_hydrology! over its
+# shallow-lake snow / no-snow filters (LakeHydrologyMod.F90:404-436): SnowWater,
+# SnowCapping, SnowCompaction, CombineSnowLayers, DivideSnowLayers(is_lake=.true.),
+# ZeroEmptySnowLayers. Same routines, same order and arguments as the non-lake
+# HydrologyNoDrainage sequence in clm_drv_core!, on the lake masks.
+# --------------------------------------------------------------------------
+function _lake_snow_layer_physics!(inst, mask_snow, mask_nosnow, mask_lake, bc_col, dtime, nstep)
+    any(Array(mask_snow)) || any(Array(mask_nosnow)) || return nothing
+    col = inst.column; lun = inst.landunit; temp = inst.temperature
+    wsb = inst.water.waterstatebulk_inst; wdb = inst.water.waterdiagnosticbulk_inst
+    wfb = inst.water.waterfluxbulk_inst; aer = inst.aerosol; a2l = inst.atm2lnd
+    nlevsno = varpar.nlevsno
+    nc = length(col.snl)
+    _zl(n) = fill!(similar(temp.t_grnd_col, n), zero(eltype(temp.t_grnd_col)))
+    _bl(n) = fill!(similar(mask_lake, Bool, n), false)
+
+    # ---- SnowWater ----
+    update_state_top_layer_fluxes!(
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        dtime, col.snl, wdb.frac_sno_eff_col,
+        wfb.wf.qflx_soliddew_to_top_layer_col,
+        wfb.wf.qflx_solidevap_from_top_layer_col,
+        wfb.wf.qflx_liq_grnd_col,
+        wfb.wf.qflx_liqdew_to_top_layer_col,
+        wfb.wf.qflx_liqevap_from_top_layer_col,
+        mask_snow, bc_col, nlevsno)
+    bulk_flux_snow_percolation!(
+        wfb.wf.qflx_snow_percolation_col,
+        dtime, col.snl, col.dz, wdb.frac_sno_eff_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        mask_snow, bc_col, nlevsno)
+    update_state_snow_percolation!(
+        wsb.ws.h2osoi_liq_col, dtime, col.snl,
+        wfb.wf.qflx_snow_percolation_col, mask_snow, bc_col, nlevsno)
+    calc_and_apply_aerosol_fluxes!(
+        aer, dtime, col.snl,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wfb.wf.qflx_snow_percolation_col, mask_snow, bc_col, nlevsno)
+    post_percolation_adjust_layer_thicknesses!(
+        col.dz, col.snl, wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        mask_snow, bc_col, nlevsno)
+    bulkdiag_snow_water_accumulated_snow!(
+        wsb.int_snow_col, wdb.frac_sno_col, wdb.snow_depth_col, dtime,
+        wdb.frac_sno_eff_col,
+        wfb.wf.qflx_soliddew_to_top_layer_col, wfb.wf.qflx_liqdew_to_top_layer_col,
+        wfb.wf.qflx_liq_grnd_col, wsb.ws.h2osno_no_layers_col,
+        mask_snow, mask_nosnow, bc_col)
+    qflx_snow_perc_bottom = _zl(nc)
+    @views qflx_snow_perc_bottom[bc_col] .=
+        mask_snow[bc_col] .* wfb.wf.qflx_snow_percolation_col[bc_col, nlevsno]
+    sum_flux_add_snow_percolation!(
+        wfb.wf.qflx_snow_drain_col, wfb.wf.qflx_rain_plus_snomelt_col,
+        wdb.frac_sno_eff_col, qflx_snow_perc_bottom,
+        wfb.wf.qflx_liq_grnd_col, wfb.wf.qflx_snomelt_col,
+        mask_snow, mask_nosnow, bc_col)
+
+    # ---- SnowCapping (init over the lake filter, capping over lake snow) ----
+    h2osno_total = _zl(nc)
+    waterstate_calculate_total_h2osno!(wsb.ws, mask_snow, bc_col, col.snl, h2osno_total)
+    init_flux_snow_capping!(
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        mask_lake, bc_col)
+    jj_bottom = nlevsno
+    dz_bottom_vec = col.dz[:, jj_bottom]
+    ice_bottom_vec = wsb.ws.h2osoi_ice_col[:, jj_bottom]
+    liq_bottom_vec = wsb.ws.h2osoi_liq_col[:, jj_bottom]
+    mask_capping = _bl(nc)
+    rho_orig_bottom = _zl(nc)
+    frac_adjust = _zl(nc)
+    bulk_flux_snow_capping_fluxes!(
+        mask_capping, rho_orig_bottom, frac_adjust,
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        dtime, dz_bottom_vec, inst.topo.topo_col, h2osno_total,
+        ice_bottom_vec, liq_bottom_vec,
+        col.landunit, lun.itype,
+        mask_snow, bc_col, nlevsno, nstep)
+    update_state_remove_snow_capping_fluxes!(
+        ice_bottom_vec, liq_bottom_vec, dtime,
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        mask_capping, bc_col)
+    @views wsb.ws.h2osoi_ice_col[bc_col, jj_bottom] .= ice_bottom_vec[bc_col]
+    @views wsb.ws.h2osoi_liq_col[bc_col, jj_bottom] .= liq_bottom_vec[bc_col]
+    snow_capping_update_dz_and_aerosols!(
+        dz_bottom_vec, aer, jj_bottom, rho_orig_bottom, ice_bottom_vec, frac_adjust,
+        mask_capping, bc_col)
+    @views col.dz[bc_col, jj_bottom] .= dz_bottom_vec[bc_col]
+
+    # ---- SnowCompaction ----
+    _scf = inst.scf_method
+    _n_melt = hasproperty(_scf, :n_melt) && length(_scf.n_melt) == nc ?
+        _scf.n_melt : fill(20.0, nc)
+    _int_snow_max = hasproperty(_scf, :int_snow_max) ? _scf.int_snow_max : 2000.0
+    snow_compaction!(
+        col.dz, dtime, col.snl, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col, temp.imelt_col,
+        wdb.frac_sno_col, wdb.frac_h2osfc_col,
+        wdb.swe_old_col, wsb.int_snow_col, wdb.frac_iceold_col,
+        a2l.forc_wind_grc, col.gridcell, col.landunit,
+        lun.lakpoi, lun.urbpoi,
+        mask_snow, bc_col, nlevsno;
+        use_subgrid_fluxes = varctl.use_subgrid_fluxes,
+        n_melt = _n_melt, int_snow_max = _int_snow_max)
+
+    # ---- Combine / Divide (is_lake) / ZeroEmpty ----
+    combine_snow_layers!(
+        col.snl, col.dz, col.zi, col.z, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col, wsb.ws.h2osno_no_layers_col,
+        wdb.snow_depth_col, wdb.frac_sno_col, wdb.frac_sno_eff_col,
+        wsb.int_snow_col, wdb.snw_rds_col,
+        aer, lun.itype, lun.urbpoi, col.landunit,
+        mask_snow, bc_col, nlevsno,
+        wfb.wf.qflx_sl_top_soil_col, dtime)
+    divide_snow_layers!(
+        col.snl, col.dz, col.zi, col.z, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wdb.frac_sno_col, wdb.snw_rds_col,
+        aer, true,   # is_lake=.true.
+        mask_snow, bc_col, nlevsno)
+    zero_empty_snow_layers!(
+        col.snl, col.dz, col.z, col.zi, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        mask_snow, bc_col, nlevsno)
+    return nothing
+end
+
