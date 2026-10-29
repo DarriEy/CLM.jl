@@ -328,7 +328,8 @@ replays the step-0 call.
   the first year boundary, which is when `altmax_lastyear_indx_col` finally becomes
   non-zero and the FATES root profile stops being a single layer. That transition is
   now wired (bug 6) but is itself unvalidated.
-* **Plant hydraulics** is OFF (its 2-D solvers are FATAL-stubbed by design), so `hmort`'s
+* **Plant hydraulics** — *superseded 2026-10-29: the 1-D path is now validated, see
+  §"PLANT HYDRAULICS" at the end.* (Originally: OFF; its 2-D solvers are FATAL-stubbed by design), so `hmort`'s
   hydro branch, `FatesPlantHydraulicsMod` and the rhizosphere geometry are untested.
 * **`update_history_nutrflux`** and **`GetLUHStatedata`** (land use) are not ported.
 * The residual **HLM** difference (CLM canopy temperature ~3.7 K at the first packed
@@ -1242,3 +1243,122 @@ relative error of the window mean (|J-F|/|F|):
 ### Still not validated
 SP/nocomp restarts, LUH-driven fixed biogeography (`use_fates_luh`), dry deposition with
 FATES-SP (CTSM disables it too), and runs longer than 10 days.
+
+---
+
+
+---
+
+# PLANT HYDRAULICS (2026-10-29): `use_fates_planthydro`, 1-D Taylor solver
+
+## What was missing
+The solver, the water transfer functions and the FATES-side lifecycle were ported, but
+the host never ran them: no InitHydroGlobals / InitHydrSites / HydrSiteColdStart at init,
+`hydraulics_drive` ran without the host's `total_plant_stored_h2o_col` update, the FATES
+root uptake never reached CLM's soil (CLM kept removing `rootr x qflx_tran_veg`), and
+`UpdateH2OVeg` / `RestartHydrStates` were not called / not ported.
+
+## What is connected now (Fortran reference -> port)
+| Fortran | port |
+|---|---|
+| `SetFatesGlobalElements2` -> `InitHydroGlobals` | `clm_fates_init!(use_planthydro=true)` |
+| `clm_fates%init` -> `InitHydrSites` (after `init_soil_depths`) | `clm_fates_init!` |
+| `init_coldstart` soil pack + `HydrSiteColdStart` (before `init_patches`) | `fates_pack_bcin_hydro_soil!(coldstart=true)` + `HydrSiteColdStart` |
+| `prep_canopyfluxes`: `qflx_transp_pa = 0` | `clm_drv!` canopy-flux setup |
+| `wrap_hydraulics_drive` (CanopyFluxesMod.F90:1635) | `fates_hydraulics_step!` (pack, drive, `total_plant_stored_h2o_col`, hydraulics history) |
+| `ComputeRootSoilFlux` (HydrologyNoDrainageMod.F90:343) | `fates_compute_root_soil_flux!` between the root sink and `soil_water!` |
+| `dynamics_driv` soil hydraulic pack (:1184) | `fates_daily_dynamics_step!` |
+| `update_hlm_dynamics` -> `UpdateH2OVeg` (EDCanopyStructureMod.F90:2073) | `update_hlm_dynamics!` |
+| `wrap_update_hlmfates_dyn` plant water (:1552) | daily step + cold start |
+| `RestartHydrStates` (:312-528) | `RestartHydrStates` (shares `_hydr_set_soil_wtfs!` with the cold start) |
+| BalanceCheck gridcell bypass under planthydro (CTSM#1314) | `balance_check!(use_fates_planthydro=...)` |
+
+Two Fortran behaviours the port reproduces deliberately:
+* `call UpdateH2OVeg(sites(s),bc_out(s),bc_out(s)%plant_stored_h2o_si,1)` passes the
+  "previous" water by reference, aliased to the value UpdateH2OVeg zeroes and rewrites,
+  so its conservation check compares the new value with itself and never fires (it could
+  not hold at the cold start anyway). The port re-diagnoses without the check.
+* Grasses (`allom_smode = 2`): ctsm5.3.012's FATES `bsap_allom` never assigns its
+  intent(out) `sapw_area`, and nothing guards it (no `woody` checks in the hydraulics, no
+  conductance clamp, no `-finit-*` flags in the `-O` build), so `UpdatePlantKmax` /
+  `UpdatePlantHydrLenVol` read uninitialized stack memory. Measured by relinking the
+  stock `cesm.exe` from its own objects: an unmodified relink reproduces the stock h0
+  bit-for-bit; adding one `write` of `a_sapwood` shows 7.46 m2 in UpdatePlantKmax and
+  ~1e-314 (sometimes ~0.3) in UpdatePlantHydrLenVol, and that write alone changes the run
+  (H2OSOI by up to 0.024). The stock planthydro run is therefore not reproducible and
+  cannot be a parity target. Upstream FATES fixed it with `SapwoodAreaGrass` (basal
+  cross-section pi (d/2)^2); the port carries that fix (FatesAllometryMod.jl).
+
+## The reference is a PATCHED Fortran
+Because the stock ctsm5.3.012 result depends on uninitialized memory, the planthydro
+reference is produced by `cesm.exe` relinked with one SourceMod,
+`SourceMods_planthydro/FatesAllometryMod.F90`: the ctsm5.3.012 file plus upstream
+FATES's `SapwoodAreaGrass` copied verbatim from NGEET/fates `main` and called from the
+`case(2)` branch of `bsap_allom` (`diff` against the stock file shows only those lines).
+Woody PFTs and every non-planthydro path are unaffected (nothing else reads the grass
+`sapw_area`).
+
+```bash
+julia scripts/validation/fates_fortran_parity/build_patched_cesm.jl \
+    $SYMFLUENCE_DATA/runs/fates_hydro_patched/exeA \
+    scripts/validation/fates_fortran_parity/SourceMods_planthydro/FatesAllometryMod.F90
+EXE=$SYMFLUENCE_DATA/runs/fates_hydro_patched/exeA/cesm.exe STEPS=240 \
+    bash scripts/validation/fates_fortran_parity/stage_planthydro_run.sh
+julia --project=. scripts/validation/fates_fortran_parity/fates_planthydro_parity.jl \
+    export $RUN/fates_hydro_1pt.clm2.h0.2002-07-01-00000.nc
+```
+`build_patched_cesm.jl` recompiles the given sources with the exact commands in the stock
+case's build log and relinks a private executable; the stock build tree is only read.
+Determinism (`compare_h0_bitwise.jl`, all 591 h0 variables): two runs of the patched
+executable are bit-identical, and so is a third built with an extra `write` of
+`a_sapwood` in FatesPlantHydraulicsMod (which prints the grass area as pi (d/2)^2, e.g.
+1.644e-5 m2 at d = 0.458 cm).
+
+## Fortran reference and result (patched reference)
+`fates_planthydro_fortran.csv` is the 240-step hourly extract of the patched run. Median
+per-step relative error (ratio = sum Julia / sum Fortran over the window):
+
+| field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
+|---|---|---|---|
+| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.26 |
+| leaf psi, woody mean | 1.6e-4 | 1.7e-2 | 0.56 |
+| leaf psi, grass PFT 12 / 14 | 3.2e-4 / 5.5e-4 | 9.2e-2 / 0.20 | 0.21 / 9.0e-2 |
+| leaf / stem water content | 4e-5 / 2e-5 | 1.8e-3 / 1.6e-3 | 0.10 / 0.07 |
+| cohort hydraulic btran | 4.1e-4 | 4.5e-2 | 0.75 |
+| FATES_VEGH2O | 2.8e-5 | 1.1e-2 | 4.1e-2 |
+| QROOTSINK layer 1 (ratio) | 2.1e-2 (1.06) | 5.8e-2 (1.02) | 0.23 (1.00) |
+| SOILLIQ layer 1 / 4 | 4.4e-3 / 0.14 | 4.3e-3 / 5.5e-2 | 2.1e-3 / 2.7e-3 |
+| EFLX_LH_TOT (ratio) | 0.14 (1.19) | 2.2e-2 (0.90) | 3.6e-2 (0.96) |
+| FATES_GPP (ratio) | 2.5e-2 (1.13) | 4.7e-2 (0.90) | 0.33 (0.32) |
+| QVEGT (ratio) | 0.11 (1.11) | 0.16 (0.80) | 0.45 (0.16) |
+| BTRAN (host, ratio) | 0.60 (1.60) | 0.54 (1.44) | 0.61 (0.51) |
+
+With the patched reference the grasses track on day 1 like the woody PFTs, and plant
+water storage agrees to 3e-5. The post-day-3 GPP / transpiration shortfall remains.
+
+### Tracing the post-day-3 shortfall
+* It is not demography. Both models keep 14 cohorts / 2 patches for all 10 days (no
+  recruitment survives with hydraulics on). Per-PFT density, leaf C and storage C agree
+  to < 0.4 % (woody) and < 6 % (grass) through day 10.
+* It is none of the daily-step suspects. Cohort fusion/termination never fires; the
+  daily soil pack, `UpdateSizeDepPlantHydStates`, `UpdateSizeDepRhizVolLenCon` and
+  `UpdateH2OVeg` were re-diffed against the Fortran line by line and match.
+* The first quantities to diverge (scan of every scored field, threshold 5 %) are the
+  HOST soil liquid in layers 1-4 at nstep 2 (cold-start thaw: SOILLIQ_1 2.93 vs 3.34
+  kg/m2) together with LH / QVEGT. The FATES root uptake by layer follows at nstep 19-22
+  (first daytime uptake), then cohort btran / leaf psi at the day-2 daily step (n 26) and
+  every PFT by n 48-50. This is the documented host top-soil phase-change residual (see
+  §"SOIL-BGC COUPLING"), now propagating through the rhizosphere into the plant water.
+  From day 2 the Fortran per-PFT btran becomes erratic hour to hour (0 to 0.74), which the
+  port does not reproduce, and those bursts dominate the Fortran GPP / QVEGT sums.
+  Not yet closed.
+* Host `BTRAN` (biomass-weighted over all cohorts) is 60 % high from step 1 while every
+  per-PFT cohort btran matches to < 1e-3, so that offset sits in the host-side
+  aggregation or in the harness's l2g weighting. Still open.
+* The site is extremely water-stressed (cold-start frozen soil; leaf psi ~ -15 MPa), so
+  transpiration is ~1e-8 mm/s and QVEGT / BTRAN relative errors are on near-zero values.
+* Column water balance with hydraulics on (plant water in the budget): |errh2o| < 6e-13 mm
+  on every non-daily step; the daily steps leave up to 6.8e-5 mm (the daily dynamics do
+  not conserve the stored plant water exactly, and Fortran's check of that is the inert
+  one above). Step 1 carries a 0.118 mm residual that is identical with hydraulics off
+  (the first daily step re-weights the cold-start patches mid-step).

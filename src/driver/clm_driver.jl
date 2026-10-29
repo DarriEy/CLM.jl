@@ -1506,6 +1506,10 @@ function clm_drv_core!(config::CLMDriverConfig,
     if config.use_fates && inst.fates !== nothing
         for s in 1:inst.fates.nsites
             fill!(inst.fates.bc_in[s].filter_photo_pa, 1)
+            # prep_canopyfluxes (clmfates_interfaceMod.F90:2349-2351): zero the
+            # hydraulics transpiration BC; the exposed-veg filter may not call every
+            # patch, and only those patches are re-packed after the solve.
+            hlm_use_planthydro[] == itrue && fill!(inst.fates.bc_in[s].qflx_transp_pa, 0.0)
         end
     end
 
@@ -1692,7 +1696,8 @@ function clm_drv_core!(config::CLMDriverConfig,
         # bc_out.qflx_soil2root_sisl / plant_stored_h2o_si. Default path
         # (planthydro OFF) is byte-identical — the helper returns immediately.
         if hlm_use_planthydro[] == itrue
-            fates_hydraulics_step!(inst; nlevsoil=varpar.nlevsoi, dtime=dtime)
+            fates_hydraulics_step!(inst; nlevsoil=varpar.nlevsoi, dtime=dtime,
+                                   exposedvegp=filt.exposedvegp)
         end
     end
 
@@ -2045,6 +2050,12 @@ function clm_drv_core!(config::CLMDriverConfig,
         ss, cs, wfb, ef,
         col, lun, pch;
         use_hydrstress=config.use_hydrstress)
+    # FATES plant hydraulics: the soil sink is what the plant hydraulics took up,
+    # not the root-fraction x transpiration profile (HydrologyNoDrainageMod.F90:342-344,
+    # ComputeRootSoilFlux). Overwrites qflx_rootsoi_col on the FATES columns only.
+    if config.use_fates && inst.fates !== nothing && hlm_use_planthydro[] == itrue
+        fates_compute_root_soil_flux!(inst; nlevsoil=nlevsoi)
+    end
 
     # --- 12. Soil water movement (Richards equation) ---
     # Configure solver to match Fortran namelist:
@@ -3134,7 +3145,11 @@ function clm_drv_core!(config::CLMDriverConfig,
                    # — fsa/fsr unset on FATES patches, ~142 W/m2 solar residual. The
                    # errors are still computed and warned; only the abort is held
                    # back. See the TODO at the top of balance_check!.
-                   use_fates=config.use_fates)
+                   use_fates=config.use_fates,
+                   # CTSM bypasses the GRIDCELL water check under FATES plant
+                   # hydraulics (BalanceCheckMod.F90:754-756, ESCOMP/CTSM#1314);
+                   # the column check, which carries the plant water storage, runs.
+                   use_fates_planthydro=(config.use_fates && hlm_use_planthydro[] == itrue))
 
     # ========================================================================
     # Diagnostics

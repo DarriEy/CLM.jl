@@ -134,12 +134,9 @@ function mortality_rates(cohort_in::fates_cohort_type, bc_in::bc_in_type,
         hf_flc_threshold = p.hf_flc_threshold[ipft]
 
         if hlm_use_planthydro[] == itrue
-            # TODO Batch NN: the plant-hydraulics flc path reads the cohort's
-            # ftc_ag / ftc_troot / ftc_aroot fractional-loss-of-conductivity
-            # arrays, which are populated by FatesPlantHydraulicsMod (only when
-            # hlm_use_planthydro == itrue, off in the default + test path). The
-            # branch is ported faithfully; it requires those co_hydr fields to be
-            # present on the cohort hydraulics object.
+            # Hydraulic failure from the fractional loss of conductivity of the most
+            # embolized compartment; co_hydr.ftc_* are set each timestep by
+            # Hydraulics_BC (EDMortalityFunctionsMod.F90:167-181).
             #   note the flc is set as the fraction of max conductivity in hydro
             min_fmc_ag = minimum(cohort_in.co_hydr.ftc_ag)
             min_fmc_tr = cohort_in.co_hydr.ftc_troot

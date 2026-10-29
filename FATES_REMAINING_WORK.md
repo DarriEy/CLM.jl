@@ -185,6 +185,19 @@ no `lmort_logging` (use `lmort_direct`); running means live at patch not cohort 
 
 ## 3. Plant-hydraulics stubs — ~3–4 sub-batches
 
+> **Status 2026-10-29 — the 1-D path is connected end to end** (`fates/planthydro`):
+> `clm_initialize!(use_fates_planthydro=true)` runs InitHydroGlobals / InitHydrSites /
+> HydrSiteColdStart; every step runs `wrap_hydraulics_drive` (`fates_hydraulics_step!`)
+> after AccumulateFluxes, puts the plant water in `total_plant_stored_h2o_col`, and
+> `ComputeRootSoilFlux` (`fates_compute_root_soil_flux!`) makes FATES's
+> `qflx_soil2root_sisl` the host soil sink; the daily step packs the soil hydraulic
+> properties and re-diagnoses `UpdateH2OVeg` in `update_hlm_dynamics`; hydraulic-failure
+> mortality now reads live `ftc_*`; `RestartHydrStates` is ported. Validated against an
+> hourly Fortran run (see `scripts/validation/fates_fortran_parity/README.md`
+> §"PLANT HYDRAULICS"). Still open: the 2-D solvers (`MatSolve2D`/`PicardSolve2D`, still
+> `fates_endrun`), a host-level FATES restart driver (RestartHydrStates is called by tests
+> only), and grass parity (the reference reads an uninitialized `sapw_area`; the port uses upstream FATES `SapwoodAreaGrass` — see the README).
+
 The hard math is **already ported** (1D Taylor solver core ~1,300 lines, all plant-level helpers,
 WTF/WKF retention+conductivity, mem types). ~2,700 Fortran lines / 19 routines remain (the two
 2D solvers `MatSolve2D`/`PicardSolve2D` are correctly `fates_endrun`-stubbed and **not** ported).

@@ -432,6 +432,10 @@ using CLM
     # CTSM mode dependencies, the per-mode HLM patch reservation, and data-gated live
     # runs of each mode scored against hourly Fortran CTSM extracts.
     include("test_fates_reduced_modes.jl")
+    # FATES plant hydraulics (use_fates_planthydro) connected to the host: soil sink,
+    # plant water in the column budget, hydraulic-failure mortality, RestartHydrStates,
+    # and woody leaf water potential vs the Fortran fates_parity_1pt run (data-gated).
+    include("test_fates_planthydro_coupling.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

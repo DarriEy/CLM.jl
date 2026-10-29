@@ -16,7 +16,8 @@
 #
 # Minimal config (the simplest branch that cold-starts with NO external data):
 #   * use_fates = true, carbon-only PARTEH (prt_carbon_allom_hyp)
-#   * planthydro OFF, SPITFIRE/fire OFF (no_fire), inventory-init OFF
+#   * planthydro OFF by default (use_planthydro=true runs InitHydroGlobals /
+#     InitHydrSites / HydrSiteColdStart), SPITFIRE/fire OFF (no_fire), inventory-init OFF
 #   * SP OFF, nocomp OFF, fixed-biogeog OFF, LUH OFF, harvest/logging OFF
 #   * tree-damage OFF, cohort-age-tracking OFF, ch4 OFF, vertsoilc OFF (=> nlevdecomp 1)
 # This is the default NBG (natural-bare-ground) cold-start: init_patches! builds a
@@ -624,6 +625,11 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     InitPARTEHGlobals()
     nleafage[] = size(prt_params.leaf_long, 2)
 
+    # SetFatesGlobalElements2 (FatesInterfaceMod.F90:398-400): under plant hydraulics,
+    # build the plant water transfer functions (WRF/WKF per organ x PFT + stomata)
+    # from the parameter file. Not needed (and not built) with hydraulics off.
+    use_planthydro && InitHydroGlobals!(numpft[])
+
     # Running-mean time-averaging globals. Fortran FatesInterfaceMod:1041-1047 defines
     # every rmean_def with `up_period = hlm_stepsize` -- the HOST's actual timestep --
     # and derives `n_mem = nint(mem_period/up_period)`. Both `hlm_stepsize` and
@@ -780,6 +786,17 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # legacy one-decomp-layer path keeps its synthetic 0.1 m layering unchanged.
     use_vertsoilc && fates_init_soil_depths!(fates, inst)
 
+    # clm_fates%init (clmfates_interfaceMod.F90:913-915): after init_soil_depths,
+    # allocate each site's hydraulics object and its rhizosphere layering.
+    # The rhizosphere layers are built from the host soil layering, so the
+    # legacy synthetic 0.1 m layering (no init_soil_depths) is refused here.
+    if use_planthydro
+        use_vertsoilc || error("clm_fates_init!: use_planthydro needs the host soil " *
+                               "layering (init_soil_depths), i.e. use_vertsoilc=true " *
+                               "(the CTSM FATES soil-BGC configuration).")
+        InitHydrSites(fates.sites, fates.bc_in)
+    end
+
     # ---- W2: cold-start chain (init_coldstart) ----
     sites = fates.sites
     bc_in = fates.bc_in
@@ -796,6 +813,18 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
             fcol_sp[s] == 0 && continue
             fates_pack_bcin_sp!(inst; s = s, c = fcol_sp[s])
         end
+    end
+    # init_coldstart (clmfates_interfaceMod.F90:2119-2157): the site rhizosphere
+    # shells must exist before init_patches! creates the cohorts. Pack the host soil
+    # (incl. the ice-reduced effective porosity) and cold-start the site hydraulics.
+    if use_planthydro
+        hcol = fates_site_columns(inst.column, inst.landunit, nsites)
+        for s in 1:nsites
+            hcol[s] == 0 && continue
+            fates_pack_bcin_hydro_soil!(bc_in[s], inst; c=hcol[s], nlevsoil=nlevsoil,
+                                        coldstart=true)
+        end
+        HydrSiteColdStart(sites, bc_in)
     end
     init_patches!(nsites, sites, bc_in)
     for s in 1:nsites
@@ -854,6 +883,19 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                 fates_unpack_bcout_canopy_structure!(inst; s=s, c=c, p=p, ifp=ifp)
             end
             fates_set_filters!(inst; c=c, s=s)
+        end
+    end
+
+    # wrap_update_hlmfates_dyn (clmfates_interfaceMod.F90:1552-1558): the cold-start
+    # plant water enters the host column water from the first step's begwb on. Mapped
+    # through the natural-veg columns (f2hmap%fcolumn), which does not depend on the
+    # caller having flagged col.is_fates yet.
+    if use_planthydro
+        hcol = fates_site_columns(inst.column, inst.landunit, nsites)
+        for s in 1:nsites
+            hcol[s] == 0 && continue
+            inst.water.waterdiagnosticbulk_inst.total_plant_stored_h2o_col[hcol[s]] =
+                fates.bc_out[s].plant_stored_h2o_si
         end
     end
 
