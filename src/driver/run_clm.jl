@@ -118,7 +118,7 @@ function run_clm!(config::CLMDriverConfig, inst::CLMInstances, bounds::BoundsTyp
                  is_beg_curr_day = is_beg_curr_day(tm),
                  is_end_curr_day = is_end_curr_day(tm),
                  is_beg_curr_year = is_beg_curr_year(tm),
-                 dtime = dt, mon = mon, day = dy,
+                 dtime = dt, mon = mon, day = dy, secs = tod,
                  photosyns = inst.photosyns)
 
         # --- history accumulate + periodic write -----------------------------

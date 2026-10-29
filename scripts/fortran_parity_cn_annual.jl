@@ -399,7 +399,7 @@ function run_cn_annual(; ndays::Int = 365)
                 CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
                 nstep = tm.nstep, is_first_step = false,
                 is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
-                is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy,
+                is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy, secs = tod,
                 photosyns = inst.photosyns)
             # CN_NANSCAN=1: after every step, report the first non-finite value in the
             # PHS-read/written state on active patches / the soil column.

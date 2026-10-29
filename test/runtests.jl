@@ -483,6 +483,7 @@ const INPROCESS_TEST_FILES = [
             "test_fortran_parity_cn.jl",         # CN/BGC/PHS/LUNA/FUN (gated)
             "test_fortran_parity_ch4_source.jl", # CH4-as-a-source, CN locked + CH4 free-running (gated)
             "test_fates_rooting_depth_roll.jl",  # 1 Jan active-layer roll reaches FATES rooting depth (B gated)
+            "test_cn_active_layer_roll.jl",      # 1 Jan active-layer roll reaches the CN vertical profiles (C gated)
             "test_fun_coldstart_finite.jl",      # use_fun=true cold start stays finite (gated)
             "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
             "test_fortran_parity_freewins.jl",   # soilresis, aerosol free-wins (gated)
