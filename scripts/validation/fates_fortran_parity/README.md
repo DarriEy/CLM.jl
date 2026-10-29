@@ -1628,7 +1628,58 @@ path: 33 iterations, NaN at the same iterations, max |residual| equal to ~1e-9 r
 nothing further can be compared; the parameter file's "deprecated" label fits.
 
 ### Picard (2)
-PICARD_RESULTS
+Fortran runs all 240 steps. `fates_planthydro_picard_fortran.csv` is the hourly extract
+(`fates_planthydro_parity.jl export`). It is scored with
+`FATES_HYDRO_SOLVER=2 julia --project=. fates_planthydro_parity.jl fates_planthydro_picard_fortran.csv 240`.
+
+The table gives the median per-step relative error, the max in brackets, and the sum ratio
+Julia / Fortran over the window in parentheses:
+
+| field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
+|---|---|---|---|
+| leaf psi, woody mean | 4.9e-7 [2.1e-5] (1.00) | 1.5e-5 [2.4e-5] (1.00) | 1.3e-5 [0.73\*] (1.01) |
+| leaf psi, PFT 1 | 2.6e-7 [2.2e-5] | 1.2e-5 [2.3e-5] | 1.3e-5 [0.23\*] |
+| leaf psi, grass PFT 12 / 14 | 8e-6 / 7e-6 [7e-5] | 2.6e-5 / 2.8e-5 [7e-5] | 1.0e-5 / 7.5e-6 [1.7e-3] |
+| leaf / stem water content | 1.2e-7 / 6e-8 | 6.1e-6 / 7.4e-6 | 5e-7 / 8e-7 [1-2e-2\*] |
+| cohort hydraulic btran | 1.3e-6 [5e-5] | 2.4e-5 [5.5e-5] | 2.9e-6 [0.10\*] |
+| FATES_VEGH2O | 1.1e-7 [1.1e-5] | 7.3e-6 [1.2e-5] | 3.2e-6 [1.5e-5] |
+| QROOTSINK layer 1 | 3.6e-5 (1.00) | 2.4e-5 (1.00) | 6.6e-6 (1.00) |
+| SOILLIQ layer 1 / 4 | 2.6e-6 / 1.9e-8 | 2.1e-6 / 3.7e-6 | 1.7e-6 / 1.6e-6 |
+| EFLX_LH_TOT | 6.6e-6 (1.00) | 1.2e-5 (1.00) | 2.1e-5 (1.00) |
+| FATES_GPP | 8.3e-5 (1.00) | 8.7e-5 (1.00) | 1.1e-4 (1.00) |
+| QVEGT | 1.5e-5 (1.00) | 5.9e-5 (1.00) | 5.5e-5 (1.00) |
+| BTRAN (host) | 6.3e-7 | 2.5e-5 | 7.0e-6 |
+
+The column water balance |errh2o| is <= 1.0e-12 mm on every step. \*All the large maxima
+fall on the daily FATES step records (nstep 97, 121, ..., 217). The cohort counts are the
+same in both models, and the next step matches to ~1e-5 again, so these are transients in
+the n-weighted means at the daily step, not solver drift.
+
+Unlike the 1-D solver, the Picard run does not decorrelate after day 3. Picard is
+well conditioned here: the CFL split puts most calls at the 20-substep cap of 180 s. For
+scale, Fortran solver 1 and Fortran solver 2 differ by 2 % in leaf psi on day 1, and
+the two runs are 30-60x apart in GPP and cohort btran afterwards. So the choice of solver
+dominates the hydraulics on this site.
+
+**Fortran Picard oddity.** Of 88,097 traced substeps, 88,096 exit the Picard loop after
+the first iteration. The stopping test (`max|dtheta| < 1e-3` on the update itself, or
+water balance < 1e-8 kg) is met by the first linear solve, so the scheme is effectively a
+one-step linearised implicit solve, not an iterated Picard solve. The `icnv = 1` restart
+path (after 100 iterations) never fires. If it did, it would restart from t = 0 with the
+same substep and one iteration per substep; the substep is not shortened, despite the
+"explicit integration with small time step" comment.
+
+**Teacher-forced replay** (`FATES_HYDRO_SOLVER=2 fates_planthydro_replay.jl` on the
+instrumented Picard dump). The relative error in each cohort's change of water content
+per call is:
+* calls 1-20: <= 4.5e-8, mostly 1e-10 to 1e-13;
+* calls 21-74: median 6.6e-6, p90 7.3e-5, max 9.8e-3 (on near-zero changes). These follow
+  the host's transpiration input, `qflx_transp_pa`, which is 1e-4 off from call 21, as in
+  the 1-D replay.
+
+From call 75 a patch holds several cohorts of the same PFT. The replay keys its forcing
+by (patch, pft), so it can no longer assign the Fortran states to the right cohorts and
+is not meaningful there. This harness limitation also applies to the 1-D replay.
 
 ---
 

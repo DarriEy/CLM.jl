@@ -24,10 +24,12 @@ using LinearAlgebra
 
 include("testdata.jl")
 
-# Per-field max relative error tolerances of the Picard (solver 2) day-1 run vs the
-# Fortran extract. WIP: to be set from the 240-step parity scorecard (not yet run to
-# completion); empty => only the column water balance is checked.
-const PICARD_TOL = Dict{String,Float64}()
+# Per-field max relative error tolerances of the Picard (solver 2) run vs the Fortran
+# extract over nsteps 2-24 (day 1, before the first daily FATES step). Measured maxima
+# (README §"PLANT HYDRAULICS: 2-D solvers"): PSI_LEAF 2.1e-5, PSI_LEAF_pft1 2.2e-5,
+# PSI_LEAF_pft12 7.2e-5, TH_LEAF 1.3e-5, BTRAN_CO 5.0e-5, FATES_VEGH2O 1.1e-5; ~10x headroom.
+const PICARD_TOL = Dict("PSI_LEAF" => 3e-4, "PSI_LEAF_pft1" => 3e-4, "PSI_LEAF_pft12" => 1e-3,
+                        "TH_LEAF" => 2e-4, "BTRAN_CO" => 5e-4, "FATES_VEGH2O" => 2e-4)
 
 # ---------------------------------------------------------------------------------
 # Synthetic single-cohort site (same construction as test_fates_planthydraulics_tierB)
