@@ -328,8 +328,8 @@ vegetated patch `p` state:
     clobber those with its unsolved (zero) `bc_out`.
   * `albgr_dir_rb` / `albgr_dif_rb` — ground albedo per band (surfalb
     `albgrd_col` / `albgri_col`).
-  * `fcansno_pa` — fraction of canopy covered in snow (0 stand-in; no CLM source
-    on the carbon-only path).
+  * `fcansno_pa` — fraction of canopy covered in snow, from the host
+    `waterdiagnosticbulk.fcansno_patch[p]` (`BulkDiag_FracWet`).
 
 The FATES radiation solver uses `num_swb` bands (vis, nir); CLM carries `NUMRAD`
 (also 2) radiation bands in the same vis/nir order, so the band index maps directly.
@@ -360,7 +360,13 @@ function fates_pack_bcin_radiation!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     bc.coszen_pa[ifp]        = coszen
     bc.filter_vegzen_pa[ifp] = fates_in_vegsol_filter(inst, p, coszen)
-    bc.fcansno_pa[ifp]       = 0.0  # no snow-on-canopy source on the carbon-only path
+    # Snow-covered canopy fraction (CanopyHydrologyMod::BulkDiag_FracWet), as the
+    # Fortran host passes it: clmfates_interfaceMod::wrap_canopy_radiation,
+    # `bc_in(s)%fcansno_pa(ifp) = fcansno(p)` (waterdiagnosticbulk%fcansno_patch).
+    # FatesNormanRadMod blends rho/tau toward the snow optics with it.
+    wdb = inst.water.waterdiagnosticbulk_inst
+    bc.fcansno_pa[ifp] = (p <= length(wdb.fcansno_patch) && isfinite(wdb.fcansno_patch[p])) ?
+                         wdb.fcansno_patch[p] : 0.0
 
     # Ground albedo (site broadband). Default to 0 if surfalb not yet computed
     # (the very first timestep before surface_albedo! runs).
@@ -1059,4 +1065,66 @@ function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
     end
 
     return inst
+end
+
+# Last HLM patch of column c (patchf, or patchi + npatches - 1 when a hand-built
+# harness leaves patchf unset) -- the same bound fates_veg_patches uses.
+function _fates_col_patchf(col, c::Int)
+    pf = col.patchf[c]
+    pf >= col.patchi[c] && return pf
+    npc = col.npatches[c]
+    return npc >= 1 ? col.patchi[c] + npc - 1 : col.patchi[c]
+end
+
+"""
+    fates_transfer_z0m_disp!(inst)
+
+Copy the FATES momentum roughness length and displacement height into the HLM for
+every FATES column. Mirrors `clmfates_interfaceMod::TransferZ0mDisp`, which
+`BiogeophysPreFluxCalcsMod::SetZ0mDisp` calls every timestep before it sets z0m/displa
+for the non-FATES patches only: zero patches `patchi+1:patchf` of the column, then fill
+each vegetated FATES patch `p = ifp + patchi` from `bc_out%z0m_pa / displa_pa`.
+"""
+function fates_transfer_z0m_disp!(inst::CLMInstances)
+    fates = inst.fates
+    fates === nothing && return inst
+    col = inst.column
+    cs = inst.canopystate
+    s = 0
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        s += 1
+        s <= fates.nsites || break
+        pi, pf = col.patchi[c], _fates_col_patchf(col, c)
+        for p in (pi + 1):pf
+            cs.z0m_patch[p] = 0.0
+            cs.displa_patch[p] = 0.0
+        end
+        bc = fates.bc_out[s]
+        for (ifp, p) in fates_veg_patches(fates.sites[s], c, col)
+            cs.z0m_patch[p] = bc.z0m_pa[ifp]
+            cs.displa_patch[p] = bc.displa_pa[ifp]
+        end
+    end
+    return inst
+end
+
+"""
+    fates_patch_is_fates(inst) -> Vector{Bool}
+
+Fortran `patch%is_fates`: true for the vegetated patch slots `patchi+1:patchf` of every
+FATES column (clmfates_interfaceMod::init, `patch%is_fates(pi:pf) = .true.` with
+`pi = col%patchi(c)+1`). The bare-ground patch `patchi` is NOT flagged, so the host
+`SetZ0mDisp` still sets its z0m / displa.
+"""
+function fates_patch_is_fates(inst::CLMInstances)
+    col = inst.column
+    out = fill(false, length(inst.patch.column))
+    for c in eachindex(col.is_fates)
+        col.is_fates[c] || continue
+        for p in (col.patchi[c] + 1):_fates_col_patchf(col, c)
+            out[p] = true
+        end
+    end
+    return out
 end
