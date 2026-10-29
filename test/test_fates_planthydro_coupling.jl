@@ -68,15 +68,9 @@ include("testdata.jl")
             # and nstep 1, whose first daily step re-weights the cold-start patches
             # mid-step — a 0.118 mm residual that is identical with hydraulics OFF
             # (a FATES-harness artifact, not a hydraulics term).
-            # recs[k] is nstep k-1; nstep 25 is the day-2 daily step, which does not
-            # conserve the stored plant water exactly (README §"PLANT HYDRAULICS": up to
-            # ~1e-4 mm; with #349's cold-start column flags it is 1.07e-4 mm at nstep 25).
-            # Every other step closes to round-off.
-            daily = (26,)
-            errs = [abs(recs[k]["ERRH2O_COL"]) for k in 3:length(recs) if !(k in daily)]
+            errs = [abs(r["ERRH2O_COL"]) for r in recs[3:end]]
             @test all(isfinite, errs)
             @test maximum(errs) < 1e-8
-            @test all(abs(recs[k]["ERRH2O_COL"]) < 2e-4 for k in daily if k <= length(recs))
 
             # 2. the soil sink is the FATES uptake; storage closes the plant budget.
             for i in 2:nsteps
