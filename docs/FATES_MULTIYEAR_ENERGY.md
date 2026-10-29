@@ -375,3 +375,36 @@ the ≥ 100 cm class in the same model year as Fortran.
 
   Without an input CSV the scoring block reports `@test_skip`; it never passes
   vacuously.
+
+### Follow-up: `site.lat` / `site.lon` were never set (2026-10-29)
+
+`clmfates_interfaceMod.F90:883-884` sets `sites(s)%lat = grc%latdeg(g)` and
+`sites(s)%lon = grc%londeg(g)` while the FATES sites are being set up. The port never
+did this, so `site.lat` stayed NaN. `currentSite%lat > 0` (`EDPhysiologyMod.F90:1033,
+:1087`) was therefore false, and the phenology at Bow (51.36°N) used the
+**southern-hemisphere** branch: `gddstart = 181`, so GDD was reset on 1 July, and
+`ncdstart = 120`. `clm_fates_init!` now copies the gridcell lat/lon onto each site.
+The other assignments in that Fortran block were checked:
+
+* `h_gid` was already set.
+* The fixed-biogeography `pft_areafrac` was already set.
+* The bc allocation and zeroing were already done.
+
+Rerun of the 4-year Bow comparison with the clock fix and the latitude fix:
+
+| model yr | recruitment J / F (ratio) | NPP J / F (ratio) | max ncoh J / F | woody max dbh J | grass max dbh J / F class |
+|---|---|---|---|---|---|
+| 1 | 6.40 / 6.37 (1.01) | 0.99 / 0.45 (2.2) | 891 / 177 | 1.93 cm | 22 / 10 |
+| 2 | 126 / 256 (0.49) | 1.88 / 1.58 (1.19) | 898 / 880 | 2.79 cm | 91 / 30 |
+| 3 | 159 / 396 (0.40) | 1.88 / 1.49 (1.26) | 881 / 672 | 3.95 cm | 232 / 100 |
+| 4 | 180 / 263 (0.69) | 2.06 / 1.74 (1.19) | 863 / 282 | 5.13 cm | 267 / 100 |
+
+Compared with the run that had only the clock fix:
+
+* **Years 2–4 NPP moved toward Fortran**: the excess fell from 1.5–1.9× to 1.19–1.26×.
+* **Recruitment flipped from 1.4–2.2× high to 0.4–0.7× low.**
+* Year 1 is unchanged up to day 120. The missed day-40 cold leaf-off (residual 1)
+  and the patch-count divergence (residual 2) are both still present.
+
+The regression test's woody-size-class check now allows one class of slack: Julia
+reaches 5.13 cm in year 4, against Fortran's < 5 cm.

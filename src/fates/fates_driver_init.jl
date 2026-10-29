@@ -641,6 +641,27 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         bc.hlm_harvest_units    = fates_unset_int
         bc.site_area            = area
 
+        # Pass the grid-cell derived attributes to the site (clmfates_interfaceMod.F90
+        # :880-884: `sites(s)%lat = grc%latdeg(g)`, `sites(s)%lon = grc%londeg(g)` with
+        # g = col%gridcell(fcolumn(s))). This was never ported, so `site.lat` stayed NaN
+        # and FATES phenology (`currentSite%lat > 0`, EDPhysiologyMod.F90:1033, :1087) took the
+        # SOUTHERN-hemisphere branch everywhere (gddstart = 181, ncdstart = 120). The
+        # other assignments in that Fortran block -- `h_gid` (set below) and the
+        # fixed-biogeog `pft_areafrac` (set just below) -- are already wired. Site s
+        # maps onto column s here (one site per column, `clm_initialize!`).
+        let colg = inst.column.gridcell, grc = inst.gridcell
+            if s <= length(colg)
+                g = colg[s]
+                latd = grc.latdeg[g]; lond = grc.londeg[g]
+                # latdeg/londeg can be unfilled on a hand-built surfdata; derive them
+                # from the radian lat/lon as the harnesses do.
+                isfinite(latd) || (latd = rad2deg(grc.lat[g]))
+                isfinite(lond) || (lond = rad2deg(grc.lon[g]))
+                fates.sites[s].lat = latd
+                fates.sites[s].lon = lond
+            end
+        end
+
         # Fixed-biogeog PFT presence (climate-appropriate seeding).  `pft_areafrac`
         # is allocated (length numpft) by `allocate_bcin` only when fixed-biogeog is
         # on; `baregroundfrac` must be finite (the no-LUH `_set_site_area_pft!` branch
