@@ -1206,16 +1206,18 @@ function clm_drv_core!(config::CLMDriverConfig,
             fire_stream_interp!(inst.cnfire_li2014, inst.cnfire_stream, grc;
                                 calday     = jday + secs / SECSPDAY,
                                 dayspyr    = 365.0,
-                                bounds_grc = bc_grc)
+                                bounds_grc = bc_grc,
+                                year       = year)
         end
     end
     if config.use_fates && fates_fire_data_active(inst.fates_fire_data)
         # clm_fates%InterpFileInputs -> fates_fire_data_method%FireInterp
         # (clm_driver.F90:464, only when fates_spitfire_mode > scalar_lightning).
         fates_fire_interp!(inst.fates_fire_data, grc;
-                           calday     = jday + secs / SECSPDAY,
+                           calday     = jday + (secs + inst.fates_fire_data.tod_offset) / SECSPDAY,
                            dayspyr    = 365.0,
-                           bounds_grc = bc_grc)
+                           bounds_grc = bc_grc,
+                           year       = year)
     end
     # Placeholder: urbantv_interp!(bounds_proc) [urban TV]
 
