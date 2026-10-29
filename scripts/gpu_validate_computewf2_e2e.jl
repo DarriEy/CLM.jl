@@ -1,5 +1,5 @@
 # ==========================================================================
-# gpu_validate_computewf2_e2e.jl — Metal parity for compute_wf2!
+# gpu_validate_computewf2_e2e.jl — device parity for compute_wf2! (any backend)
 #
 # `compute_wf2!` (src/biogeophys/hydrology_no_drainage.jl) was added by #248 to
 # reproduce the CTSM CARRYOVER quirk: HydrologyNoDrainageMod.F90:640-699 computes
@@ -22,8 +22,8 @@
 
 using CLM
 using Printf
-import Metal
 include(joinpath(@__DIR__, "gpu_backends.jl"))
+include(joinpath(@__DIR__, "gpu_adapt.jl"))
 
 function reldiff(a, b)
     A = Array(a); B = Array(b); m = 0.0
@@ -34,10 +34,9 @@ function reldiff(a, b)
     return m
 end
 
-struct MetalF32 end
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:AbstractFloat}) = Metal.MtlArray(Float32.(x))
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{<:Integer})       = Metal.MtlArray(x)
-CLM.Adapt.adapt_storage(::MetalF32, x::AbstractArray{Bool})            = Metal.MtlArray(x)
+# Backend-agnostic device move at the backend's working precision (Float32 on
+# Metal, Float64 on CUDA/AMDGPU) — this harness used to hard-code Metal.MtlArray.
+todev(x) = mf(device_array_type(), x)
 
 const NC       = 6      # columns (mix of masked-in / masked-out)
 const NLEVGRND = 5
@@ -98,14 +97,13 @@ function main()
     CLM.compute_wf2!(wf2_cpu, s.h2osoi_vol, s.watsat, s.sucsat, s.bsw, s.z, s.dz,
                      s.mask, bounds, NLEVGRND, NLEVSNO, INNER, OUTER)
 
-    # ---- device (Metal, Float32) ----
-    A = MetalF32()
-    wf2_dev = CLM.Adapt.adapt(A, fill(-999.0, NC))
+    # ---- device (detected backend) ----
+    wf2_dev = todev(fill(-999.0, NC))
     CLM.compute_wf2!(wf2_dev,
-                     CLM.Adapt.adapt(A, s.h2osoi_vol), CLM.Adapt.adapt(A, s.watsat),
-                     CLM.Adapt.adapt(A, s.sucsat),     CLM.Adapt.adapt(A, s.bsw),
-                     CLM.Adapt.adapt(A, s.z),          CLM.Adapt.adapt(A, s.dz),
-                     CLM.Adapt.adapt(A, s.mask), bounds, NLEVGRND, NLEVSNO, INNER, OUTER)
+                     todev(s.h2osoi_vol), todev(s.watsat),
+                     todev(s.sucsat),     todev(s.bsw),
+                     todev(s.z),          todev(s.dz),
+                     todev(s.mask), bounds, NLEVGRND, NLEVSNO, INNER, OUTER)
     wf2_host = Array(wf2_dev)
 
     ok = true
@@ -141,7 +139,7 @@ function main()
         @printf("    col %d: cpu=% .8f  dev=% .8f\n", c, wf2_cpu[c], wf2_host[c])
     end
 
-    println(ok ? "\ncompute_wf2! Metal parity: PASS" : "\ncompute_wf2! Metal parity: FAIL")
+    println(ok ? "\ncompute_wf2! $(gpu_backend_name()) parity: PASS" : "\ncompute_wf2! $(gpu_backend_name()) parity: FAIL")
     return ok ? 0 : 1
 end
 
