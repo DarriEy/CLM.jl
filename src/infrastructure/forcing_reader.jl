@@ -410,6 +410,15 @@ function read_forcing_step!(fr::ForcingReader, a2l::Atm2LndData,
     if haskey(ds, "QBOT")
         qbot = _read_var("QBOT", 0.003)
         for g in 1:ng
+            # CLMNCEP datm caps the stream specific humidity at saturation
+            # (datm_datamode_clmncep_mod.F90:441-446: qsat from datm_eSat(tbot,tbot),
+            # ice polynomial when tbot < tfrz). Cold, near-saturated hours in the
+            # observed forcing exceed it; the h0 QBOT of the Fortran references is
+            # exactly min(QBOT_file, qsat). Without the cap the port saw moister air
+            # than CTSM on those hours (lake LH ~1-2% off at Bow steps 8-17).
+            let e = _datm_esat(tbot[g], tbot[g])
+                qbot[g] = min(qbot[g], (0.622 * e) / (psrf[g] - 0.378 * e))
+            end
             # e = q * p / (0.622 + 0.378 * q)
             a2l.forc_vp_grc[g] = qbot[g] * psrf[g] / (0.622 + 0.378 * qbot[g])
             # Fortran carries Sa_shum straight through to forc_q_not_downscaled_grc.
@@ -601,4 +610,20 @@ function _find_closest_time(times::Vector{DateTime}, target::DateTime, hint::Int
     end
 
     return best_idx
+end
+
+# Saturation vapour pressure [Pa] used by the CLMNCEP datm to cap the stream
+# humidity (datm_datamode_clmncep_mod.F90 datm_eSat): 6th-order polynomials in
+# t = clamp(tK - tfrz, -50, 50) C, over ICE when tKbot < tfrz.
+function _datm_esat(tK::Real, tKbot::Real)
+    t = min(50.0, max(-50.0, tK - TFRZ))
+    if tKbot < TFRZ
+        return 100.0 * (6.109177956 + t * (5.034698970e-01 + t * (1.886013408e-02 +
+               t * (4.176223716e-04 + t * (5.824720280e-06 + t * (4.838803174e-08 +
+               t * 1.838826904e-10))))))
+    else
+        return 100.0 * (6.107799961 + t * (4.436518521e-01 + t * (1.428945805e-02 +
+               t * (2.650648471e-04 + t * (3.031240396e-06 + t * (2.034080948e-08 +
+               t * 6.136820929e-11))))))
+    end
 end

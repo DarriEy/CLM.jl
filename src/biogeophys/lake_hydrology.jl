@@ -963,7 +963,8 @@ function lake_hydrology!(
     dtime::Real,
     nlevsno::Int,
     nlevsoi::Int,
-    nlevgrnd::Int
+    nlevgrnd::Int;
+    snow_layer_physics!::Union{Nothing,Function} = nothing
 )
     # No lake columns/patches → nothing to do. All work here is lake-gated; several
     # data-dependent (snl-mutating, single-snow-layer) sections remain host loops that
@@ -1108,10 +1109,14 @@ function lake_hydrology!(
     mask_lakenosnow = fill!(similar(mask_lake, Bool, nc), false)
     lakehyd_build_snowfilter!(mask_lakesnow, mask_lakenosnow, mask_lake, snl)
 
-    # Note: SnowWater, SnowCapping, SnowCompaction, CombineSnowLayers,
-    # DivideSnowLayers, ZeroEmptySnowLayers from SnowHydrologyMod are called
-    # in the Fortran code here. Those are already ported in snow_hydrology.jl
-    # and would be called by the driver. For this port, they are omitted as stubs.
+    # SnowWater, SnowCapping, SnowCompaction, CombineSnowLayers, DivideSnowLayers
+    # (is_lake=.true.) and ZeroEmptySnowLayers over the lake snow filters
+    # (LakeHydrologyMod.F90:404-436). They need driver-level state (aerosols, topo,
+    # forcing wind, the SCF method), so the driver supplies them as a callback.
+    # They were stubbed while lakes never received snowfall; once new snow reaches a
+    # lake column (UpdateQuantitiesForNewSnow on the lake filter) a resolved lake
+    # snowpack must be evolved, or its sublimation/percolation never reach the state.
+    snow_layer_physics! === nothing || snow_layer_physics!(mask_lakesnow, mask_lakenosnow)
 
     # =====================================================================
     # 6. Recompute h2osno_total

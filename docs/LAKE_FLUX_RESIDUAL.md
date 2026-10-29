@@ -1,14 +1,18 @@
 # Lake surface turbulent-flux residual (backlog B1)
 
-> **STATUS 2026-07-21 — LARGELY RESOLVED.** Five distinct defects (A–E) were root-caused
-> and fixed: #275 (harness off-by-one — the dominant cause), #279 (`t_ref2m` dead-write +
-> the Monin-Obukhov kernel had 1 of 4 stability regimes), #281 (`ks` eddy depth-decay
-> hardwired to zero → the lake mixed to the bed), #284 (`savedtke1` cold-start seed tuned
-> against #275's off-by-one), #285 (re-evaluate the frozen/unfrozen surface branch each
-> iteration → step-1 skin over-cool). **Run max\|rel\| went 13 → ~0.46; steps 3–47 now
-> match Fortran to ~0.03–0.05.** The only remaining item is a step-1 `LAKE_REC_SHIFT`
-> harness record-alignment (not physics). The narrative below stops at defect D and is
-> preserved as the investigation log — read it as history, not current status.
+> **STATUS 2026-10-28 — CLOSED TO THE FLOAT32 FLOOR.** The "step-1 `LAKE_REC_SHIFT`
+> alignment" remnant was **part harness, mostly physics** (see STEP 5 below). The
+> harness skipped CTSM's nstep=0 physics step; the port had seven further lake-path
+> gaps (LakeFluxes qsat/htvp/per-pass Newton/betaprime, the datm humidity cap, no new
+> snow on lakes, and accum_factor never read by `clm_initialize!`), plus the harness
+> read the wrong paramfile. **Run max\|rel\| over 47 steps: 4.6e-1 → 1.8e-5**, the
+> remainder being daytime `FSA` only; every other field (TG, TSA, FSH, EFLX_LH, FIRE,
+> TLAKE ×10, LAKEICEFRAC, H2OSNO) sits at ~5e-8, the float32 h0 precision.
+>
+> *Earlier status (2026-07-21):* five defects A–E fixed in #275/#279/#281/#284/#285;
+> run max 13 → ~0.46. The narrative below STEP 5 is the investigation log — read it as
+> history. Note that finding A's reading of record 1 as an "initial-state dump" was
+> wrong (it is a real physics step); A's index fix was right for the wrong reason.
 
 Open residual: on the cold-start PCT_LAKE=100 SP reference
 (`scripts/validation/gen_lake_ref.sh` → `SYMFLUENCE_data/clm_lake_run`), the lake
@@ -615,3 +619,97 @@ none of which is the Monin-Obukhov *iteration* that three previous fixes chased:
 B and C are both lake-landunit-gated by construction (`lake_fluxes.jl` runs only
 over `mask_lakep`; nothing wrote `t_ref2m_patch` on a lake patch before), so
 neither can perturb any non-lake result.
+
+## STEP 5 (2026-10-28) — the step-1 remnant: harness AND physics, now closed
+
+### What h0 record 1 actually is
+
+`lnd_comp_nuopc.F90` `ModelAdvance` loops `do while (.not. dosend)` with
+`dosend = (nstep > 0)`. On the first coupling interval it therefore calls `clm_drv`
+**twice**: at nstep=0 (`doalb = .false.`, clock not yet advanced) and again at nstep=1,
+both on the same imported forcing, and only then returns. Evidence in the reference:
+
+| h0 record | nstep | time_bounds | TBOT | WIND | clmforc index |
+|---|---|---|---|---|---|
+| 1 | 0 | [0, 0] | 258.5025 | 0.30309 | 0 |
+| 2 | 1 | [0, 1h] | 258.5025 | 0.30309 | 0 |
+| 3 | 2 | [1h, 2h] | 256.5788 | 0.32338 | 1 |
+
+Record 1 has `TG = 270.96 ≠ 277` because it is a physics step, not a cold-start dump.
+So record r is nstep r−1; nstep 0 and 1 both use forcing hour 0; nstep k≥1 uses hour
+k−1. With one model step per record, the h0 `time:mean` equals the instantaneous
+end-of-step value — averaging versus instantaneous semantics play no role. The legacy
+harness ran Julia step 1 on hour **1** (`max(s−1, 1)`) against record 2 (hour 0), and
+was one physics step behind from then on.
+
+`LAKE_NSTEP0=1` (now the default in `scripts/fortran_parity_lake.jl`) replicates the
+double step: model step s = 0..N, s = 0 without clock advance and with `doalb=false`,
+forcing hour `max(s−1, 0)`, record s+1. `LAKE_NSTEP0=0` restores the legacy loop.
+
+Alignment alone, measured against the physics as it stood (#285 head):
+
+| | step-1 FSH rel | step-1 EFLX_LH rel | run max\|rel\| |
+|---|---|---|---|
+| legacy loop | 0.460 | 0.300 | 4.60e-1 |
+| nstep=0 alignment | 0.011 | 0.056 | 2.05e-1 |
+
+It also exposed what had been hidden under the misalignment: a **flat 4–15 % low
+EFLX_LH at every step** (TG within 0.03 K, FSH within 1 %). That is physics.
+
+### The physics gaps (LakeFluxesMod.F90 vs `lake_fluxes.jl`), all fixed
+
+1. **qsat.** The kernel used a Tetens *liquid-water* formula; CTSM calls `QSat`
+   (Flatau polynomials, ice saturation below tfrz). Over a 267 K skin that is the
+   largest single LH term.
+2. **htvp.** Keyed once per step on top-layer liquid/ice content; CTSM keys it on
+   `t_grnd > tfrz` and refreshes it after every Newton solve and after the reset.
+3. **Newton linearisation.** CTSM sets `tgbef = t_grnd` at the top of *every* pass,
+   rebuilds `stftg3`, and refreshes `qsatg/qsatgdT = QSat(t_grnd)` at the end of each
+   pass. The port linearised every pass about the step's input temperature.
+4. **Final fluxes.** CTSM keeps the last pass's linearised fluxes and re-evaluates
+   only when the freeze/convection reset fires; the port recomputed them nonlinearly.
+5. **betaprime.** A "simplified" constant 0.4; CTSM uses the NIR fraction of
+   absorbed solar (`betavis = 0`, LakeCon.F90:45) — the same `beta` the port's own
+   `lake_temperature.jl` already used, so daytime solar was double-booked.
+   `eflx_soil_grnd` now uses the full `sabg` (F90:691), `eflx_gnet` the betaprime one.
+6. Smaller items, each matched to the F90: z0 added to the forcing heights, `thm`/
+   `zldis` taken once; carried `z0mg_col` for the unfrozen initial roughness; `nu_param`
+   (not `kva`) and `zsno` (param file, not 0.00085) in the frozen/snow branch; `wc`
+   exponent 0.333; `nmozsgn ≥ 3` early exit; `kva0pres = 1.013e5`.
+
+Beyond `lake_fluxes.jl`:
+
+7. **datm humidity cap** (`forcing_reader.jl`). CLMNCEP datm caps the stream QBOT at
+   `qsat(datm_eSat(tbot))` (datm_datamode_clmncep_mod.F90:441-446). Reproduces h0
+   QBOT exactly (record 1: 0.0013699140 vs the file's 0.0013774111). Removed the last
+   1–2 % LH miss at the supersaturated night steps 8–17. **Applies to every site.**
+8. **No snowfall on lakes** (`clm_driver.jl`). `handle_new_snow!` ran over `nolakec`
+   only, and LakeHydrology's own UpdateQuantitiesForNewSnow + InitializeExplicitSnowPack
+   (LakeHydrologyMod.F90:257-262) were stubbed, so H2OSNO stayed 0. Wired for `lakec`.
+9. **accum_factor / n_melt_coef** were read only by `clm_run!`; `clm_initialize!` now
+   reads them too (lake FSNO was ~60× Fortran's with the 0.1 default).
+10. **Harness paramfile.** The reference's `lnd_in` uses the calibrated
+    `dds_run_1/final_evaluation` file, not `settings/CLM/parameters` (accum_factor
+    0.001556 vs 0.001756, fff, flnr, …). And `declinp1` is now evaluated at
+    `nextsw_cday` instead of passing `declin` twice.
+
+### Result (47 steps, `LAKE_DUMP=1`)
+
+| state | run max\|rel\| | worst field |
+|---|---|---|
+| legacy harness, #285 physics | 4.60e-1 | FSH step 1 |
+| + nstep=0 alignment | 2.05e-1 | H2OSNO (no lake snow) / EFLX_LH |
+| + LakeFluxes items 1-6 | 2.05e-1 | H2OSNO; EFLX_LH ≤ 1.7e-2 |
+| + datm humidity cap | 2.05e-1 | H2OSNO; fluxes 5e-8 at night |
+| + lake new snow | 1.32e-2 | FSA (snow albedo, FSNO 60× high) |
+| + accum_factor + paramfile | 3.37e-5 | FSA |
+| + declinp1 | **1.78e-5** | FSA, daytime only |
+
+Steps 0–16 and every night step: all fields 4–6e-8 (float32 h0). **Remaining floor:**
+daytime `FSA` at 1–2e-5 relative (~2 mW m⁻²); it halved when `declinp1` was
+supplied, which points at the harness's orbital inputs (`ORB_OBLIQR_DEFAULT`, the
+calday/coszen of the nstep=0 step) rather than lake physics. Not chased further.
+
+The gated tests `test_lake_ref2m.jl` / `test_lake_eddy_ks.jl` now assert TG/TSA to
+1e-3 K and FSH/EFLX_LH/FIRE to 1e-4 relative at **every** step, including step 0.
+
