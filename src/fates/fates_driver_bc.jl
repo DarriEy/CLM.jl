@@ -759,6 +759,14 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     # driving the daily step directly) leaves the clock where it is.
     date === nothing || fates_get_and_set_time!(date...)
 
+    # LUH2 land use: dynSubgrid_driver calls dynFatesLandUseInterp every timestep
+    # (use_fates_luh .and. .not. use_fates_potentialveg) with the get_curr_date year;
+    # the arrays are only read here, so refreshing them at the daily step is the same.
+    luh = fates.luh
+    if luh !== nothing && !luh.use_potentialveg
+        dyn_fates_landuse_interp!(luh, hlm_current_year[])
+    end
+
     # 0. CNP: parse the nutrient-acquisition boundary conditions out to the cohorts
     #    BEFORE the demographic step (sets cohort daily_n/p_demand + daily_*_uptake
     #    from the prescribed-uptake params). Mirrors the Fortran host order
@@ -781,6 +789,8 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         fates_pack_bcin_daily!(inst; s=s, c=c, nlevsoil=nlevsoil,
                                nlevdecomp=nlevdecomp, use_fates_bgc=use_fates_bgc,
                                fire_weather=fire_weather)
+        # LUH2 harvest rates / states / transitions of the site's gridcell.
+        luh === nothing || fates_pack_bcin_landuse!(fates.bc_in[s], luh, col.gridcell[c])
 
         site = fates.sites[s]
         bc_in  = fates.bc_in[s]

@@ -231,7 +231,11 @@ end
                 harv_rates, harv_names, CLM.hlm_harvest_area_fraction,
                 CLM.primaryland, 0.0, 1.0, -1.0, harvestable_c)
 
-            @test ld ≈ 0.7   # harvest_rate(1) * logging_direct_frac(0.7)
+            # Event-code logging (hlm_use_lu_harvest off): ctsm5.3.012's FATES gates
+            # direct logging on cur_harvest_tag == 0, which this path never sets; the
+            # reference cesm.exe does not log directly (fates_lu_logging_fortran.csv),
+            # so the port uses the "not applicable" tag 2 -> no direct mortality.
+            @test ld == 0.0
             @test lc ≈ 0.1   # canopy collateral
             # dbh 50 >= dbhmax_infra 35 -> lmort_infra = 0
             @test li ≈ 0.0
@@ -250,7 +254,7 @@ end
                 site2, CLM.bc_in_type(), 1, 10.0, 1,
                 harv_rates, harv_names, CLM.hlm_harvest_area_fraction,
                 CLM.primaryland, 0.0, 1.0, -1.0, harvestable_c)
-            @test ld2 ≈ 0.0           # below dbhmin -> no direct
+            @test ld2 ≈ 0.0           # no direct (tag, and below dbhmin)
             @test li2 ≈ 0.1           # dbh 10 < dbhmax_infra 35 -> mechanical applies
             @test lc2 ≈ 0.1           # canopy collateral
             @test lg2 ≈ 1.0 - (ld2 + li2 + lc2)

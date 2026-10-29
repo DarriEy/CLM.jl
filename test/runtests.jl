@@ -427,6 +427,9 @@ using CLM
     # CTSM mode dependencies, the per-mode HLM patch reservation, and data-gated live
     # runs of each mode scored against hourly Fortran CTSM extracts.
     include("test_fates_reduced_modes.jl")
+    # FATES land use: fates_harvest_mode switches, the host LUH2 reader / landuse x
+    # PFT data, and data-gated logging + LUH2 runs scored against Fortran CTSM.
+    include("test_fates_landuse.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

@@ -622,6 +622,10 @@ include("fates/FatesHistoryVariableType.jl")
 include("fates/FatesHistoryInterfaceMod.jl")
 include("fates/FatesRestartVariableType.jl")
 include("fates/FatesRestartInterfaceMod.jl")
+# Host side of FATES land use (dynFATESLandUseChangeMod LUH2 reader, landuse x PFT
+# data, fates_harvest_mode switches). Needs dyn_file_io.jl; before FatesInterfaceMod,
+# whose fates_interface_type holds the DynFatesLandUse.
+include("fates/fates_driver_landuse.jl")
 include("fates/FatesInterfaceMod.jl")
 # Real FATES parameter-file reader: read_fates_params! parses the official FATES
 # default parameter file (data/fates/fates_params_default.cdl) and populates every

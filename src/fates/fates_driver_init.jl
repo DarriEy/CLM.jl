@@ -291,6 +291,9 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
                                        use_sp::Bool = false,
                                        use_vertsoilc::Bool = false,
                                        decomp_method::AbstractString = "CTC",
+                                       harvest_mode::AbstractString = fates_harvest_no_logging,
+                                       use_luh::Bool = false,
+                                       use_potentialveg::Bool = false,
                                        do_check::Bool = true)
     set_fates_ctrlparms("flush_to_unset")
 
@@ -351,14 +354,17 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     set_fates_ctrlparms("use_planthydro"; ival = use_planthydro ? itrue : ifalse)
     set_fates_ctrlparms("use_cohort_age_tracking"; ival = ifalse)
 
-    # Land-use harvest / logging / LUH — OFF.
-    set_fates_ctrlparms("use_lu_harvest";     ival = ifalse)
-    set_fates_ctrlparms("num_lu_harvest_cats"; ival = 0)
-    set_fates_ctrlparms("use_logging";        ival = ifalse)
-    set_fates_ctrlparms("use_luh2";           ival = ifalse)
-    set_fates_ctrlparms("num_luh2_states";      ival = 0)
-    set_fates_ctrlparms("num_luh2_transitions"; ival = 0)
-    set_fates_ctrlparms("use_fates_potentialveg"; ival = ifalse)
+    # Land-use harvest / logging / LUH (CLMFatesGlobals1, clmfates_interfaceMod.F90
+    # 518-561). All off for the default `no_harvest` / no-LUH configuration.
+    pass_logging, pass_lu_harvest, pass_num_lu_harvest_cats =
+        fates_harvest_ctrl(harvest_mode)
+    set_fates_ctrlparms("use_lu_harvest";     ival = pass_lu_harvest)
+    set_fates_ctrlparms("num_lu_harvest_cats"; ival = pass_num_lu_harvest_cats)
+    set_fates_ctrlparms("use_logging";        ival = pass_logging)
+    set_fates_ctrlparms("use_luh2";           ival = use_luh ? itrue : ifalse)
+    set_fates_ctrlparms("num_luh2_states";      ival = use_luh ? num_landuse_state_vars : 0)
+    set_fates_ctrlparms("num_luh2_transitions"; ival = use_luh ? num_landuse_transition_vars : 0)
+    set_fates_ctrlparms("use_fates_potentialveg"; ival = use_potentialveg ? itrue : ifalse)
 
     # Inventory-init OFF (so cold-start NBG path runs).  The control file must be
     # "set" to a non-"unset" string to pass check_allset even though it's unused.
@@ -460,6 +466,11 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          surf_numpft::Int = 0, surf_numcft::Int = 0,
                          use_vertsoilc::Bool = false,
                          decomp_method::AbstractString = "CTC",
+                         harvest_mode::AbstractString = fates_harvest_no_logging,
+                         use_luh::Bool = false,
+                         use_potentialveg::Bool = false,
+                         fluh_timeseries::AbstractString = "",
+                         flandusepftdat::AbstractString = "",
                          dtime::Real = 1800.0)
 
     # ---- Fixed-biogeography (climate-appropriate PFT screening) config ----------
@@ -494,6 +505,20 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
               "biogeography (hlm_pft_areafrac)")
     use_fixed_biogeog = host_biogeog || (fates_pft_areafrac !== nothing) ||
                         (fates_biogeog_screen != :none)
+    # Land use (CTSM build-namelist / controlMod checks on the FATES land-use options).
+    use_potentialveg && !use_luh &&
+        error("clm_fates_init!: use_fates_luh must be true when use_fates_potentialveg is true")
+    use_potentialveg && harvest_mode != fates_harvest_no_logging &&
+        error("clm_fates_init!: fates_harvest_mode must be no_harvest when " *
+              "use_fates_potentialveg is true")
+    harvest_mode in (fates_harvest_luh_area, fates_harvest_luh_mass) && !use_luh &&
+        error("clm_fates_init!: use_fates_luh is required to be true when " *
+              "fates_harvest_mode is luhdata_mass or luhdata_area")
+    use_luh && use_sp &&
+        error("clm_fates_init!: use_fates_luh can NOT be true when use_fates_sp is true")
+    use_luh && use_fixed_biogeog && !host_biogeog &&
+        error("clm_fates_init!: use_fates_luh with fixed biogeography needs the host " *
+              "biogeography (hlm_pft_areafrac + flandusepftdat)")
 
     # ---- W1.1: FATES globals + parameters (CLMFatesGlobals1) ----
     FatesInterfaceInit(6, false)
@@ -517,6 +542,9 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                   use_sp = use_sp,
                                   use_vertsoilc = use_vertsoilc,
                                   decomp_method = decomp_method,
+                                  harvest_mode = harvest_mode,
+                                  use_luh = use_luh,
+                                  use_potentialveg = use_potentialveg,
                                   do_check = !is_cnp)   # CNP: check after the param read
 
     # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
@@ -669,11 +697,24 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     host_biogeog && length(hlm_pft_areafrac) != nsites &&
         error("clm_fates_init!: hlm_pft_areafrac has $(length(hlm_pft_areafrac)) " *
               "site vectors; expected nsites=$nsites")
+    # Host LUH2 data (clm_initializeMod: dynFatesLandUseInit before clm_fates%Init;
+    # GetLandusePFTData inside Init when fixed biogeography + LUH). One gridcell per
+    # FATES site's column.
+    fcol_lu = (use_luh || hlm_use_lu_harvest[] == itrue) ?
+              fates_site_columns(inst.column, inst.landunit, nsites) : Int[]
+    site_g = [fcol_lu[s] == 0 ? 0 : inst.column.gridcell[fcol_lu[s]] for s in eachindex(fcol_lu)]
+    if use_luh
+        ng = length(inst.gridcell.area)
+        fates.luh = dyn_fates_landuse_init(ng, fluh_timeseries; harvest_mode = harvest_mode,
+                                           use_potentialveg = use_potentialveg,
+                                           current_year = current_year)
+        use_fixed_biogeog && get_landuse_pft_data!(fates.luh, flandusepftdat, ng)
+    end
     for s in 1:nsites
         allocate_bcin(fates.bc_in[s], nlevsoil, nlevdecomp,
-                      0,   # num_lu_harvest_cats
-                      0,   # num_luh2_states
-                      0,   # num_luh2_transitions
+                      hlm_num_lu_harvest_cats[],   # num_lu_harvest_cats
+                      hlm_num_luh2_states[],       # num_luh2_states
+                      hlm_num_luh2_transitions[],  # num_luh2_transitions
                       1, surfpft_ub_bc)  # surfpft_lb, surfpft_ub
         allocate_bcout(fates.bc_out[s], nlevsoil, nlevdecomp)
         zero_bcs(fates, s)
@@ -692,8 +733,8 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         # non-vertsoilc => one decomp layer; every soil layer maps to decomp layer 1.
         fill!(bc.decomp_id, 1)
         bc.max_rooting_depth_index_col = min(3, nlevsoil)
-        bc.hlm_harvest_rates    = Float64[]
-        bc.hlm_harvest_catnames = String[]
+        # (hlm_harvest_rates / catnames are sized by allocate_bcin: 0 unless an LUH2
+        # harvest mode is on.)
         bc.hlm_harvest_units    = fates_unset_int
         bc.site_area            = area
 
@@ -701,7 +742,15 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         # is allocated (length numpft) by `allocate_bcin` only when fixed-biogeog is
         # on; `baregroundfrac` must be finite (the no-LUH `_set_site_area_pft!` branch
         # has no NaN guard).  A fully-vegetated FATES column => bareground 0.
-        if host_biogeog
+        if host_biogeog && use_luh
+            # clmfates_interfaceMod init, LUH branch: the static landuse x pft map
+            # (natural land-use types) and bare ground from flandusepftdat.
+            g = site_g[s] == 0 ? 1 : site_g[s]
+            for k in 1:num_landuse_pft_vars, ft in 1:size(bc.pft_areafrac_lu, 1)
+                bc.pft_areafrac_lu[ft, k] = fates.luh.landuse_pft_map[g, ft, k]
+            end
+            bc.baregroundfrac = fates.luh.landuse_bareground[g]
+        elseif host_biogeog
             # clmfates_interfaceMod init: pft_areafrac(ft) = wt_nat_patch(g, ft) over
             # surfpft_lb:surfpft_ub, endrun unless the areas (bare ground included) sum
             # to one. The ported _set_site_area_pft! reads bare ground from
@@ -740,6 +789,15 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         for s in 1:nsites
             fcol_sp[s] == 0 && continue
             fates_pack_bcin_sp!(inst; s = s, c = fcol_sp[s])
+        end
+    end
+    # init_coldstart: hand FATES the LUH2 states / transitions (and LUH harvest) of
+    # the site's gridcell before init_patches.
+    if use_luh
+        # (Sites beyond the host's soil columns -- nsites is the column count -- never
+        # run the daily step; they take gridcell 1's data so their cold start is valid.)
+        for s in 1:nsites
+            fates_pack_bcin_landuse!(bc_in[s], fates.luh, site_g[s] == 0 ? 1 : site_g[s])
         end
     end
     init_patches!(nsites, sites, bc_in)

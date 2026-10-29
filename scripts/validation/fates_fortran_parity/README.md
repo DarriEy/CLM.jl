@@ -1170,3 +1170,86 @@ relative error of the window mean (|J-F|/|F|):
 ### Still not validated
 SP/nocomp restarts, LUH-driven fixed biogeography (`use_fates_luh`), dry deposition with
 FATES-SP (CTSM disables it too), and runs longer than 10 days.
+
+---
+
+# LAND USE (2026-10-29): logging, LUH2 transitions and harvest, lupft, potential veg
+
+`clm_initialize!` takes the CTSM `&clm_inparm` land-use options: `fates_harvest_mode`
+(`no_harvest` | `event_code` | `luhdata_area` | `luhdata_mass`), `use_fates_luh`,
+`use_fates_lupft`, `use_fates_potentialveg`, `fluh_timeseries`, `flandusepftdat`, plus
+`fates_paramfile` (a FATES `.cdl`). All default off; the default path is unchanged.
+
+## What is connected (Fortran -> port)
+
+| CTSM / FATES | port |
+|---|---|
+| CLMFatesGlobals1 `fates_harvest_mode` -> `use_logging` / `use_lu_harvest` / `num_lu_harvest_cats`; `use_luh2`, `num_luh2_states/transitions`, `use_fates_potentialveg` | `fates_harvest_ctrl`, `_fates_spike_set_ctrlparms!` |
+| `dynFATESLandUseChangeMod` (`dynFatesLandUseInit` / `dynFatesLandUseInterp`: 12 states, 108 transitions, 5 harvest vars, uninterpolated, END_OF_TIMESTEP year, zero before the series) | `src/fates/fates_driver_landuse.jl` (`DynFatesLandUse` in `inst.fates.luh`, on the ported `dyn_file_io.jl`) |
+| `GetLandusePFTData` (`frac_primr/secnd/pastr/range`, `frac_brgnd`) -> `bc_in%pft_areafrac_lu` / `baregroundfrac` under fixed biogeog + LUH | `get_landuse_pft_data!`, `clm_fates_init!` |
+| `init_coldstart` / `dynamics_driv` pack of `hlm_luh_*` and `hlm_harvest_*` | `fates_pack_bcin_landuse!` (cold start and every daily step) |
+| build-namelist: `use_fates_lupft` => luh + nocomp + fixed biogeog (+ flandusepftdat); LUH harvest modes and potentialveg => luh; potentialveg reads no file | `clm_initialize!` |
+
+`use_fates_lupft` has no runtime switch in CTSM either (no `hlm_use_lupft`): it only sets
+those namelist defaults. `fates_harvest_mode = 'landuse_timeseries'` (harvest from the CLM
+`flanduse_timeseries` via dynHarvestMod) is not connected and errors.
+
+## Data
+
+No LUH2 files were staged. The files `namelist_defaults_ctsm.xml` names for FATES are on
+the CESM inputdata server at 4x5: the 1850-2015 LUH2 timeseries (339 MB) and the landuse x
+PFT map (1.9 MB). Both were fetched and cut to the 4x5 cell nearest the site (50N 245E) by
+`make_luh_1pt.jl`. The 1x1 results (226 kB) are committed in `data/fates/luh_1pt/` and used
+by both models. The 2002 states of that cell are 35 % primary forest, 28 % secondary
+forest, 18 % C3 annual crop and smaller pasture / rangeland / urban / other-crop shares, so the cold
+start builds five land-use patches. Annual transitions are 1e-8 to 7e-4, and the cell has
+`primf_harv` = 3.1e-3, `primf_bioh` = 9.2e6 kgC.
+
+## Fortran reference and result
+
+`stage_fates_landuse_run.sh` (`MODE=logging|luh|luh_area|luh_mass|lupft|potveg`) runs
+the archived case. The FATES parameter file is the default with the logging event moved
+to 2002-07-04 (`fates_landuse_logging_event_code = 20020704`; the default -30 is day 30)
+and `fates_landuse_logging_dbhmin = 0.1` cm, so that the cold-start saplings qualify. The
+same `.cdl` edit is applied on the Julia side. The scored series are committed as
+`fates_lu_<mode>_fortran.csv`; score them with `fates_landuse_parity.jl <mode>`. The land-use
+diagnostics are recomputed from the port's site state with the Fortran history formulas.
+Relative error of the 10-day window mean:
+
+| field | logging | luh (= luh_area = luh_mass) | lupft | potveg |
+|---|---|---|---|---|
+| patches / secondary patches | = F every step | 7 / 2, = F | 13 / 4, = F | 2 / 0, = F |
+| patch area by land use | 1.5e-3 - 1.9e-3 | 1e-9 - 4e-9 | 2e-9 - 2e-8 | (primary only) |
+| secondary forest fraction | 1.9e-3 | 1e-9 | 2e-9 | - |
+| logging disturbance rate | 1.9e-3 | (no event) | - | - |
+| LU-transition matrix / LUC disturbance | - | 1.4e-7 / 7e-9 | 1.4e-7 / 3e-8 | - |
+| LUC wood product flux / stock | - | 1.2e-3 / 9e-4 | 1.6e-3 / 1.2e-3 | - |
+| FATES_VEGC | 1.9e-3 | 1.7e-3 | 1.2e-3 | 2.0e-3 |
+| FATES_LITTER_IN | 2.1e-3 | 4.7e-2 | 1.0e-3 | 5.9e-2 |
+| FATES_GPP | +3.9 % | +3.2 % | +3.1 % | +3.9 % |
+
+* **Logging.** The 2002-07-04 event moves 63.4 % of the site to secondary land (F
+  0.63439, J 0.63559). Its litter pulse matches to 1e-3. One fix was needed: in event-code
+  mode ctsm5.3.012's FATES gates direct logging on `cur_harvest_tag == 0` and never sets
+  the tag (an uninitialized local). The port had chosen 0, which turns direct logging on;
+  the reference `cesm.exe` behaves as "not applicable" (2), so there is no direct
+  mortality. With 0 the port lost 11 % more vegetation C and had 2.4x the logging-day
+  litter; with 2 both agree to 2e-3. Later FATES sets a bypass tag here and does log
+  directly. Harvested wood is 0 in both models: the saplings carry no trunk-size CWD.
+* **LUH2 harvest is a no-op in ctsm5.3.012.** The host passes the LUH2 names
+  (`primf_harv`, ..., `primf_bioh`, ...) as `hlm_harvest_catnames`, but FATES'
+  `get_harvest_rate_area` / `get_harvest_rate_carbon` match `HARVEST_VH1` ... `HARVEST_SH3`.
+  Every rate comes out 0, and `luhdata_area` / `luhdata_mass` give the same result as `luh`
+  in Fortran, and in the port, which keeps the names verbatim.
+* **lupft** builds 13 nocomp patches across the five land-use types from the landuse x
+  PFT map, with areas matching to ~1e-8.
+* **potveg.** Two Fortran runs of the identical potveg case differed: the first one
+  diverged from day 2 (litter -13 %, treefall -29 % by day 3), and a rerun matches the
+  no-LUH case. That is nondeterminism in the reference build, not in the port, and
+  the rerun is committed. Against the rerun, potveg matches the default mode, with one
+  primary patch and no transitions.
+
+The GPP / FSH offsets, and the 5 % day-2 litter gap in the non-logging modes, are the host
+residual that the default mode also shows (see the soil-BGC section). Not validated: restarts with land use, potential-veg -> LUH switch-on
+(`transition_landuse_from_off_to_on`), carbon-mode harvest debt with nonzero rates (they
+cannot occur in this release), and runs longer than 10 days.
