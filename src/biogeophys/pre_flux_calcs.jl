@@ -305,7 +305,8 @@ function set_z0m_displa!(canopystate::CanopyStateData,
                           bounds_patch::UnitRange{Int};
                           z0param_method::String = "ZengWang2007",
                           z0mr::AbstractVector{<:Real} = pftcon.z0mr,
-                          displar::AbstractVector{<:Real} = pftcon.displar)
+                          displar::AbstractVector{<:Real} = pftcon.displar,
+                          patch_is_fates::Union{Nothing,AbstractVector{Bool}} = nothing)
 
     # z0mr/displar default to the host-resident pftcon globals; move them onto the
     # working backend so the kernel doesn't get host Arrays among device args (no-op on CPU).
@@ -315,9 +316,14 @@ function set_z0m_displa!(canopystate::CanopyStateData,
         displar = copyto!(similar(canopystate.z0m_patch, T, length(displar)), T.(displar))
     end
 
+    # FATES patches keep the z0m / displa FATES passed back (TransferZ0mDisp, done by
+    # the driver before this call): Fortran SetZ0mDisp only sets them for
+    # `.not. patch%is_fates(p)` (BiogeophysPreFluxCalcsMod.F90:167-173).
+    mask = patch_is_fates === nothing ? mask_nolakep : (mask_nolakep .& .!patch_is_fates)
+
     # Both z0param_method branches are identical, so the common expression is used.
     preflux_z0m_displa!(canopystate.z0m_patch, canopystate.displa_patch,
-                        mask_nolakep, patch_data.itype, canopystate.htop_patch,
+                        mask, patch_data.itype, canopystate.htop_patch,
                         z0mr, displar)
 
     return nothing
@@ -464,12 +470,13 @@ function biogeophys_pre_flux_calcs!(canopystate::CanopyStateData,
                                      mask_urbanc::AbstractVector{Bool},
                                      bounds_col::UnitRange{Int},
                                      bounds_patch::UnitRange{Int};
-                                     z0param_method::String = "ZengWang2007")
+                                     z0param_method::String = "ZengWang2007",
+                                     patch_is_fates::Union{Nothing,AbstractVector{Bool}} = nothing)
 
-    # 1. Set z0m and displacement height
+    # 1. Set z0m and displacement height (non-FATES patches; see set_z0m_displa!)
     set_z0m_displa!(canopystate, frictionvel, patch_data, lun_data,
                     mask_nolakep, bounds_patch;
-                    z0param_method=z0param_method)
+                    z0param_method=z0param_method, patch_is_fates=patch_is_fates)
 
     # 2. Set roughness lengths and forcing heights for non-lake points.
     # snomelt_accum is a placeholder (only read on the Meier2022 + snowmelt path);
