@@ -116,7 +116,9 @@ DOCUMENTED_EXCEPTIONS = {
     # coupled-solve floor but a real bug: on snow-free ground a subnormal frac_sno
     # (~1e-18, exactly 0 in Fortran) tripped the z0mg `frac_sno > 0` snow-roughness
     # branch, giving z0mg=zsno instead of zlnd and ~halving rah2 at dry/low-LAI
-    # canopies. Fixed in friction_velocity.jl (FRAC_SNO_TRACE_FLOOR); Donga now 69/69.
+    # canopies. Fixed in friction_velocity.jl at the time by a 1e-11 floor; that floor
+    # was removed again (the subnormal no longer occurs; Fortran keeps zsno on trace
+    # frac_sno after melt-out, CTSM FrictionVelocityMod.F90:598).
     ("Baltimore", "SNOW_DEPTH"): (
         "Snow-covered-area depth diagnostic over thin/intermittent urban snow. SWE, "
         "snow ice/liquid, snowmelt, and snow fraction are already close; the annual "
