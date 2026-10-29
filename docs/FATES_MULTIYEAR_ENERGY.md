@@ -408,3 +408,54 @@ Compared with the run that had only the clock fix:
 
 The regression test's woody-size-class check now allows one class of slack: Julia
 reaches 5.13 cm in year 4, against Fortran's < 5 cm.
+
+### Follow-up: host calendar, and the #349 host-coupling fixes (2026-10-29)
+
+**Calendar.** The `fates_parity_1pt` case runs `calendar = GREGORIAN`. The evidence:
+`nuopc.runconfig` CLOCK_attributes; `lnd.log` reports "Calendar type: GREGORIAN";
+the h0 file has 1462 daily records for 2002-07-01..2006-07-01.
+
+The earlier harness stepped NOLEAP while reading the forcing at real dates, so
+every Julia day from 2004-03-01 on was one day off the reference. Two changes fix it:
+
+* `FATES_HLM_CALENDAR` (`:noleap` default, `:gregorian`) now drives
+  `fates_get_and_set_time!`, so `days_per_year` is 366 in 2004, as CTSM's time
+  manager has it.
+* The harness takes `FATES_MY_CALENDAR` (default `gregorian`). Under `noleap` it
+  maps forcing records by elapsed NO_LEAP time, which is what DATM does (#347).
+
+**#349.** Commit 163a4ab was cherry-picked. It fixes four host-coupling defects:
+
+* FATES `fcansno` was passed as 0;
+* FATES `z0m`/`displa` were overwritten every step;
+* `use_clm5_fpi` was not set in `clm_initialize!`;
+* `is_fates` was flagged after the cold start.
+
+`use_clm5_fpi = true` now also applies to non-FATES callers of `clm_initialize!`,
+which is #349's change and intended.
+
+Julia / Fortran ratios, years 1–4 (Gregorian, 1461 days):
+
+| run | recruitment | NPP | year-1 max ncoh J/F |
+|---|---|---|---|
+| (a) leap fix only | 1.01 / 0.49 / 0.40 / 0.70 | 2.21 / 1.18 / 1.27 / 1.18 | 891 / 177 |
+| (b) leap fix + #349 | 1.17 / 1.42 / 1.66 / 2.20 | 1.03 / 1.34 / 1.59 / 1.40 | **195 / 177** |
+
+Run (a) is the same as the NOLEAP run to within 1 %, so the leap-day misalignment
+was not material.
+
+With #349 applied:
+
+* **Year-1 NPP matches Fortran** (0.460 vs 0.448 gC/m²/d).
+* **Residual 2 (patch count) is gone.** Julia now holds 2 patches until spring 2003
+  (9 by day 381), as Fortran does.
+* **The cold leaf-off still does not match.** Julia now fires it on **model day 11**;
+  Fortran fires it on day 40. Over days 2–7 Julia's `tveg24` is 2.33 / 4.46 / 6.78 /
+  7.44 / 5.09 / **7.39 °C**, against Fortran's daily TVEG of 2.61 / 4.68 / 6.78 /
+  7.38 / 5.01 / **7.90**. That is 6 days below 7.5 °C against Fortran's 5, which trips
+  `ncolddays > 5` once the 10-day memory fills. The canopy is now within a few tenths
+  of a kelvin of Fortran, but it sits on a hard threshold, so the leaf-off date
+  remains sensitive.
+
+From year 2 on, recruitment runs 1.4–2.2× high and NPP 1.3–1.6× high. The regression
+test passes on run (b).
