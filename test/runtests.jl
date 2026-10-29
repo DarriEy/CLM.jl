@@ -452,6 +452,10 @@ const INPROCESS_TEST_FILES = [
     # plant water in the column budget, hydraulic-failure mortality, RestartHydrStates,
     # and woody leaf water potential vs the Fortran fates_parity_1pt run (data-gated).
     "test_fates_planthydro_coupling.jl",
+    # FATES plant hydraulics 2-D solvers (fates_hydro_solver = 2 Picard / 3 Newton):
+    # the DGESV port, connection tables, MatSolve2D / PicardSolve2D on a synthetic
+    # network, and data-gated parity vs the Fortran runs with each solver.
+    "test_fates_planthydro_2d_solvers.jl",
     # FATES land use: fates_harvest_mode switches, the host LUH2 reader / landuse x
     # PFT data, and data-gated logging + LUH2 runs scored against Fortran CTSM.
     "test_fates_landuse.jl",
