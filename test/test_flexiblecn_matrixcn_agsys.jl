@@ -16,11 +16,11 @@
         np = 1; nc = 1; nlevdecomp = 1
         nrepr = CLM.NREPR
 
-        # itype 0 => generic non-crop; itype >= npcropmin-1 (0-based) => crop.
-        # npcropmin (1-based Julia) default; a crop ivt is npcropmin in 1-based,
-        # i.e. itype = npcropmin-1 in 0-based.
+        # itype 0 => generic non-crop; itype >= npcropmin (0-based, as in CTSM) => crop.
+        # (itype npcropmin-1 = 16 is c3_irrigated, a GENERIC crop; the kernels used to
+        # compare the 1-based ivt with npcropmin and mis-classify it -- fixed 2026-10-28.)
         npcropmin = CLM.NPCROPMIN
-        itype0 = is_crop ? (npcropmin - 1) : 0
+        itype0 = is_crop ? npcropmin : 0
         ivt = itype0 + 1
 
         # pftcon must be indexable at ivt

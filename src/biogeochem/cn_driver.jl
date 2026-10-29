@@ -466,25 +466,16 @@ function cn_driver_no_leaching!(
     # against the Fortran May-window reference to round-off on all 8 crop patches
     # (test/test_crop_lifecycle.jl; docs/CROP_LIFECYCLE_MAP.md).
     #
-    # CNSoyfix (n_soyfix!) remains UNWIRED, deliberately. The reason is now known
-    # precisely, and it is NOT the one previously recorded here.
-    #
-    # CNSoyfix is *not* phase-gated (it never reads cphase). Its gates are
-    # croplive, itype in {23,24,77,78}, and — the load-bearing one — fpg < 1.
-    # Three Fortran runs were generated to chase a non-zero SOYFIXN:
-    #   1. Existing refs: lnd_in has use_fun=.true., and CNDriverMod calls
-    #      CNSoyfix only under `if (.not. use_fun)` — so it was NEVER CALLED.
-    #      SOYFIXN=0 there is an untouched field, not a computed zero.
-    #   2. Cold non-FUN spin-up: routine now runs, but fpg == 1.000000 on every
-    #      crop column -> no N deficit -> a CORRECT zero.
-    #   3. Cold non-FUN + use_fertilizer=.false.: fpg == 1.000001. Still zero.
-    #      Demand 1.45e-7 gN/m2/s vs a 16 gN/m2 pool is ~1300 days of supply.
-    # So the reference site is N-replete and cannot exercise this routine at all.
-    # What is missing is an N-LIMITED soybean column (or a CTSM-side unit harness),
-    # NOT a different dump window. Wiring against any of the above would scatter
-    # zeros and pass an "is it wired?" test while moving nothing — the blind wiring
-    # #218/#253/#266 each refused. n_dynamics.jl:453 is ported and ready.
-    # Full evidence: docs/CROP_LIFECYCLE_MAP.md §3c-§3g.
+    # CNSoyfix (n_soyfix!) — WIRED (CNDriverMod.F90:324, `if (.not. use_fun)`; with
+    # FUN, soybean fixation is handled inside CNFUN). It is not phase-gated; its
+    # load-bearing gate is fpg < 1, which the coupled reference column never reaches
+    # (FlexibleCN's non-FUN plant N demand is Michaelis-Menten in sminn, so demand
+    # collapses with the pool -- docs/CROP_LIFECYCLE_MAP.md §3c-§3g, §3k). Its VALUE is
+    # validated against the real Fortran CNSoyfix driven in-model over a 144-case
+    # (fpg, sminn, wf, GDDfrac) sweep that crosses every branch, with SOYFIXN > 0 in
+    # 2304 soybean patch-cases: max abs error 0.0 (scripts/fortran_parity_crop_tails.jl).
+    # Placed after CNNFert and before CNMResp, as in Fortran; it reads the PREVIOUS
+    # step's fpg/plant_ndemand (allocation below overwrites them later this step).
     if config.use_crop && soilbgc_nf !== nothing && patch !== nothing &&
        num_bgc_vegp > 0 && !isempty(cnveg_nf.fert_patch)
         n_fert!(soilbgc_nf, cnveg_nf;
@@ -493,6 +484,15 @@ function cn_driver_no_leaching!(
                 patch      = patch,
                 mask_soilp = mask_pcropp,
                 bounds_p   = bounds_patch)
+    end
+    if config.use_crop && !config.use_fun && soilbgc_nf !== nothing && patch !== nothing &&
+       crop !== nothing && cnveg_state !== nothing && water_diag !== nothing &&
+       num_bgc_vegp > 0 && !isempty(cnveg_nf.soyfixn_patch) && !isempty(water_diag.wf_col)
+        n_soyfix!(soilbgc_nf, cnveg_nf, soilbgc_state, soilbgc_ns, cnveg_state, crop, water_diag;
+                  mask_soilc = mask_bgc_soilc, bounds = bounds_col,
+                  mask_soilp = mask_bgc_vegp, bounds_p = bounds_patch, patch = patch,
+                  ntmp_soybean = ntmp_soybean, nirrig_tmp_soybean = nirrig_tmp_soybean,
+                  ntrp_soybean = ntrp_soybean, nirrig_trp_soybean = nirrig_trp_soybean)
     end
 
     # Maintenance respiration (CNMResp) — WIRED (veg-flux chain). Runs when the
@@ -520,7 +520,13 @@ function cn_driver_no_leaching!(
         flivewd = Float64.(pftcon_main.flivewd), leafcn = Float64.(pftcon_main.leafcn),
         frootcn = Float64.(pftcon_main.frootcn), livewdcn = Float64.(pftcon_main.livewdcn),
         deadwdcn = Float64.(pftcon_main.deadwdcn), graincn = Float64.(pftcon_main.graincn),
-        grperc = Float64.(pftcon_main.grperc))
+        grperc = Float64.(pftcon_main.grperc),
+        # crop allocation-curve parameters (calc_crop_allocation_fractions!)
+        arooti = Float64.(pftcon_main.arooti), arootf = Float64.(pftcon_main.arootf),
+        fleafi = Float64.(pftcon_main.fleafi), bfact = Float64.(pftcon_main.bfact),
+        astemf = Float64.(pftcon_main.astemf), declfact = Float64.(pftcon_main.declfact),
+        allconss = Float64.(pftcon_main.allconss), aleaff = Float64.(pftcon_main.aleaff),
+        allconsl = Float64.(pftcon_main.allconsl))
     if num_bgc_vegp > 0 && cn_shared_params !== nothing && _pfta !== nothing &&
        patch !== nothing && crop !== nothing && photosyns !== nothing && canopystate !== nothing
         _ap = AllocationParams()
@@ -531,9 +537,19 @@ function cn_driver_no_leaching!(
                   npcropmin = npcropmin, nrepr = nrepr)
     end
 
-    # Crop allocation fractions (calc_crop_allocation_fractions!) — crops only;
-    # Bow has no crop patches (mask_pcropp empty) so this is a no-op here. (Wire
-    # later when crop infra is needed.)
+    # Crop allocation fractions (calc_crop_allocation_fractions!) — WIRED
+    # (CNDriverMod.F90:426, `if (.not. use_crop_agsys)`, over filter_pcropp, between
+    # calc_gpp_mr_availc and calc_allometry). It had NO call site: aleaf/astem/aroot/
+    # arepr were only ever set by plant_crop! (aleaf=1, astem=aroot=0), so a live crop
+    # allocated every gram of new C to leaves and none to grain, and calc_allometry!
+    # read those planting-time values all season. Validated per step, all three phases
+    # incl. the recursive grain-fill branch, against ctsm5.3.012 dumps
+    # (docs/CROP_LIFECYCLE_MAP.md §3i; scripts/fortran_parity_crop_tails.jl).
+    if config.use_crop && !config.use_crop_agsys && _pfta !== nothing &&
+       patch !== nothing && crop !== nothing && cnveg_state !== nothing && any(mask_pcropp)
+        calc_crop_allocation_fractions!(mask_pcropp, bounds_patch, _pfta,
+                  patch, crop, cnveg_state; nrepr = nrepr)
+    end
 
     # C/N allometry (calc_allometry!) — WIRED. Produces cnveg_state.{c_allometry,
     # n_allometry} used by plant N demand + allocation.
@@ -1113,7 +1129,10 @@ function cn_driver_no_leaching!(
     if config.use_nitrif_denitrif && _has_decomp
         soilbiogeochem_n_state_update1!(soilbgc_ns, soilbgc_nf, soilbgc_state;
             mask_bgc_soilc=mask_bgc_soilc, bounds_col=bounds_col,
-            nlevdecomp=nlevdecomp, dt=dt, use_fun=config.use_fun)
+            nlevdecomp=nlevdecomp, dt=dt, use_fun=config.use_fun,
+            # crop fertilizer + soybean fixation into NH4 (F90 `if (use_crop)` block)
+            use_crop=config.use_crop && !isempty(soilbgc_nf.fert_to_sminn_col) &&
+                     !isempty(soilbgc_nf.soyfixn_to_sminn_col))
     end
 
     # CNPrecisionControl — WIRED
