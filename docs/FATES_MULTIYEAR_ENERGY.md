@@ -459,3 +459,82 @@ With #349 applied:
 
 From year 2 on, recruitment runs 1.4–2.2× high and NPP 1.3–1.6× high. The regression
 test passes on run (b).
+
+### Follow-up: last year's active layer never reached FATES (2026-10-29)
+
+**Where years 2+ first diverge.** Per PFT, the year-2 excess is in the hard
+drought-deciduous grasses (PFTs 13 and 14). They switch status, and with it
+germination (`SeedGermination`, EDPhysiologyMod.F90:2445-2450), at the wrong time:
+
+| event (PFT 14 recruitment on/off) | Fortran day | Julia day, before | Julia day, after |
+|---|---|---|---|
+| autumn 2002 off | 123 | 121 | 121 |
+| spring 2003 on | 254 | 265 | 265 |
+| **autumn 2003 off** | **555** (6 Jan 2004) | **497** (9 Nov 2003) | **550** |
+| **spring 2004 on** | **650** | **600** (`prolonged_off`, day 335 of the window) | **651** |
+| autumn 2005 off | 1259 | 1252 | 1254 |
+
+The drought status reads a 10-day soil-matric-potential memory. That memory uses
+layers `2:nlevroot` with `nlevroot = max(2, min(nlevsoil,
+max_rooting_depth_index_col))` (EDPhysiologyMod.F90:1207-1245), and frozen layers
+count as `smp_lwr_bound = -1e6 mm`. Julia went "moisture off" as soon as the top
+soil layers froze.
+
+**Root cause.** `max_rooting_depth_index_col` is
+`min(nlevsoil, altmax_lastyear_indx_col)` (clmfates_interfaceMod.F90:1131-1132).
+`altmax_lastyear_indx_col` is rolled from `altmax_indx_col` on the first step of
+1 January (`mon == 1 .and. day == 1 .and. sec/dtime == 1`,
+ActiveLayerMod.F90:114). `clm_drv!` called `alt_calc!` with a constant
+`sec = 0`, so the roll never fired. The index kept its cold-start 0
+(ActiveLayerMod.F90:305) for the whole run, and every FATES root profile
+(drought phenology, btran, root litter) stayed in the top 2 layers in every year.
+In year 1 this is also what Fortran does, which is why year 1 matched. At Bow the
+roll gives index 11 from 1 January 2003.
+
+**Fix.** Under `use_fates`, `clm_drv!` now passes the real `secs` to `alt_calc!`.
+Non-FATES paths keep `sec = 0` and stay byte-identical. CN's
+`soil_bgc_vertical_profile!` has the same missed roll; that is left for a separate
+change.
+
+Also fixed in this branch: the integration merge had left two copies of
+`fates_get_and_set_time!`. The later, NOLEAP-only copy overrode the Gregorian one
+and broke precompilation. This was dropped upstream in 99b7b51, and the branch is
+rebased on it.
+
+**Result** (Gregorian, 1461 d; "before" = this tree with `altmax_lastyear_indx_col`
+forced to 0 every step, which reproduces run (b) above):
+
+| model yr | recruitment J/F before → after | NPP J/F before → after | max ncoh J / F after |
+|---|---|---|---|
+| 1 | 1.17 → 1.16 | 1.03 → 1.00 | 197 / 177 |
+| 2 | 1.43 → 1.57 | 1.35 → 1.30 | 874 / 880 |
+| 3 | 1.74 → 1.53 | 1.59 → 1.42 | 852 / 672 |
+| 4 | 2.00 → 2.16 | 1.40 → 1.40 | 822 / 282 |
+
+The phenology timing now tracks Fortran to within 1-5 days in years 2 and 4. Through
+winter 2003-04 the cohort count and grass `nplant` follow Fortran closely
+(day 541: ncoh 643 / 623; before: 481 / 623). **The yearly recruitment ratio does not
+close, so the remaining excess has a different cause:**
+
+* **Seed bank.** Recruits per unit seed bank are now slightly *below* Fortran in
+  years 2-4 (10.8 vs 12.2 /yr per kg C m⁻²). The excess comes from a seed bank
+  (`FATES_SEED_BANK` = seed + seed_germ) that is 1.8× Fortran by autumn 2003 and
+  2.2-2.4× by year 4. Year-2 NPP is 1.30× Fortran, and the excess starts in spring
+  2003: grass leaf carbon is +14 % by late May. Seed production from mature grass
+  cohorts (`seed_alloc_mature` 0.2-0.25) is the likely amplifier. Attributing it
+  needs per-PFT NPP and repro output from both sides.
+* **C4 grass population.** Julia's PFT-14 `nplant` collapses each summer
+  (day 721: 0.15 vs 4.5 /m²) while its NPP stays high, giving fewer, larger plants
+  (grass max dbh 71 cm vs Fortran's 30 cm class in year 2). This is a grass
+  mortality/competition residual.
+* **Year 1.** The seed bank is 0.72× Fortran from day 11, the day of Julia's early
+  cold leaf-off (Fortran: day 40; the host `tveg24` threshold residual above). That
+  removes seed input from the cold-deciduous woody PFTs.
+* The year-3 off/on (Fortran: lifespan `timeoff` on day 1016, re-flush on day 1047;
+  Julia: moisture-off on day 930, `timeon` on day 1031) still differs, because
+  winter 2004-05 soil liquid water in the root zone differs.
+
+Regression guard: `test/test_fates_rooting_depth_roll.jl` (isolated subprocess).
+(A) checks the `alt_calc!` roll semantics. (B) is data-gated: a live FATES
+`clm_drv!` step at 1 January 01:00 rolls the index, and the daily bc pack hands it
+to FATES as `max_rooting_depth_index_col`.
