@@ -51,8 +51,9 @@ const _CF_HAVE = isdir(CF_REF) && !isempty(cf_steps(CF_REF)) && isfile(CT_PARAMF
 
         @testset "FUN reads SOIL-layer temperature (not the snow layers)" begin
             # The driver used to hand cnfun! the full t_soisno_col, whose first
-            # nlevsno columns are SNOW layers; fun_cost_fix then saw SPVAL and
-            # soybean fixation collapsed. Reproduce both layouts on a live step.
+            # nlevsno columns are SNOW layers, so fun_cost_fix read snow slots (SPVAL
+            # here) for the top layers and soil layer j-12 below. Both layouts on a
+            # live step.
             n = first(n for n in cf_steps(CF_REF) if begin
                 a = cf_load(CF_REF, "after_cnfun", n)
                 any(a["NFIX"][p] > 1e-8 for p in eachindex(a["ITYPE"]) if a["ITYPE"][p] in CF_SOY)
@@ -65,7 +66,9 @@ const _CF_HAVE = isdir(CF_REF) && !isempty(cf_steps(CF_REF)) && isfile(CT_PARAMF
             padded = hcat(fill(CLM.SPVAL, size(b["T_SOISNO"], 1), nsno), b["T_SOISNO"])
             bad = copy(b); bad["T_SOISNO"] = padded[:, 1:size(b["T_SOISNO"], 2)]
             wrong = cf_run_cnfun(bad; pc)
-            @test wrong.nf.Nfix_patch[psoy] < 1e-6 * a["NFIX"][psoy]   # the old wiring's signature
+            # old wiring: layer j read slot j of the padded array -- 12 snow slots,
+            # then soil layers shifted by 12 -- so the fixation cost profile is wrong
+            @test !isapprox(wrong.nf.Nfix_patch[psoy], a["NFIX"][psoy]; rtol = 1e-3)
         end
 
         @testset "FlexibleCN N demand, prognostic-crop call (FUN)" begin

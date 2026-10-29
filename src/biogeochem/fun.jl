@@ -577,9 +577,15 @@ end
 # Phase-2 substep solver (one thread per patch). Reads packed dense tensors, aliases
 # each logical array to a @view slice (Metal-safe), runs the loop-carried ECM/AM ×
 # fixer × level solver + retrans while-loop + flux tail on the thread's own patch.
-@kernel function _fun_p2_kernel!(@Const(mask_soilp), @Const(column), @Const(ivt),
-        @Const(PFT), @Const(IV), @Const(IJ), @Const(IPI), @Const(sminn_no3_layer_step),
-        @Const(sminn_nh4_layer_step), @Const(t_soisno), @Const(dzsoi), SL, OV, OVR,
+# NO @Const on this kernel's arguments: with them, the CPU backend returned the
+# PRE-clamp nonmycorrhizal N in the accumulators below (reproducible; correct under
+# --check-bounds=yes, with no BoundsError, and correct with every @Const removed;
+# removing it from only the sminn_*_layer_step args did not help). No argument
+# aliases a written array, so this is the Const/aliasscope load-reordering, not an
+# index error. Found against the ctsm5.3.012 FUN crop dumps.
+@kernel function _fun_p2_kernel!(mask_soilp, column, ivt,
+        PFT, IV, IJ, IPI, sminn_no3_layer_step,
+        sminn_nh4_layer_step, t_soisno, dzsoi, SL, OV, OVR,
         dt, nlevdecomp::Int, smallValue, spval, npcropmin::Int,
         use_flexiblecn::Bool, use_matrixcn::Bool)
     p = @index(Global)
@@ -837,14 +843,9 @@ end
                     for j in 1:nlevdecomp
                         # Per-layer soil-N limit (CNFUNMod.F90:1302-1356). The four
                         # per-layer fluxes are carried in LOCAL scalars through the
-                        # clamp and the accumulation, then stored once. Reading them
-                        # back through the packed-scratch views after the in-place
-                        # `-=` clamp was miscompiled on the CPU backend: the
-                        # accumulators picked up the PRE-clamp nonmycorrhizal N
-                        # (Nnonmyc over-counted by up to 1/3 wherever a layer's
-                        # mineral N was exhausted, while npp_to_nonmyc and the _vr
-                        # fluxes were clamped) -- found against the ctsm5.3.012 FUN
-                        # crop dumps (scripts/fortran_parity_crop_fun.jl).
+                        # clamp and the accumulation, then stored once (see the
+                        # @Const note on this kernel: with @Const the accumulators
+                        # read back the PRE-clamp nonmycorrhizal N).
                         a_no3 = n_from_active_no3[p, j]; m_no3 = n_from_nonmyc_no3[p, j]
                         a_nh4 = n_from_active_nh4[p, j]; m_nh4 = n_from_nonmyc_nh4[p, j]
                         c_a_no3 = npp_to_active_no3[p, j]; c_m_no3 = npp_to_nonmyc_no3[p, j]
