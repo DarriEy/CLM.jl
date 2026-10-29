@@ -465,7 +465,7 @@ end
 function soiltemp_gnet_patch_rural_array_phase!(x, aux)
     np=length(x.column); np == 0 && return nothing
     backend=_kernel_backend(x.out.eflx_gnet)
-    _gnet_patch_rural_kernel!(backend)(x.out, x.pin, x.cin, aux.nolakep,
+    _kcall!(_gnet_patch_rural_kernel!, backend, x.out, x.pin, x.cin, aux.nolakep,
         x.column, x.landunit, x.urbpoi, x.frac_veg_nosno; ndrange=np)
     KernelAbstractions.synchronize(backend)
     nothing
@@ -474,7 +474,7 @@ end
 function soiltemp_gnet_patch_rural_contrib_array_phase!(x, aux)
     np=length(x.column); np == 0 && return nothing
     backend=_kernel_backend(x.out.hs_patch)
-    _gnet_patch_rural_contrib_kernel!(backend)(x.out, x.pin, x.cin, aux.nolakep,
+    _kcall!(_gnet_patch_rural_contrib_kernel!, backend, x.out, x.pin, x.cin, aux.nolakep,
         x.column, x.landunit, x.urbpoi, x.frac_veg_nosno; ndrange=np)
     KernelAbstractions.synchronize(backend)
     nothing
@@ -483,7 +483,7 @@ end
 function soiltemp_gnet_patch_urban_array_phase!(x, aux)
     np=length(x.column); np == 0 && return nothing
     backend=_kernel_backend(x.hs)
-    _gnet_patch_urban_kernel!(backend)(x.out, x.pin, x.cin, x.lin, aux.nolakep,
+    _kcall!(_gnet_patch_urban_kernel!, backend, x.out, x.pin, x.cin, x.lin, aux.nolakep,
         x.column, x.landunit, x.itype, x.urbpoi,
         is_simple_build_temp(), is_prog_build_temp(); ndrange=np)
     KernelAbstractions.synchronize(backend)

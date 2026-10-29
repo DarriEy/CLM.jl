@@ -1122,12 +1122,12 @@ function compute_gnet_patch!(energyflux, solarabs, canopystate, waterfluxbulk, c
         eflx_traffic = energyflux.eflx_traffic_patch, eflx_anthro = energyflux.eflx_anthro_patch,
         hs_patch, dhsdT_patch, hs_soil_patch, hs_h2osfc_patch)
     backend = _kernel_backend(hs)
-    _gnet_patch_rural_kernel!(backend)(out, pin, cin, mask_nolakep, patch_data.column,
+    _kcall!(_gnet_patch_rural_kernel!, backend, out, pin, cin, mask_nolakep, patch_data.column,
         patch_data.landunit, lun.urbpoi, canopystate.frac_veg_nosno_patch; ndrange = np)
-    _gnet_patch_rural_contrib_kernel!(backend)(out, pin, cin, mask_nolakep,
+    _kcall!(_gnet_patch_rural_contrib_kernel!, backend, out, pin, cin, mask_nolakep,
         patch_data.column, patch_data.landunit, lun.urbpoi,
         canopystate.frac_veg_nosno_patch; ndrange = np)
-    _gnet_patch_urban_kernel!(backend)(out, pin, cin, lin, mask_nolakep,
+    _kcall!(_gnet_patch_urban_kernel!, backend, out, pin, cin, lin, mask_nolakep,
         patch_data.column, patch_data.landunit, col.itype, lun.urbpoi,
         simple_build, prog_build; ndrange = np)
     KernelAbstractions.synchronize(backend)
@@ -1191,7 +1191,7 @@ function compute_gnet_snicar!(energyflux, solarabs, canopystate, waterfluxbulk, 
     backend = _kernel_backend(hs_top)
     np = length(mask_nolakep)
     np == 0 && return nothing
-    _gnet_snicar_kernel!(backend)(pin, cin, mask_nolakep, patch_data.column,
+    _kcall!(_gnet_snicar_kernel!, backend, pin, cin, mask_nolakep, patch_data.column,
         patch_data.landunit, lun.urbpoi, canopystate.frac_veg_nosno_patch, col.snl,
         solarabs.sabg_lyr_patch, energyflux.eflx_gnet_patch,
         hs_top, hs_top_snow, sabg_lyr_col, nlevsno; ndrange = np)
@@ -2298,7 +2298,7 @@ function phase_change_beta!(col::ColumnData, lun::LandunitData,
 
     dt = convert(FT, dtime)
     backend = _kernel_backend(t_soisno)
-    _phase_change_beta_kernel!(backend)(lyr, colv, pin, tmp, temperature.imelt_col,
+    _kcall!(_phase_change_beta_kernel!, backend, lyr, colv, pin, tmp, temperature.imelt_col,
         mask_nolakec, lun.urbpoi, col.snl, col.landunit, col.itype, lun.itype,
         dt, nlevsno, nlevgrnd, nlevurb, nlevmaxurbgrnd,
         FT(PHASE_CHANGE_MASS_K[]), FT(PHASE_CHANGE_TEMP_K[]); ndrange = nc)

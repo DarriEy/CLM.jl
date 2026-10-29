@@ -1529,7 +1529,7 @@ function soilwm_moisture_form_solve_params!(st::MfState, scr::MfScr, mfin::MfIn,
     nc = length(mask)
     nc == 0 && return nothing
     backend = _kernel_backend(scr.hk)
-    _soilwm_moisture_form_kernel!(backend)(st, scr, mfin, mask, nbedrock,
+    _kcall!(_soilwm_moisture_form_kernel!, backend, st, scr, mfin, mask, nbedrock,
         joff, joff_zi, nlevsoi, realpar, expensive,
         lower_boundary_condition; ndrange = nc)
     KA.synchronize(backend)

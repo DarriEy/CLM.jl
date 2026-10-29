@@ -17,6 +17,7 @@
 
 import Enzyme
 import Enzyme.EnzymeRules: augmented_primal, reverse, AugmentedReturn, inactive_type
+import Enzyme.EnzymeRules
 using Enzyme: Const, Active, Duplicated
 
 # --------------------------------------------------------------------------
@@ -51,6 +52,66 @@ function reverse(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT}, tape,
                  out::Duplicated, values::Const, dest::Const) where {RT}
     fill!(out.dval, zero(eltype(out.dval)))
     return (nothing, nothing, nothing)
+end
+
+# --------------------------------------------------------------------------
+# _gpu_launch! — GPU kernel launches with scalar arguments.
+#
+# KernelAbstractions' Enzyme extension (0.9.45) errors on any GPU kernel argument
+# annotated Active, and Enzyme (0.13.216) annotates every Float64 scalar kernel
+# argument Active — a literal, a value read from a Const argument, or one passed
+# through `ignore_derivatives` alike (scripts/gpu_ad_active_scalar_repro.jl). Every
+# CLM kernel taking dtime or a physical constant therefore failed under reverse AD
+# on CUDA.
+#
+# The rule hands the launch to KernelAbstractions' own kernel rule
+# (EnzymeRules.augmented_primal / reverse on the `Kernel` object) with those scalar
+# arguments re-annotated Const, so the kernel adjoint, its tape and its caching are
+# still KernelAbstractions'. Every other annotation (Duplicated arrays and array
+# structs, Const masks/indices) is passed through unchanged. Re-annotating through a
+# nested `Enzyme.autodiff` call does not work: the nested call re-derives Active for
+# the same scalars (see the repro).
+#
+# Cost: no derivative is returned for scalar kernel arguments on GPU (they get zero),
+# so a quantity to be differentiated on device must reach kernels as an array. All
+# scalar kernel arguments in the driver reverse are dtime, physical constants or
+# configuration values, never differentiated quantities. On CPU this rule is never
+# reached (`_kcall!` launches directly), so CPU gradients are unchanged.
+# --------------------------------------------------------------------------
+# Config for the inner Kernel call: (kernel object, args...). Overwritten = true for
+# every argument makes KernelAbstractions cache conservatively.
+_ka_rev_config(config, ::Val{N}) where {N} =
+    EnzymeRules.RevConfig{false, false, 1, ntuple(_ -> true, Val(N + 1)),
+                          EnzymeRules.runtime_activity(config), EnzymeRules.strong_zero(config)}()
+
+function _ka_launch_annotations(args)
+    return map(args) do a
+        a isa Enzyme.MixedDuplicated &&
+            error("_gpu_launch!: MixedDuplicated kernel argument is not supported")
+        a isa Active ? Const(a.val) : a
+    end
+end
+
+function augmented_primal(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT},
+        kernel::Const, backend::Const, ndrange::Const,
+        args::Vararg{Enzyme.Annotation, N}) where {RT, N}
+    kobj = kernel.val(backend.val)
+    ann = _ka_launch_annotations(args)
+    ar = EnzymeRules.augmented_primal(_ka_rev_config(config, Val(N)), Const(kobj),
+                                      Const{Nothing}, ann...; ndrange = ndrange.val)
+    KA.synchronize(backend.val)
+    return AugmentedReturn(nothing, nothing, ar.tape)
+end
+
+function reverse(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT}, tape,
+        kernel::Const, backend::Const, ndrange::Const,
+        args::Vararg{Enzyme.Annotation, N}) where {RT, N}
+    kobj = kernel.val(backend.val)
+    ann = _ka_launch_annotations(args)
+    EnzymeRules.reverse(_ka_rev_config(config, Val(N)), Const(kobj), Const{Nothing},
+                        tape, ann...; ndrange = ndrange.val)
+    return (nothing, nothing, nothing,
+            ntuple(i -> args[i] isa Active ? Enzyme.make_zero(args[i].val) : nothing, Val(N))...)
 end
 
 # --------------------------------------------------------------------------

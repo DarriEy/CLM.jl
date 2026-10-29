@@ -89,10 +89,31 @@ const _DEFER_GPU_SYNC = Ref(false)
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = _kernel_backend(out)
-    kernel(backend)(out, args...; ndrange = ndrange)
+    _kcall!(kernel, backend, out, args...; ndrange = ndrange)
     (_DEFER_GPU_SYNC[] && !(backend isa KA.CPU)) || KA.synchronize(backend)
     return out
 end
+
+# Launch `kernel(backend)(args...; ndrange)`. On a GPU backend the launch goes through
+# `_gpu_launch!`, which carries a launch-level Enzyme reverse rule
+# (src/infrastructure/enzyme_rules.jl): KernelAbstractions' own Enzyme extension
+# rejects any scalar kernel argument Enzyme annotates Active ("Active kernel arguments
+# not supported on GPU"), and Enzyme annotates every Float64 scalar argument Active —
+# even a literal or a value read from a Const argument. Primal behaviour is identical
+# on every backend; the CPU path is the plain launch.
+@inline function _kcall!(kernel, backend, args...; ndrange)
+    if backend isa KA.GPU
+        _gpu_launch!(kernel, backend, ndrange, args...)
+    else
+        kernel(backend)(args...; ndrange = ndrange)
+    end
+    return nothing
+end
+
+_gpu_launch_inner!(kernel, backend, ndrange, args...) =
+    (kernel(backend)(args...; ndrange = ndrange); KA.synchronize(backend); nothing)
+_gpu_launch!(kernel, backend, ndrange, args...) =
+    _gpu_launch_inner!(kernel, backend, ndrange, args...)
 
 # Defer per-op GPU syncs across `f` (one sync at the end). No-op deferral for the CPU
 # backend / a nothing backend, so the host path is unchanged. `backend` is the region's
