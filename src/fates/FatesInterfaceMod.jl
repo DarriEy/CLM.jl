@@ -92,6 +92,10 @@ Base.@kwdef mutable struct fates_interface_type <: AbstractFatesInterface
     # (update_history_dyn1!) and per-timestep (update_history_hifrq1!) fills write
     # into its buffers. Write-only diagnostics — never read back into the sim.
     hist::Union{fates_history_interface_type,Nothing} = nothing
+    # Host seed-dispersal buffers (Fortran `clm_fates%fates_seed`, a dispersal_type)
+    # and each site's host gridcell. Allocated only when fates_seeddisp_cadence /= 0.
+    seeds::Union{dispersal_type,Nothing} = nothing
+    seed_gridcell::Vector{Int} = Int[]
 end
 
 # ===========================================================================
