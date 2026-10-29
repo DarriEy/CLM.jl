@@ -227,6 +227,7 @@ const INPROCESS_TEST_FILES = [
     "test_crop_lifecycle.jl",  # crop lifecycle vs the CTSM CN-crop Fortran reference
   # crop lifecycle vs the CTSM CN-crop Fortran reference
     "test_crop_tails_parity.jl",  # grain fill, harvest, soyfix, vernalization vs ctsm5.3.012 dumps
+    "test_crop_fun_parity.jl",    # FUN crop N: soybean Nfix, FUN uptake/alloc, npool vs ctsm5.3.012 (gated)
     "test_multicolumn.jl",
     "test_device_adapt.jl",
     "test_backend.jl",  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)

@@ -539,16 +539,70 @@ function phen_onset_growth!(
     return nothing
 end
 
+# --- leaf/fine-root N litterfall + retranslocation split -------------------
+# Shared by CNOffsetLitterfall (CNPhenologyMod.F90:3747-3858) and
+# CNBackgroundLitterfall (ibid. 3982-4067), non-matrix path. With FUN the leaf N
+# split is driven by what CNFUN retranslocated THIS step (paid_retransn_to_npool =
+# retransn_to_npool, plus free_retransn_to_npool), which also updates
+# leafcn_offset; the CNratio_floating block then re-partitions the leaf N turnover
+# with that FUN fraction (0.5 without FUN). FUN finally caps the fine-root N
+# litterfall at the pool.
+@inline function _phen_litter_nsplit!(leafc_to_litter_fun, leafn_to_litter,
+        leafn_to_retransn, frootn_to_litter, leafcn_offset, p, ivt,
+        lc2l, fc2l, lc, fc, ln, fn, lflitcn, leafcn, frootcn,
+        paid_retransn_to_npool, free_retransn_to_npool, dt,
+        CNratio_floating::Bool, use_fun::Bool)
+    T = typeof(lc2l)
+    fr_leafn_to_litter = T(0.5)
+    if use_fun
+        leafc_to_litter_fun[p] = lc2l
+        leafn_to_retransn[p] = paid_retransn_to_npool[p] + free_retransn_to_npool[p]
+        if ln > zero(T)
+            if ln - leafn_to_retransn[p] * dt > zero(T)
+                leafcn_offset[p] = lc / (ln - leafn_to_retransn[p] * dt)
+            else
+                leafcn_offset[p] = lc / ln
+            end
+        else
+            leafcn_offset[p] = leafcn[ivt]
+        end
+        leafn_to_litter[p] = max(lc2l / leafcn_offset[p] - leafn_to_retransn[p], zero(T))
+        denom = leafn_to_retransn[p] + leafn_to_litter[p]
+        if denom != zero(T)
+            fr_leafn_to_litter = leafn_to_litter[p] / denom
+        elseif leafn_to_litter[p] == zero(T)
+            fr_leafn_to_litter = zero(T)
+        else
+            fr_leafn_to_litter = one(T)
+        end
+    else
+        leafn_to_litter[p]   = lc2l / lflitcn[ivt]
+        leafn_to_retransn[p] = (lc2l / leafcn[ivt]) - leafn_to_litter[p]
+    end
+    frootn_to_litter[p] = fc2l / frootcn[ivt]
+    if CNratio_floating
+        ntovr_leaf = lc == zero(T) ? zero(T) : lc2l * (ln / lc)
+        leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
+        leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
+        frootn_to_litter[p]  = fc == zero(T) ? zero(T) : fc2l * (fn / fc)
+    end
+    if use_fun && frootn_to_litter[p] * dt > fn
+        frootn_to_litter[p] = fn / dt
+    end
+    return nothing
+end
+
 # --- cn_offset_litterfall!: display→litter fluxes during offset ----------
 @kernel function _phen_offset_litterfall_kernel!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         @Const(mask), @Const(itype), @Const(mask_pcrop),
         @Const(offset_flag), @Const(offset_counter),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        @Const(cpool_to_frootc),
+        @Const(cpool_to_frootc), @Const(cpool_to_leafc),
+        @Const(paid_retransn_to_npool), @Const(free_retransn_to_npool),
         dt, CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
@@ -580,32 +634,22 @@ end
                     t1 * (frootc[p] - prev_frootc_to_litter[p] * offset_counter[p])
             end
 
-            if CNratio_floating
-                fr_leafn_to_litter = T(0.5)
-                if leafc[p] == zero(T)
-                    ntovr_leaf = zero(T)
-                else
-                    ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
+            # FUN: never shed more than the pool (+ this step's allocation to it)
+            # (CNPhenologyMod.F90:3720-3745).
+            if use_fun
+                if leafc_to_litter[p] * dt > leafc[p]
+                    leafc_to_litter[p] = leafc[p] / dt + cpool_to_leafc[p]
                 end
-                leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
-                leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
-                if frootc[p] == zero(T)
-                    frootn_to_litter[p] = zero(T)
-                else
-                    frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
+                if frootc_to_litter[p] * dt > frootc[p]
+                    frootc_to_litter[p] = frootc[p] / dt + cpool_to_frootc[p]
                 end
-            else
-                leafn_to_litter[p]   = leafc_to_litter[p] / lflitcn[ivt]
-                leafn_to_retransn[p] = (leafc_to_litter[p] / leafcn[ivt]) - leafn_to_litter[p]
-                frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
             end
 
-            # FUN uses the current step's leaf litterfall for retranslocation
-            # accounting (CNPhenologyMod.F90:3749). Set inside the litterfall
-            # branch so non-litterfall patches keep their prior value.
-            if use_fun
-                leafc_to_litter_fun[p] = leafc_to_litter[p]
-            end
+            _phen_litter_nsplit!(leafc_to_litter_fun, leafn_to_litter, leafn_to_retransn,
+                frootn_to_litter, leafcn_offset, p, ivt, leafc_to_litter[p],
+                frootc_to_litter[p], leafc[p], frootc[p], leafn[p], frootn[p],
+                lflitcn, leafcn, frootcn, paid_retransn_to_npool, free_retransn_to_npool,
+                dt, CNratio_floating, use_fun)
 
             prev_leafc_to_litter[p]  = leafc_to_litter[p]
             prev_frootc_to_litter[p] = frootc_to_litter[p]
@@ -620,14 +664,17 @@ function phen_offset_litterfall!(
         mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
         cpool_to_frootc,
-        dt, CNratio_floating, use_fun)
+        dt, CNratio_floating, use_fun;
+        leafcn_offset = leafc_to_litter_fun, cpool_to_leafc = cpool_to_frootc,
+        paid_retransn_to_npool = cpool_to_frootc, free_retransn_to_npool = cpool_to_frootc)
+    # The FUN-only arrays default to placeholders that are never read without FUN.
     _launch!(_phen_offset_litterfall_kernel!,
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
-        cpool_to_frootc,
+        cpool_to_frootc, cpool_to_leafc, paid_retransn_to_npool, free_retransn_to_npool,
         eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
 end
 
@@ -750,11 +797,12 @@ end
 # --- cn_background_litterfall!: background litter fluxes ------------------
 @kernel function _phen_background_litterfall_kernel!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         @Const(mask), @Const(itype), @Const(bglfr),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        CNratio_floating::Bool, use_fun::Bool)
+        @Const(paid_retransn_to_npool), @Const(free_retransn_to_npool),
+        dt, CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
     @inbounds if mask[p]
@@ -762,29 +810,11 @@ end
             ivt = itype[p] + 1
             leafc_to_litter[p]  = bglfr[p] * leafc[p]
             frootc_to_litter[p] = bglfr[p] * frootc[p]
-            # FUN uses the current step's leaf litterfall (CNPhenologyMod.F90:3983)
-            if use_fun
-                leafc_to_litter_fun[p] = leafc_to_litter[p]
-            end
-            if CNratio_floating
-                fr_leafn_to_litter = T(0.5)
-                if leafc[p] == zero(T)
-                    ntovr_leaf = zero(T)
-                else
-                    ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
-                end
-                leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
-                leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
-                if frootc[p] == zero(T)
-                    frootn_to_litter[p] = zero(T)
-                else
-                    frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
-                end
-            else
-                leafn_to_litter[p]   = leafc_to_litter[p] / lflitcn[ivt]
-                leafn_to_retransn[p] = (leafc_to_litter[p] / leafcn[ivt]) - leafn_to_litter[p]
-                frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
-            end
+            _phen_litter_nsplit!(leafc_to_litter_fun, leafn_to_litter, leafn_to_retransn,
+                frootn_to_litter, leafcn_offset, p, ivt, leafc_to_litter[p],
+                frootc_to_litter[p], leafc[p], frootc[p], leafn[p], frootn[p],
+                lflitcn, leafcn, frootcn, paid_retransn_to_npool, free_retransn_to_npool,
+                dt, CNratio_floating, use_fun)
         end
     end
 end
@@ -793,12 +823,16 @@ function phen_background_litterfall!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, bglfr, leafc, frootc, leafn, frootn,
-        lflitcn, leafcn, frootcn, CNratio_floating, use_fun)
+        lflitcn, leafcn, frootcn, CNratio_floating, use_fun;
+        dt = 1800.0, leafcn_offset = leafc_to_litter_fun,
+        paid_retransn_to_npool = leafc_to_litter, free_retransn_to_npool = leafc_to_litter)
+    # The FUN-only arrays default to placeholders that are never read without FUN.
     _launch!(_phen_background_litterfall_kernel!,
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         mask, itype, bglfr, leafc, frootc, leafn, frootn,
-        lflitcn, leafcn, frootcn, CNratio_floating, use_fun)
+        lflitcn, leafcn, frootcn, paid_retransn_to_npool, free_retransn_to_npool,
+        eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
 end
 
 # --- cn_livewood_turnover!: live wood → dead wood turnover ----------------
@@ -3142,9 +3176,21 @@ function cn_offset_litterfall!(pstate::PhenologyState,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
         pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn,
         _cpool_to_frootc_or_zero(cnveg_cf, length(mask_soilp)),
-        dt, CNratio_floating, use_fun)
+        dt, CNratio_floating, use_fun;
+        _phen_fun_litter_kwargs(use_fun, cnveg_state, cnveg_cf, cnveg_nf; offset = true)...)
 
     return nothing
+end
+
+# FUN-only inputs/outputs of the litterfall N split (leafcn_offset; CNFUN's paid and
+# free retranslocation; cpool_to_leafc for the offset clamp). Without FUN the kernels
+# never read them and keep their placeholders, so bare unit-test fixtures still work.
+function _phen_fun_litter_kwargs(use_fun, cnveg_state, cnveg_cf, cnveg_nf; offset::Bool)
+    use_fun || return NamedTuple()
+    kw = (leafcn_offset = cnveg_state.leafcn_offset_patch,
+          paid_retransn_to_npool = cnveg_nf.retransn_to_npool_patch,
+          free_retransn_to_npool = cnveg_nf.free_retransn_to_npool_patch)
+    return offset ? merge(kw, (cpool_to_leafc = cnveg_cf.cpool_to_leafc_patch,)) : kw
 end
 
 # cpool_to_frootc for the final-offset-step litter term. Unit-test fixtures that
@@ -3178,7 +3224,9 @@ function cn_background_litterfall!(pstate::PhenologyState,
         mask_soilp, patch_data.itype, cnveg_state.bglfr_patch,
         cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
-        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating, use_fun)
+        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating, use_fun;
+        dt = pstate.dt,
+        _phen_fun_litter_kwargs(use_fun, cnveg_state, cnveg_cf, cnveg_nf; offset = false)...)
 
     return nothing
 end
