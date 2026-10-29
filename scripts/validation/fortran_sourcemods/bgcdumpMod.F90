@@ -63,6 +63,12 @@ contains
                                  soilbiogeochem_carbonflux_inst, &
                                  crop_inst, soilbiogeochem_nitrogenflux_inst
     use clm_varctl      , only : use_crop
+    ! ---- O2-demand decomposition (CLM.jl ch4 O2 drift, parity/ch4-o2-drift)
+    use clm_instMod     , only : soilstate_inst
+    use clm_varcon      , only : catomw
+    use pftconMod       , only : noveg
+    use PatchType       , only : patch
+    use ColumnType      , only : col
     !
     ! !ARGUMENTS:
     type(bounds_type), intent(in) :: bounds
@@ -109,6 +115,12 @@ contains
     integer :: v_gddtsoi, v_vf, v_latbaset, v_fertnitro, v_nyrscrop
     integer :: v_fert, v_soyfixn, v_fert2sminn, v_soyfix2sminn
     integer :: pp
+    ! ---- O2 demand components + inputs (ch4Mod.F90 ch4_prod, l.2505-2525 / 2667-2696)
+    integer :: v_oscal, v_hrvr, v_fphr, v_pfnit, v_anfr, v_knitr, v_knt, v_knh, v_knph
+    integer :: v_diffus, v_rpsi, v_o2rr, v_o2nit, v_o2oxs, v_o2oxu, v_o2aes, v_o2aeu
+    integer :: v_somhr, v_lithr, v_rr, v_frmr, v_lcrmr, v_wtcol, v_itype, v_crootfr, v_dz
+    integer :: d_soi_p, jj, cc
+    real(r8), allocatable :: sp2(:,:)     ! (nlevsoi, npft)
 
     real(r8), allocatable :: s2(:,:)      ! (nlevsoi, ncol)
     real(r8), allocatable :: d2(:,:)      ! (nlevdecomp_full, ncol)
@@ -272,6 +284,35 @@ contains
        ier = nf90_def_var(ncid,'SOYFIXN_TO_SMINN', NF90_DOUBLE,(/d_col/), v_soyfix2sminn)
     end if
 
+    ! ================= O2 demand decomposition =================
+    ! o2_decomp_depth = HR/o_scalar part + rr_vr/catomw/dz + pot_f_nit_vr*2/14.
+    ier = nf90_def_var(ncid,'O_SCALAR',      NF90_DOUBLE,(/d_soi,d_col/), v_oscal)
+    ier = nf90_def_var(ncid,'HR_VR',         NF90_DOUBLE,(/d_soi,d_col/), v_hrvr)
+    ier = nf90_def_var(ncid,'FPHR',          NF90_DOUBLE,(/d_soi,d_col/), v_fphr)
+    ier = nf90_def_var(ncid,'POT_F_NIT_VR',  NF90_DOUBLE,(/d_soi,d_col/), v_pfnit)
+    ier = nf90_def_var(ncid,'ANAEROBIC_FRAC',NF90_DOUBLE,(/d_soi,d_col/), v_anfr)
+    ier = nf90_def_var(ncid,'K_NITR_VR',     NF90_DOUBLE,(/d_soi,d_col/), v_knitr)
+    ier = nf90_def_var(ncid,'K_NITR_T_VR',   NF90_DOUBLE,(/d_soi,d_col/), v_knt)
+    ier = nf90_def_var(ncid,'K_NITR_H2O_VR', NF90_DOUBLE,(/d_soi,d_col/), v_knh)
+    ier = nf90_def_var(ncid,'K_NITR_PH_VR',  NF90_DOUBLE,(/d_soi,d_col/), v_knph)
+    ier = nf90_def_var(ncid,'DIFFUS',        NF90_DOUBLE,(/d_soi,d_col/), v_diffus)
+    ier = nf90_def_var(ncid,'R_PSI',         NF90_DOUBLE,(/d_soi,d_col/), v_rpsi)
+    ier = nf90_def_var(ncid,'O2_DEMAND_RR',  NF90_DOUBLE,(/d_soi,d_col/), v_o2rr)
+    ier = nf90_def_var(ncid,'O2_DEMAND_NIT', NF90_DOUBLE,(/d_soi,d_col/), v_o2nit)
+    ier = nf90_def_var(ncid,'O2_OXID_SAT',   NF90_DOUBLE,(/d_soi,d_col/), v_o2oxs)
+    ier = nf90_def_var(ncid,'O2_OXID_UNSAT', NF90_DOUBLE,(/d_soi,d_col/), v_o2oxu)
+    ier = nf90_def_var(ncid,'O2_AERE_SAT',   NF90_DOUBLE,(/d_soi,d_col/), v_o2aes)
+    ier = nf90_def_var(ncid,'O2_AERE_UNSAT', NF90_DOUBLE,(/d_soi,d_col/), v_o2aeu)
+    ier = nf90_def_var(ncid,'DZ_SOI',        NF90_DOUBLE,(/d_soi,d_col/), v_dz)
+    ier = nf90_def_var(ncid,'SOMHR',         NF90_DOUBLE,(/d_col/), v_somhr)
+    ier = nf90_def_var(ncid,'LITHR',         NF90_DOUBLE,(/d_col/), v_lithr)
+    ier = nf90_def_var(ncid,'RR',            NF90_DOUBLE,(/d_pft/), v_rr)
+    ier = nf90_def_var(ncid,'FROOT_MR',      NF90_DOUBLE,(/d_pft/), v_frmr)
+    ier = nf90_def_var(ncid,'LIVECROOT_MR',  NF90_DOUBLE,(/d_pft/), v_lcrmr)
+    ier = nf90_def_var(ncid,'PATCH_WTCOL',   NF90_DOUBLE,(/d_pft/), v_wtcol)
+    ier = nf90_def_var(ncid,'PATCH_ITYPE',   NF90_INT,   (/d_pft/), v_itype)
+    ier = nf90_def_var(ncid,'CROOTFR',       NF90_DOUBLE,(/d_soi,d_pft/), v_crootfr)
+
     ier = nf90_def_var(ncid,'nstep', NF90_INT, v_nstep)
     ier = nf90_def_var(ncid,'ymd',   NF90_INT, v_ymd)
     ier = nf90_def_var(ncid,'tod',   NF90_INT, v_tod)
@@ -398,6 +439,71 @@ contains
        call put1d(ncid, v_soyfix2sminn, bounds, &
             soilbiogeochem_nitrogenflux_inst%soyfixn_to_sminn_col, c1)
     end if
+
+    ! ================= write O2 demand decomposition =================
+    associate( scf => soilbiogeochem_carbonflux_inst, snf => soilbiogeochem_nitrogenflux_inst )
+    call put2d(ncid, v_oscal,  bounds, scf%o_scalar_col,       nlevsoi, s2)
+    call put2d(ncid, v_hrvr,   bounds, scf%hr_vr_col,          nlevsoi, s2)
+    call put2d(ncid, v_fphr,   bounds, scf%fphr_col,           nlevsoi, s2)
+    call put2d(ncid, v_pfnit,  bounds, snf%pot_f_nit_vr_col,   nlevsoi, s2)
+    call put2d(ncid, v_anfr,   bounds, snf%anaerobic_frac_col, nlevsoi, s2)
+    call put2d(ncid, v_knitr,  bounds, snf%k_nitr_vr_col,      nlevsoi, s2)
+    call put2d(ncid, v_knt,    bounds, snf%k_nitr_t_vr_col,    nlevsoi, s2)
+    call put2d(ncid, v_knh,    bounds, snf%k_nitr_h2o_vr_col,  nlevsoi, s2)
+    call put2d(ncid, v_knph,   bounds, snf%k_nitr_ph_vr_col,   nlevsoi, s2)
+    call put2d(ncid, v_diffus, bounds, snf%diffus_col,         nlevsoi, s2)
+    call put2d(ncid, v_rpsi,   bounds, snf%r_psi_col,          nlevsoi, s2)
+    call put2d(ncid, v_o2oxs,  bounds, ch4_inst%o2_oxid_depth_sat_col,   nlevsoi, s2)
+    call put2d(ncid, v_o2oxu,  bounds, ch4_inst%o2_oxid_depth_unsat_col, nlevsoi, s2)
+    call put2d(ncid, v_o2aes,  bounds, ch4_inst%o2_aere_depth_sat_col,   nlevsoi, s2)
+    call put2d(ncid, v_o2aeu,  bounds, ch4_inst%o2_aere_depth_unsat_col, nlevsoi, s2)
+    call put1d(ncid, v_somhr,  bounds, scf%somhr_col, c1)
+    call put1d(ncid, v_lithr,  bounds, scf%lithr_col, c1)
+    ! nitrification O2 demand, exactly as ch4_prod adds it (ch4Mod.F90 l.2690)
+    do cc = bounds%begc, bounds%endc
+       do jj = 1, nlevsoi
+          s2(jj, cc-bounds%begc+1) = snf%pot_f_nit_vr_col(cc,jj) * 2.0_r8/14.0_r8
+       end do
+    end do
+    ier = nf90_put_var(ncid, v_o2nit, s2)
+    ! root-respiration O2 demand: rr_vr(c,j) = sum_p rr(p)*crootfr(p,j)*wtcol(p)
+    ! (ch4Mod.F90 l.2515-2522), then rr_vr/catomw/dz (l.2684)
+    s2(:,:) = 0._r8
+    do pp = bounds%begp, bounds%endp
+       cc = patch%column(pp)
+       if (patch%wtcol(pp) > 0._r8 .and. patch%itype(pp) /= noveg) then
+          do jj = 1, nlevsoi
+             s2(jj, cc-bounds%begc+1) = s2(jj, cc-bounds%begc+1) + &
+                  cvc%rr_patch(pp) * soilstate_inst%crootfr_patch(pp,jj) * patch%wtcol(pp)
+          end do
+       end if
+    end do
+    do cc = bounds%begc, bounds%endc
+       do jj = 1, nlevsoi
+          s2(jj, cc-bounds%begc+1) = s2(jj, cc-bounds%begc+1) / catomw / col%dz(cc,jj)
+       end do
+    end do
+    ier = nf90_put_var(ncid, v_o2rr, s2)
+    do cc = bounds%begc, bounds%endc
+       do jj = 1, nlevsoi
+          s2(jj, cc-bounds%begc+1) = col%dz(cc,jj)
+       end do
+    end do
+    ier = nf90_put_var(ncid, v_dz, s2)
+    call put1p(ncid, v_rr,    bounds, cvc%rr_patch,           p1)
+    call put1p(ncid, v_frmr,  bounds, cvc%froot_mr_patch,     p1)
+    call put1p(ncid, v_lcrmr, bounds, cvc%livecroot_mr_patch, p1)
+    call put1p(ncid, v_wtcol, bounds, patch%wtcol,            p1)
+    call puti1p(ncid, v_itype, bounds, patch%itype,           pi1)
+    allocate(sp2(nlevsoi, npft))
+    do pp = bounds%begp, bounds%endp
+       do jj = 1, nlevsoi
+          sp2(jj, pp-bounds%begp+1) = soilstate_inst%crootfr_patch(pp,jj)
+       end do
+    end do
+    ier = nf90_put_var(ncid, v_crootfr, sp2)
+    deallocate(sp2)
+    end associate
 
     end associate
 

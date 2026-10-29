@@ -1259,3 +1259,67 @@ julia --project=. scripts/fortran_parity_ch4_tws.jl 3              # single-step
 julia --project=. scripts/fortran_parity_ch4_source.jl 168 locked  # CN locked, CH4 free, 7 days
 julia --project=. -e 'using Test, CLM; include("test/test_fortran_parity_ch4_source.jl")'  # gated, 12 steps
 ```
+
+## 17. The saturated-column O₂ "drift": one demand bug, then chaos (2026-10-29)
+
+§16 left `CONC_O2_SAT` at 5.8% after 168 h and attributed it to an O₂-demand residual
+(≤ 2.5e-3) from root respiration + nitrification, which the dumps did not carry.
+
+### The O₂-demand rebuild — `bow_ref_ch4o2`
+`scripts/validation/fortran_sourcemods/bgcdumpMod.F90` gained an O₂-demand block:
+`O2_DEMAND_RR` (= Σ_p rr·crootfr·wtcol / catomw / dz, exactly ch4Mod.F90:2515-2522/2684),
+`O2_DEMAND_NIT` (= pot_f_nit_vr·2/14, l.2690), and their inputs `RR`, `FROOT_MR`,
+`LIVECROOT_MR`, `CROOTFR`, `PATCH_WTCOL/ITYPE`, `POT_F_NIT_VR`, `K_NITR_*`,
+`ANAEROBIC_FRAC`, `DIFFUS`, `R_PSI`, `O_SCALAR`, `HR_VR`, `FPHR`, `SOMHR/LITHR`, plus the
+O₂ budget terms `O2_OXID_*` and `O2_AERE_*`. The bow_ref_ch4tws case was rebuilt in an isolated
+clone (`installs/clm/cases/ch4o2_macos`; recipe `scripts/validation/ch4_o2/build_and_run_ch4o2.sh`)
+and re-run over n4720–n4888. **Every field shared with bow_ref_ch4tws is bit-identical**, so
+the new directory is a strict superset and the harness now prefers it.
+
+### Demand decomposition (Julia vs Fortran, 168 h, CN locked, CH4 free)
+| term | worst rel.err | note |
+|---|---|---|
+| `O_SCALAR` | 0 | ≡ 1 at Bow, so no HR/o_scalar inflation |
+| `O2_DEMAND_NIT` / `POT_F_NIT_VR` | 1.9e-5 | nitrification is **not** the residual |
+| `ANAEROBIC_FRAC` | 2–4e-2 | of a 1e-27 scale: numerically irrelevant |
+| `HR_VR` | 6.6e-4 | the CN floor (§16) |
+| `O2_DEMAND_RR` / `RR` | **2.5e-3 / 3.6e-3** (before fix) | **the whole non-HR residual** |
+
+### Bug FIXED — root respiration omitted `livecroot_mr`
+`rr_patch` in `_cvcf_summary_kernel!` summed fine-root MR plus every root growth-respiration
+term but dropped `livecroot_mr_patch`. Fortran `CNVegCarbonFluxType.F90:5015-5026` has
+`rr = froot_mr + livecroot_mr + cpool_{froot,livecroot,deadcroot}_gr + transfer_… + storage_…`.
+At Bow the needleleaf-evergreen patch (wtcol 0.6) has livecroot_mr ≈ 0.7% of its RR, so Julia's
+root O₂ demand was biased low by ~9e-4 every step. `rr` feeds only `ch4_prod`'s
+`o2_decomp_depth` and the `rr_col` diagnostic, so the non-CH4 path is unaffected (SP does not
+run the CN summary at all).
+
+| per-step | before | after |
+|---|---|---|
+| `RR`, night (no GPP) | 1.1–1.7e-3 | **2.5e-12** |
+| `RR`, day | 0.9–1.7e-3 | 1–3e-4 (worst 3.6e-3: growth resp. from this step's GPP/allocation, a CN-side residual; `FROOT_MR` 8.5e-4, `LIVECROOT_MR` 3.1e-3 of its 5e-9 scale) |
+| `O2_DECOMP_SAT` (12 h worst) | — | 1.3e-3 |
+| `CH4_OXID_SAT` (168 h) | 3.3e-2 | 1.1e-2 |
+| `O2STRESS_SAT` / `CH4STRESS_SAT` (168 h) | 4.6e-3 / 1.4e-2 | 1.8e-3 / 4.7e-3 |
+
+### Why `CONC_O2_SAT` still reaches ~6–7%: the reference itself is chaotic
+The error is not a drift. It spikes and recovers (5.8e-2 at n4781, 4e-4 at n4793), always in
+**layer 1**, and always when the aerenchyma O₂ flux switches on and off. `oxaere` is an explicit
+source applied over the 3600 s step, `∝ (c_eq − conc_o2)` and clipped at 0
+(ch4Mod.F90 SiteOxAere l.3226-3228). In the top layer it behaves like a per-step gain > 1 (inferred from the alternating overshoot, not derived), so `conc_o2(1)`
+overshoots across `c_eq` and any small perturbation is amplified hour over hour (aere
+1.05e-6/0.93e-6 → 0.48e-6/0.69e-6 → 0.83e-6/0.48e-6 at n4762-4764).
+
+**Twin test.** The same Julia run with the initial `conc_o2_sat` scaled by (1+1e-6) diverges
+from the unperturbed Julia run by **4.9%** (profile-scaled, j1..6). Julia vs Fortran is 6.1% on the
+same metric. A 1e-6 seed does as much damage as the whole remaining port residual (HR 6.6e-4,
+day-time GR), so no further fix to the port can close `CONC_O2_SAT` over 168 h below the
+reference's own sensitivity. Over 12 h, before the amplification sets in, `CONC_O2_SAT` is
+6.6e-4. The CH4 column is insensitive: `CONC_CH4_SAT` 5.2e-4 and `TOTCOLCH4` 3.4e-4 over 168 h.
+
+### Test
+`test_fortran_parity_ch4_source.jl` (12 h) reads bow_ref_ch4o2 when present. `O2_DECOMP_*` is
+tightened from 5e-3 to 4e-3, and new gates cover `RR` < 2e-3, `O2_DEMAND_RR` < 2e-3,
+`O2_DEMAND_NIT`/`POT_F_NIT_VR` < 1e-4, `O_SCALAR` < 1e-12 and `O2_OXID_SAT` < 1e-2.
+`CONC_O2_SAT` stays at 5e-3: it is bounded by the chaos above, not by a known residual.
+`test_cn_veg_carbon_flux.jl` pins `rr_patch` including `livecroot_mr`.
