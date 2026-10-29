@@ -101,6 +101,7 @@ const INPROCESS_TEST_FILES = [
     "test_canopy_fluxes.jl",
     "test_canopy_reverse.jl",
     "test_canopy_hydrology.jl",
+    "test_canopy_water_evap_update.jl",
     "test_bareground_fluxes.jl",
     "test_soil_fluxes.jl",
     "test_urban_fluxes.jl",

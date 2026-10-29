@@ -248,16 +248,25 @@ using CLM
     #    no differentiability — but a SMOOTHED floor bites everywhere, adding
     #    log(2)/50 = 0.0139 mm of canopy water per patch per step.
     #
-    #    The update lives inside canopy_fluxes!'s fused per-patch kernel, with no
-    #    callable seam of its own, so this pins the source. (The end-to-end proof is
-    #    scripts/longhorizon_conservation.jl --smooth, which closes at ~1e-15
-    #    mm/step; this is the guard that keeps the one-token revert from sneaking
-    #    back in.)
+    #    The update is `canopy_water_evap_update` (CanopyFluxesMod.F90:1602-1629),
+    #    so this checks it directly with the smooth path forced on: the store must
+    #    move by EXACTLY net_evap for any admissible net_evap (-net <= h2ocan).
+    #    (The end-to-end proof is scripts/longhorizon_conservation.jl --smooth.)
     # ---------------------------------------------------------------------
-    @testset "canopy water store: non-negativity floor is a HARD max" begin
-        src = read(joinpath(@__DIR__, "..", "src", "biogeophys", "canopy_fluxes.jl"), String)
-        m = match(r"_h2ocan_new = (\w+)\(zero\(T\), out\.liqcan\[p\] \+ out\.snocan\[p\] \+ _net_evap\)", src)
-        @test m !== nothing
-        @test m.captures[1] == "max"        # NOT smooth_max — see the note above
+    @testset "canopy water store: smooth path conserves exactly" begin
+        old = CLM.SMOOTH_MODE[]
+        CLM.SMOOTH_MODE[] = :always
+        try
+            for (liq, sno, frac, tv) in ((0.3, 0.2, -0.5, 273.16), (0.3, 0.2, -1.0, 273.14),
+                                         (1.0e-3, 0.0, -1.0, 273.15), (0.0, 0.4, 0.3, 273.151),
+                                         (0.05, 0.6, -0.9, 273.149), (0.2, 0.2, -0.25, 280.0))
+                net = frac * (liq + sno)
+                l, s = CLM.canopy_water_evap_update(liq, sno, net, tv)
+                @test l >= 0 && s >= 0
+                @test isapprox(l + s, liq + sno + net; atol = 1e-14)
+            end
+        finally
+            CLM.SMOOTH_MODE[] = old
+        end
     end
 end

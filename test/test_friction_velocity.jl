@@ -342,6 +342,21 @@
 
         # Patch 2: bare ground → forc_hgt uses z0mg_col + displa
         @test fvd.forc_hgt_u_patch[2] ≈ 10.0 + fvd.zlnd + 0.0
+
+        # Trace snow after melt-out: FrictionVelocityMod.F90:598 tests frac_sno > 0,
+        # so a decaying trace (Fortran Bow FATES 2002-07-06: 2.2e-12, 1.5e-17) keeps
+        # the snow roughness. (A 1e-11 floor here switched to zlnd one step early.)
+        for fs in (2.236e-12, 1.5e-17, 1.0e-300)
+            CLM.set_roughness_and_forc_heights_nonlake!(fvd,
+                mask_nolakec, mask_nolakep, 1:nc, 1:np,
+                [fs, 0.0], snomelt_accum, frac_veg_nosno, z0m_canopy, displa_v,
+                forc_hgt_u, forc_hgt_t, forc_hgt_q,
+                col_landunit, patch_gridcell, patch_landunit, patch_column,
+                lun_itype, lun_urbpoi, lun_z_0_town, lun_z_d_town;
+                z0param_method="ZengWang2007", use_z0m_snowmelt=false)
+            @test fvd.z0mg_col[1] == fvd.zsno
+            @test fvd.z0mg_col[2] == fvd.zlnd
+        end
     end
 
     @testset "set_actual_roughness_lengths!" begin

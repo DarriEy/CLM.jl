@@ -1168,7 +1168,9 @@ Fortran carbon-only does not, and neither does the port in either mode. The caus
 `EDPhysiologyMod.F90:1150-1153`: leaf-off fires once `model_day > 10` if more than
 `phen_ncolddayslim` (5) of the last 10 daily TVEG24 values are below `phen_coldtemp`
 (7.5 C). Day 6 is the knife edge. Fortran carbon-only has 7.514 C, Fortran CNP has
-7.369 C, and the port has 7.700 C in both modes. The two Fortran runs agree to about
+7.369 C, and the port has 7.700 C in both modes. (Update: the port is now 7.512 C. The CNP/carbon-only split is a Fortran
+round-off flip of the trace-snow `z0mg` branch; see "Cold canopy, canopy snow and the
+winter warm bias".) The two Fortran runs agree to about
 1e-7 until nstep 139, then jump together in GPP *and soil HR* (a host-side event that
 amplifies the round-off-level CNP perturbation). The port is warmer than both by the
 known ~0.2-0.8 C host vegetation-temperature residual, so it stays on the warm side.
@@ -1325,16 +1327,91 @@ of the early rain on the canopy.
 SP canopy temperature (TV, 10-day mean): +0.55 K before, +0.02 K after. Per patch, every
 patch is within 2e-5 relative.
 
-**Residual (not fixed here):** SP `SNOCAN` is still about 8 % low on the tree patches. The
-port's dew/evaporation update in `canopy_fluxes.jl` re-splits the total canopy water by
-the existing phase amounts. Fortran (CanopyFluxesMod.F90:1601-1620) takes evaporation
-from `liqcan` first when `t_veg > tfrz`, and from `snocan` first otherwise. The port's
-version is a deliberate conservation/AD choice (#214, #219), and it is on the default
-path, so it is left for a separate change. The first two SP steps also differ: Fortran
-has `SABV = 0` there.
+**Residual:** SP `SNOCAN` about 8 % low, and the first two SP steps (Fortran
+`SABV = 0`). Both are closed in the next section.
 
 To reproduce, stage `MODE=sp` with `stage_fates_modes_run.sh`, adding
 `hist_dov2xy = .false.` and the extra `hist_fincl1` fields to the staged `lnd_in`.
+
+## Cold canopy, canopy snow and the winter warm bias (2026-10-29)
+
+Three host residuals were left after the section above. In default FATES (carbon only),
+day-6 `FATES_TVEG24` was 7.399 C in the port and 7.514 C in Fortran. In SP, `SNOCAN` was
+about 8 % low on the tree patches. In the 412-day SPITFIRE run, the port's leaf was 0.5 to
+3 K warm from October to May. All three were localized with per-patch hourly h0
+(`hist_dov2xy = .false.`) and, where h0 was not enough, a relinked `cesm.exe` with
+`write` statements (`build_patched_cesm.jl`: CanopyFluxesMod per iteration,
+FrictionVelocityMod `frac_sno`/`z0mg`, SnowCoverFraction SL2012 inputs). There were four
+causes: two in `src/` and two in the harness.
+
+1. **Canopy water phase bookkeeping** (`canopy_fluxes.jl`, default path). The port
+   re-split the evaporation loss in proportion to the existing `liqcan`/`snocan`.
+   CanopyFluxesMod.F90:1602-1620 takes it from `liqcan` first when `t_veg > tfrz`, and
+   from `snocan` first otherwise, with the remainder from the other phase. So a warm leaf
+   under a snow-laden canopy lost snow that Fortran keeps. It is now
+   `canopy_water_evap_update`: the Fortran pair written branch-free and blended by the
+   phase step, which is exact for Float64 and smooth (and still mass-conserving) for AD.
+   It also adds the `truncate_small_values(snocan, 1e-10)` that was never ported
+   (F90:1624-1629). It also passes the FATES `tgcm = thm_patch` (clmfates_interfaceMod.F90:2573,
+   2613; the port passed `forc_t`), which is negligible here.
+2. **Ground snow roughness after melt-out** (`friction_velocity.jl`, default path).
+   `z0mg = zsno` whenever `frac_sno > 0` (FrictionVelocityMod.F90:598). After melt-out
+   CTSM's `frac_sno` decays through trace values that come from canopy-snow unloading
+   (Fortran, Bow 2002-07-06: 1.8e-5, 9.9e-7, 2.2e-12, 1.5e-17, 1.5e-27 ...). A 1e-11
+   floor added in 5cf89ff (for a Savanna subnormal that no longer occurs: zero
+   `0 < frac_sno <= 1e-11` events in the 2017 Donga year) switched the port to `zlnd`
+   one step early. At nstep 137 that raised `z0mv` from 0.0308 to 0.0437 m, `ustar` from
+   0.0644 to 0.0668 and lowered `rah1` from 364 to 338. The leaf ran 0.74 K warm and FSH
+   18 W/m2 low that step, and 0.9 K cold for the rest of the afternoon. That was the
+   whole day-6 `TVEG24` gap. The floor is removed.
+3. **NUOPC albedo timing in the harness.** `fates_modes/cnp/landuse/spitfire_parity.jl`
+   passed `doalb = true` from nstep 0. CTSM's cap first solves albedo at the end of
+   nstep 2 (`nuopc_doalb`, already used by the other harnesses), so Fortran has `SABV = 0`
+   on nsteps 0-2. With `true`, the port's canopy was 5.5 K warm on nstep 1, which put day 1
+   `TVEG24` 0.35 K high.
+4. **SNICAR files missing from the harness.** No FATES harness passed `fsnowoptics` or
+   `fsnowaging`, so the SNICAR Mie tables stayed at zero. With full snow cover the bare
+   patch absorbed 12-34 W/m2 more SW (SABG) from October on, and TG/TV ran 1-3 K warm.
+   `fates_fortran_parity.jl` now defines `FSNOWOPTICS` / `FSNOWAGING` (the files in the
+   Fortran `lnd_in`), and every FATES harness passes them.
+
+Results (Fortran ctsm5.3.012; before -> after):
+
+| quantity | before | after |
+|---|---|---|
+| carbon-only `FATES_TVEG24` day 1 / day 6 (F 2.071 / 7.514) | 2.425 / 7.399 | 2.071 / 7.512 |
+| carbon-only `FATES_TVEG24` days 8-12, max abs diff | | 0.005 K |
+| SP per patch, 10-day mean rel.: SNOCAN trees / grass | -9.0 % / -6.7 % | +0.003 % / +0.03 % |
+| SP per patch: FCEV trees, FSH_V grass, SABV trees | +3.4 %, +9.3 %, +0.94 % | +0.02 %, -0.24 %, -0.001 % |
+| SP `fates_modes_parity.jl`, rel(mean): FATES_GPP / FSH / EFLX_LH_TOT | +0.69 % / +0.15 % / +0.75 % | 5e-5 / 5e-4 / 1e-3 |
+| SPITFIRE 412 d, TVEG24 J-F by 30-day block, Oct-Jan | +0.4 to +1.4 K | +0.04 to +0.17 K |
+| SPITFIRE 412 d, same, Feb-May | +1.3 to +3.2 K | +0.3 to +1.1 K |
+
+The SP before/after numbers include the harness `doalb` fix.
+
+**The CNP leaf-off bifurcation is Fortran round-off on the same trace branch.** Fortran
+CNP and Fortran carbon-only differ only at round-off level. In Fortran CNP the trace
+`frac_sno` collapses to exactly 0 at nstep 139, so `z0mg` switches to `zlnd` there. In
+carbon-only it holds until nstep 148 (instrumented runs of both cases). That one switch
+is the 7.369 vs 7.514 C day-6 split, and so the day-11 leaf-off in Fortran CNP. The port
+now follows the carbon-only path in both modes (7.512 C), so it does not reproduce
+Fortran CNP's leaf-off.
+
+**Still open.**
+* Day-7 `TVEG24` is 12.404 C in the port vs 12.266 C in Fortran carbon-only (12.149 in
+  Fortran CNP). It is the same trace branch again: the trace `frac_sno` comes from
+  unloading of about 1e-16 mm of snow on the tiny FATES patch 3. At nstep 138 that
+  residue is a near-total cancellation (Fortran 6.6e-18, port 1.9e-18), so the port's
+  `frac_sno` reaches 0 at nstep 145 and Fortran's at nstep 148. Both models do the same
+  arithmetic; the result is ill-conditioned.
+* Melt season (Feb-May) is still +0.3 to +1.1 K warm, with single days up to 5 K. In
+  March the tree patch absorbs about 7 W/m2 more SABV and holds more canopy snow.
+  Not localized further.
+* 412 days into SPITFIRE: `FATES_VEGC` +7 %, live-grass fuel +35 %.
+
+Reproduce: stage the carbon-only control (`fates_cnp_ctrl_c1` namelists) with
+`hist_dov2xy = .false.` and the per-patch fields above. Score the port with
+`FATES_CNP_PARTEH=1 fates_cnp_parity.jl <h0> 240`.
 
 ---
 

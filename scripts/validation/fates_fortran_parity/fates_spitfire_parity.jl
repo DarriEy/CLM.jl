@@ -141,7 +141,7 @@ function run_julia(ndays::Int; tveg24_ref = nothing)
                 CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
                 CLM.read_forcing_step!(fr, a2l, datm_time(cur), ng, nc)
                 CLM.downscale_forcings!(bounds, a2l, inst.column, inst.landunit, inst.topo)
-                CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true,
+                CLM.clm_drv!(config, inst, filt, filt_ia, bounds, CLM.nuopc_doalb(i),
                     calday + DTIME / CLM.SECSPDAY, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
                     false, false, "", false;
                     nstep=i, is_first_step=(i <= 1),
