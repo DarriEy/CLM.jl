@@ -947,6 +947,17 @@ function clm_initialize!(;
             _fates_sp_host_phenology!(inst; mon = month(start_date), day = day(start_date),
                                       first_read = true)
         end
+        # Flag the FATES columns BEFORE the FATES cold start, as the Fortran host does
+        # (clmfates_interfaceMod::init sets `col%is_fates(c) = .true.` for every istsoil
+        # column, ahead of init_coldstart). The cold-start canopy transfer
+        # (wrap_update_hlmfates_dyn: FATES patch weights, elai/esai, z0m/displa) walks
+        # the is_fates columns, so flagging them only after clm_initialize! returned
+        # left the HLM on the surfdata patch layout for the first timestep(s).
+        let col = inst.column, lun = inst.landunit
+            for c in eachindex(col.is_fates)
+                lun.itype[col.landunit[c]] == ISTSOIL && (col.is_fates[c] = true)
+            end
+        end
         # One FATES site per CLM column (single-site MVP: nc is typically 1). PFT
         # count comes from the parameter file (numpft_in omitted => use the file).
         clm_fates_init!(inst; nsites = nc,

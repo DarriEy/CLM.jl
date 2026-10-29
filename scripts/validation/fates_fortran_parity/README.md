@@ -1244,6 +1244,98 @@ relative error of the window mean (|J-F|/|F|):
 SP/nocomp restarts, LUH-driven fixed biogeography (`use_fates_luh`), dry deposition with
 FATES-SP (CTSM disables it too), and runs longer than 10 days.
 
+## The host bias behind the SP GPP gap (2026-10-29): four HLM<->FATES coupling defects
+
+The table above was taken before this fix. SP mode was the test bed: prescribed LAI, FATES
+state matched to ~1e-8, 10 days. A second SP Fortran run with `hist_dov2xy = .false.`
+(per-patch hourly h0: `TV SABV FSA FSR FSRVD/ND/VI/NI FCEV FCTR FSH_V USTAR DISPLA SNOCAN
+LIQCAN QINTR QDRIP ...`) was compared against the port patch by patch. Each diverging
+quantity in the chain, in the order found:
+
+1. **Radiation: visible reflectance 0.08 vs 0.20** (FSRVD/FSDSVD). NIR matched, so the
+   leaf/stem optics were fine. `fates_pack_bcin_radiation!` hard-coded
+   `bc_in%fcansno_pa = 0`, but Fortran `wrap_canopy_radiation`
+   (clmfates_interfaceMod.F90:2798) passes the host `fcansno(p)` (CanopyHydrologyMod
+   `BulkDiag_FracWet`), and `FatesNormanRadMod` (F90:207-212) blends `rho/tau` toward
+   the snow optics with it. Early July 2002 at Bow has snow on the canopy, so the port's
+   canopy absorbed about 7 % too much (SABV) and GPP was 9 % high. Fix: pass
+   `waterdiagnosticbulk.fcansno_patch[p]`.
+2. **Turbulence: DISPLA 1.10 vs 2.62 m.** `set_z0m_displa!` overwrote the FATES
+   `z0m/displa` of FATES patches every step with the host `z0mr/displar * htop(itype)`.
+   Fortran calls `clm_fates%TransferZ0mDisp` and then sets only `.not. patch%is_fates`
+   patches (BiogeophysPreFluxCalcsMod.F90:162-173; `patch%is_fates = patchi+1:patchf`,
+   clmfates_interfaceMod.F90:934). Fix: `fates_transfer_z0m_disp!` plus a
+   `patch_is_fates` mask passed from `clm_drv!`. Per-patch DISPLA and USTAR now match.
+   (The gridcell `USTAR` still differs because Fortran leaves the bare patch's `fv` at
+   spval, so its average skips that patch.)
+3. **Canopy water: LIQCAN 0.04 vs 0.42 mm** on the first rain step, with QINTR/RAIN at
+   23 % vs 100 %. `use_clm5_fpi` was set only inside `clm_run!`. Every harness that
+   drives `clm_initialize!` + `clm_drv!` directly (all the FATES parity scripts) ran the
+   CLM4 interception form `0.25*(1-exp(-0.5*lai))` (CanopyHydrologyMod.F90:536-538).
+   That is CTSM's code fallback; the clm5 namelist default is `.true.`. Fix:
+   `clm_initialize!(; use_clm5_fpi = true)`. This was behind FCEV -45 % and FSH_V +15 %
+   on the tree patches.
+4. **Cold start: the HLM ran on the surfdata patch layout for the first step(s).**
+   `col.is_fates` was only set by the scripts after `clm_initialize!` returned, so the
+   cold-start `wrap_update_hlmfates_dyn` transfer (FATES patch weights, elai/esai,
+   z0m/displa) never ran. Fortran `clmfates_interfaceMod::init` (F90:814) flags every
+   istsoil column before `init_coldstart`, and `clm_initialize!` now does the same.
+
+5. **Daily-step re-weighting happened mid-step.** `fates_set_filters!` wrote the new
+   FATES patch weights into `wtcol` during the daily step. Fortran
+   `wrap_update_hlmfates_dyn` writes only `patch%wt_ed`; `wtcol = wt_ed` is applied by
+   `dynSubgrid_driver -> dyn_ED` (dynEDMod.F90:30-38) at the top of the next step,
+   before `BeginWaterColumnBalance`. Re-weighting mid-step moved per-patch canopy water
+   and plant storage between `begwb` and `endwb`. Once (3) put real water on the
+   canopy, that showed up as a 1.08e-4 mm errh2o at the step-25 daily step in
+   `test_fates_planthydro_coupling.jl`. `fates_apply_deferred_activation!` now performs
+   `dyn_ED`. The SP scores are unchanged.
+
+**Default (non-FATES) path.** Items 1, 2, 4 and 5 are FATES-only. Item 3 is a real
+default-behaviour change for any caller of `clm_initialize!` + `clm_drv!` that did not
+set `use_clm5_fpi` itself. It is not a change for `clm_run!` (and so not for
+`parity_run_domain.jl`) or for `fortran_parity_common.jl`; both already set it. Bow
+2003 and Stillwater 2003 annual parity are bit-identical before and after. Of the
+direct-`clm_drv!` harnesses, Stillwater (single-step and 24-step; snow season) and
+the lake harness are identical. Aripuana changes, toward Fortran at the rain steps:
+
+| `fortran_parity_aripuana.jl` step | 3 | 4 | 5 | 6 | 18 | 20 | 22 |
+|---|---|---|---|---|---|---|---|
+| max rel, before | 1.3e-2 | 3.0e-3 | 7.7e-3 | 5.5e-3 | 5.5e-3 | 7.9e-3 | 1.0e-2 |
+| max rel, after | 5.7e-7 | 4.7e-7 | 5.5e-7 | 7.1e-7 | 4.8e-3 | 7.0e-3 | 4.9e-3 |
+
+In `fortran_parity_aripuana_coldstart.jl`, the soil-water parity (`Wtot`) gets worse
+at steps 1-5 (step 2: 4.2e-4 -> 7.5e-4) and better at steps 18-24 (step 22: 1.2e-3 ->
+6.1e-4). This is not a balance leak; the column still conserves. It comes from the
+known cold-start artifact: Fortran's veg filters are empty on the first steps, while
+the port intercepts from step 1, and with CLM5 interception the port now holds more
+of the early rain on the canopy.
+
+### After (240 steps, relative error of the window mean; before in parentheses)
+
+| field | SP | nocomp + fixed | fixed only |
+|---|---|---|---|
+| FATES_GPP | +0.69 % (+9.0 %) | +0.56 % (+3.2 %) | +0.99 % (+3.7 %) |
+| FSH | +0.15 % (+2.0 %) | +2.0 % (+3.2 %) | +2.5 % (+6.0 %) |
+| EFLX_LH_TOT | +0.75 % (+2.9 %) | -0.79 % (-0.8 %) | -0.92 % (-0.5 %) |
+| TLAI | 1.7e-8 (1.2e-3) | 4.6e-3 (8.2e-3) | 1.8e-3 (5.0e-3) |
+| FATES_VEGC | 7e-9 | 7.4e-4 (3.1e-3) | 1.0e-3 (3.4e-3) |
+| cohorts at day 10 | = F | 7 = F (was 8 vs 7) | = F |
+
+SP canopy temperature (TV, 10-day mean): +0.55 K before, +0.02 K after. Per patch, every
+patch is within 2e-5 relative.
+
+**Residual (not fixed here):** SP `SNOCAN` is still about 8 % low on the tree patches. The
+port's dew/evaporation update in `canopy_fluxes.jl` re-splits the total canopy water by
+the existing phase amounts. Fortran (CanopyFluxesMod.F90:1601-1620) takes evaporation
+from `liqcan` first when `t_veg > tfrz`, and from `snocan` first otherwise. The port's
+version is a deliberate conservation/AD choice (#214, #219), and it is on the default
+path, so it is left for a separate change. The first two SP steps also differ: Fortran
+has `SABV = 0` there.
+
+To reproduce, stage `MODE=sp` with `stage_fates_modes_run.sh`, adding
+`hist_dov2xy = .false.` and the extra `hist_fincl1` fields to the staged `lnd_in`.
+
 ---
 
 
