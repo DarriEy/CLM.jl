@@ -335,9 +335,36 @@ pins it.
 | EFLX_LH_TOT | 0.11 (Aug) |
 | TLAI (Jan–Sep) | 2.7e-3 |
 | GPP | Jun −6.6% (ratio) |
-| LEAFC / TLAI / TOTVEGC (Oct–Dec) | **diverge**: no autumn leaf offset in Julia |
+| TLAI (Oct–Dec) | 5.8e-3 (was 7.5e-2) |
+| LEAFC (Oct–Dec) | 0.14 (was 2.1) |
+| TOTVEGC (Oct–Dec) | 4.8e-2 (was 8.3e-2) |
 
-The open item is that the season-deciduous grass (p3) never sheds its leaves in Julia.
-In Fortran its TLAI falls from 0.111 to 0.030 over October and November; in Julia it
-stays near 0.106 (LEAFC in November is 16.0 vs 4.45). This is a phenology-offset gap
-and is separate from PHS and the N cycle.
+**Autumn leaf offset: fixed (2026-10-28).** The season-deciduous grass (p3, ivt 12,
+`season_decid = 1`) never shed its leaves in Julia. The phenology kernel was a faithful
+port; the daylength *sequencing* was not. The harness, like `run_clm!` and several other
+scripts, called `init_daylength!(declin, declinm1)` every step, and `clm_drv!` then ran
+`update_daylength!`, which shifts `prev_dayl ← dayl` and recomputes `dayl` from the
+same `declin`. So `prev_dayl == dayl` on every step (the CN_PHENO probe showed this
+exactly). `ws_flag = dayl ≥ prev_dayl` (`CNPhenologyMod.F90:1023-1027`) was then always
+1, and the offset test `ws_flag == 0 .and. dayl < crit_daylat` (F90:1182) could never
+pass. Fortran calls `InitDaylength` once (`clm_initializeMod.F90:362-370`), and
+`UpdateDaylength` (`DaylengthMod.F90:192-202`) warns that re-initializing gives this
+exact `prev_dayl == dayl` failure. Fix: seed once (`run_clm.jl`, this harness,
+`fortran_parity_common.jl`, and the multi-step harnesses), plus an `InitDaylength` seed
+in `clm_run!`, which previously left `dayl` NaN on step 1. The offset now fires on day
+~283; Julia's p3 LEAFC drains 35.1 → 0.19 by day 300.
+
+| month | TLAI J / F | LEAFC J / F | TOTVEGC J / F |
+|---|---|---|---|
+| Sep | 0.108 / 0.111 | 16.2 / 16.7 | 389 / 404 |
+| Oct | 0.077 / 0.083 | 11.5 / 12.5 | 371 / 389 |
+| Nov | 0.025 / 0.030 | 3.78 / 4.45 | 341 / 358 |
+| Dec | 0.025 / 0.030 | 3.68 / 4.45 | 340 / 357 |
+
+Jan–Sep rel errors are unchanged for every field. Oct–Dec, the earlier-agreeing fields
+hold: TOTSOMC ≤4.8e-6 (was 9.5e-6), TOTECOSYSC ≤4.6e-4 (was 4.5e-4), SMINN ≤1.2e-2,
+TG ≤2.3e-3, and GPP improves (Oct 4.2e-7 → 1.5e-7 abs rel). EFLX_LH_TOT Oct moves from
+8.7e-3 to 5.7e-2; its year worst is still the August 0.11. The residual LEAFC/TOTVEGC gap is the one already present
+before October: the evergreen needleleaf patch's LEAFC runs low (Apr rel 4.4e-2), and
+the summer TOTVEGC deficit (Sep 3.6e-2) carries through. Regression:
+`test/test_phenology.jl` "season_decid autumn offset (daylength stepping)".

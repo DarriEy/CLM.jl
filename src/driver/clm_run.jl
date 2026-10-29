@@ -350,6 +350,19 @@ function clm_run!(;
     history_writer_init!(hw, fhistory, fields, ng, nc, np)
     verbose && println("CLM.jl: Writing output to: ", fhistory)
 
+    # ---- Daylength initialization (Fortran clm_initializeMod.F90:362-370) ----
+    # InitDaylength sets dayl for the first step and prev_dayl for the step before.
+    # clm_drv!'s update_daylength! then skips the first step and shifts
+    # prev_dayl <- dayl on every later step; it must NOT be re-initialized inside the
+    # loop (that makes prev_dayl == dayl, so ws_flag is stuck at 1 and the
+    # season-deciduous autumn offset never fires). The loop computes the orbit from
+    # the post-advance calday, so step 1's calday is current_date + dtime.
+    let dts = round(Int, dtime)
+        (declin1, _)  = compute_orbital(get_curr_calday(tm; offset = dts))
+        (declin0, _)  = compute_orbital(get_curr_calday(tm))
+        init_daylength!(inst.gridcell, declin1, declin0, ORB_OBLIQR_DEFAULT, 1:ng)
+    end
+
     # ---- Optional device (GPU) mirror ----
     # When `device_adapt` is supplied (e.g. moves the tree to a Metal MtlArray/Float32
     # backend), keep `inst` as the host forcing-in / history-out shuttle and run clm_drv!

@@ -127,7 +127,7 @@ function main(; nsteps::Int = 24)
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0/CLM.SECSPDAY)
         nextsw = calday + 3600.0/CLM.SECSPDAY
-        CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+        s == 1 && CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)  # once: update_daylength! in clm_drv! shifts prev_dayl after step 1
         CLM.advance_timestep!(tm)
         # Forcing at the START of this step's interval (rec s-1, clamped to rec 1).
         force_date = base + Hour(max(s - 1, 1))

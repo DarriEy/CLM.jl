@@ -98,7 +98,11 @@ function run_clm!(config::CLMDriverConfig, inst::CLMInstances, bounds::BoundsTyp
         (declin, _)   = compute_orbital(calday)
         (declinm1, _) = compute_orbital(calday - dt / secs_per_day)
         nextsw = calday + dt / secs_per_day
-        init_daylength!(inst.gridcell, declin, declinm1, orb_obliqr, 1:ng)
+        # InitDaylength runs ONCE (Fortran clm_initializeMod.F90:362-370); after that
+        # clm_drv!'s update_daylength! shifts prev_dayl <- dayl each step
+        # (DaylengthMod.F90:192-202). Re-initializing every step made prev_dayl == dayl,
+        # so ws_flag stayed 1 and the season-deciduous autumn offset never fired.
+        step == 1 && init_daylength!(inst.gridcell, declin, declinm1, orb_obliqr, 1:ng)
 
         # Advance time, read + downscale forcing for this step.
         advance_timestep!(tm)
