@@ -366,6 +366,64 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     return nothing
 end
 
+# Cumulative NOLEAP days before each month (CTSM's default calendar).
+const _FATES_NOLEAP_CUMDAYS = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+_fates_noleap_doy0(mon::Integer, day::Integer) = _FATES_NOLEAP_CUMDAYS[mon] + min(day, mon == 2 ? 28 : 31) - 1
+_fates_yyyymmdd_split(d::Integer) = (d ÷ 10000, (d ÷ 100) % 100, d % 100)
+
+"""
+    fates_get_and_set_time!(year, mon, day, tod)
+
+Set the FATES clock module-globals from the host date. Mirrors the CTSM host
+routine `GetAndSetTime` (clmfates_interfaceMod.F90:3730-3786), which runs at FATES
+init and at the top of every daily `dynamics_driv` (line 1068):
+
+* `day_of_year = floor(timemgr_datediff(jan01_curr_year, now))` — 0-based;
+* `model_day   = timemgr_datediff(reference_date, now)` [days, fractional];
+* `days_per_year = get_curr_days_per_year()`, `freq_day = 1/days_per_year`,
+
+all in the HOST calendar, [`FATES_HLM_CALENDAR`](@ref): `:noleap` (CTSM's default,
+`calendar = NO_LEAP`) or `:gregorian` (`calendar = GREGORIAN` in the case's
+nuopc.runconfig CLOCK_attributes; the fates_parity_1pt case runs GREGORIAN).
+
+`hlm_reference_date[]` (YYYYMMDD) must be set first (`clm_fates_init!` sets it to
+the run start date, CTSM's `ref_ymd` default). A `year <= 0` means "the caller does
+not track the year": the year is then carried forward from the previous call and
+advanced when the day of year wraps (`clm_drv!`'s `year` kwarg defaults to 0).
+"""
+function fates_get_and_set_time!(year::Integer, mon::Integer, day::Integer, tod::Integer)
+    if year <= 0
+        year = hlm_current_year[]
+        if hlm_day_of_year[] != fates_unset_int &&
+           _fates_noleap_doy0(mon, day) < _fates_noleap_doy0(hlm_current_month[], hlm_current_day[])
+            year += 1
+        end
+    end
+    ry, rm, rd = _fates_yyyymmdd_split(hlm_reference_date[])
+    if FATES_HLM_CALENDAR[] === :gregorian
+        now = Date(year, mon, day)
+        doy = Dates.dayofyear(now) - 1
+        dpy = Dates.daysinyear(year)
+        model_day = Float64(Dates.value(now - Date(ry, rm, rd))) + tod / sec_per_day
+    else
+        doy = _fates_noleap_doy0(mon, day)
+        dpy = 365
+        model_day = 365.0 * (year - ry) + (doy - _fates_noleap_doy0(rm, rd)) + tod / sec_per_day
+    end
+    SetFatesTime(year, mon, day, tod, year * 10000 + mon * 100 + day,
+                 hlm_reference_date[], model_day, doy, dpy, 1.0 / dpy)
+    return nothing
+end
+
+"""
+    FATES_HLM_CALENDAR :: Ref{Symbol}
+
+The host model calendar the FATES clock follows: `:noleap` (default; CTSM
+`NO_LEAP`) or `:gregorian`. Set it before `clm_initialize!` / `clm_fates_init!`
+to match the case being reproduced.
+"""
+const FATES_HLM_CALENDAR = Ref(:noleap)
+
 """
     clm_fates_init!(inst::CLMInstances; nsites=1, numpft_in=nothing, nlevsoil,
                     nlevdecomp, params_path=FATES_PARAMS_DEFAULT_CDL,
@@ -556,14 +614,14 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                      nlevsclass[] * numpft[] * n_term_mort_types)
 
     # ---- W1.2: FATES clock (SetFatesTime) ----
-    SetFatesTime(current_year, current_month, current_day,
-                 0,                       # current_tod (seconds into day)
-                 current_year * 10000 + current_month * 100 + current_day,  # current_date
-                 10101,                   # reference_date
-                 0.0,                     # model_day
-                 1,                       # day_of_year
-                 365,                     # days_per_year
-                 1.0 / 365.0)             # freq_day
+    # Fortran `GetAndSetTime` (clmfates_interfaceMod.F90:3730-3786), called here at
+    # init and again at the top of every daily `dynamics_driv`. The reference date is
+    # the run start (CTSM's ref_ymd defaults to start_ymd), so model_day starts at 0,
+    # and day_of_year is the 0-based NOLEAP day (`floor(timemgr_datediff(jan01, now))`).
+    # This used to hardcode day_of_year = 1 and reference_date = 10101 and was never
+    # advanced (see `fates_get_and_set_time!`).
+    hlm_reference_date[] = current_year * 10000 + current_month * 100 + current_day
+    fates_get_and_set_time!(current_year, current_month, current_day, 0)
 
     # ---- W1.3: build the interface container + per-site boundary conditions ----
     fates = fates_interface_type()
@@ -604,6 +662,27 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         bc.hlm_harvest_catnames = String[]
         bc.hlm_harvest_units    = fates_unset_int
         bc.site_area            = area
+
+        # Pass the grid-cell derived attributes to the site (clmfates_interfaceMod.F90
+        # :880-884: `sites(s)%lat = grc%latdeg(g)`, `sites(s)%lon = grc%londeg(g)` with
+        # g = col%gridcell(fcolumn(s))). This was never ported, so `site.lat` stayed NaN
+        # and FATES phenology (`currentSite%lat > 0`, EDPhysiologyMod.F90:1033, :1087) took the
+        # SOUTHERN-hemisphere branch everywhere (gddstart = 181, ncdstart = 120). The
+        # other assignments in that Fortran block -- `h_gid` (set below) and the
+        # fixed-biogeog `pft_areafrac` (set just below) -- are already wired. Site s
+        # maps onto column s here (one site per column, `clm_initialize!`).
+        let colg = inst.column.gridcell, grc = inst.gridcell
+            if s <= length(colg)
+                g = colg[s]
+                latd = grc.latdeg[g]; lond = grc.londeg[g]
+                # latdeg/londeg can be unfilled on a hand-built surfdata; derive them
+                # from the radian lat/lon as the harnesses do.
+                isfinite(latd) || (latd = rad2deg(grc.lat[g]))
+                isfinite(lond) || (lond = rad2deg(grc.lon[g]))
+                fates.sites[s].lat = latd
+                fates.sites[s].lon = lond
+            end
+        end
 
         # Fixed-biogeog PFT presence (climate-appropriate seeding).  `pft_areafrac`
         # is allocated (length numpft) by `allocate_bcin` only when fixed-biogeog is

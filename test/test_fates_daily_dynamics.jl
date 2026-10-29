@@ -85,11 +85,18 @@ using CLM
         pveg = col.patchi[cveg] + 1   # vegetated patch = 2
 
         # ---- attach a cold-started carbon-only FATES site ----
+        # A northern-hemisphere gridcell (Bow at Banff). clm_fates_init! must copy it
+        # onto the site (clmfates_interfaceMod.F90:883-884); a NaN site.lat sends FATES
+        # phenology down the southern-hemisphere branch.
+        inst.gridcell.latdeg[1] = 51.18
+        inst.gridcell.londeg[1] = -115.57
         # numpft_in omitted → clm_fates_init! uses the FATES param file's value (14).
         fates = CLM.clm_fates_init!(inst; nsites = 1,
                                     nlevsoil = nlevsoil, nlevdecomp = nlevdecomp)
         @test inst.fates !== nothing
         @test inst.fates.nsites == 1
+        @test inst.fates.sites[1].lat == 51.18
+        @test inst.fates.sites[1].lon == -115.57
 
         # ---- representative daily soil-column state ----
         ss   = inst.soilstate

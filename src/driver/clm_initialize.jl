@@ -96,6 +96,12 @@ function clm_initialize!(;
     # would be wrong too: control.jl:102 endruns on PHS+FATES, mirroring CTSM,
     # so `nothing` resolves the condition. See docs/PHS_DEFAULT_BLOCKERS.md.
     use_hydrstress::Union{Bool,Nothing} = nothing,
+    # CTSM &clm_canopyhydrology_inparm use_clm5_fpi: .true. in the namelist defaults
+    # for phys=clm5_0/clm6_0 (the CLM4 form, 0.25*(1-exp(-0.5*lai)), is only the
+    # code fallback). clm_run! already forced it; callers that drive
+    # clm_initialize! + clm_drv! directly (the FATES parity harnesses) ran with the
+    # CLM4 interception and held ~1/10 of Fortran's intercepted rain on the canopy.
+    use_clm5_fpi::Bool = true,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
     use_c13::Bool = false,
@@ -247,6 +253,7 @@ function clm_initialize!(;
     # parameter state (pftcon and the various *_params singletons) — it touches no
     # subgrid structure — so moving it earlier is safe.
     readParameters!(paramfile)
+    canopy_hydrology_read_nml!(use_clm5_fpi=use_clm5_fpi)
 
     # ---- Step 5: Read surface data ----
     surf = SurfaceInputData()
@@ -718,6 +725,17 @@ function clm_initialize!(;
         nlevsoil_fates = varpar.nlevsoi
         # Carbon-only / non-vertsoilc cold start => one decomposition layer.
         nlevdecomp_fates = 1
+        # Flag the FATES columns BEFORE the FATES cold start, as the Fortran host does
+        # (clmfates_interfaceMod::init sets `col%is_fates(c) = .true.` for every istsoil
+        # column, ahead of init_coldstart). The cold-start canopy transfer
+        # (wrap_update_hlmfates_dyn: FATES patch weights, elai/esai, z0m/displa) walks
+        # the is_fates columns, so flagging them only after clm_initialize! returned
+        # left the HLM on the surfdata patch layout for the first timestep(s).
+        let col = inst.column, lun = inst.landunit
+            for c in eachindex(col.is_fates)
+                lun.itype[col.landunit[c]] == ISTSOIL && (col.is_fates[c] = true)
+            end
+        end
         # One FATES site per CLM column (single-site MVP: nc is typically 1). PFT
         # count comes from the parameter file (numpft_in omitted => use the file).
         clm_fates_init!(inst; nsites = nc,
