@@ -148,7 +148,8 @@ function main_multiyear()
             join(["nplant_$f" for f in 1:np], ","), ",", join(["recruit_$f" for f in 1:np], ","),
             ",", join(["maxdbh_$f" for f in 1:np], ","),
             ",cstatus,ncolddays,nchilldays,gdd,tveg24C,cndaysleafon,cndaysleafoff,doy,",
-            join(["dstatus_$f" for f in 1:np], ","), ",", join(["elong_$f" for f in 1:np], ","))
+            join(["dstatus_$f" for f in 1:np], ","), ",", join(["elong_$f" for f in 1:np], ","),
+            ",altmax_ly_indx,maxroot_indx,seed_bank,seed_germ")
 
     fr = _C.ForcingReader(); fyear = year(START)
     _C.forcing_reader_init!(fr, joinpath(FORCDIR, "clmforc.$(fyear).nc"))
@@ -192,10 +193,22 @@ function main_multiyear()
                 join((@sprintf("%.8g", x) for x in rec_today), ","),
                 join((@sprintf("%.6g", x) for x in sm.maxdbh_pf), ","))
         ncold = count(<(_C.ed_params().ED_val_phen_coldtemp), site.vegtemp_memory)
-        @printf(io, ",%d,%d,%d,%.6g,%.5g,%d,%d,%d,%s,%s\n", site.cstatus, ncold, site.nchilldays,
+        @printf(io, ",%d,%d,%d,%.6g,%.5g,%d,%d,%d,%s,%s", site.cstatus, ncold, site.nchilldays,
                 site.grow_deg_days, site.vegtemp_memory[1], site.cndaysleafon, site.cndaysleafoff,
                 _C.hlm_day_of_year[], join(site.dstatus[1:np], ","),
                 join((@sprintf("%.4g", x) for x in site.elong_factor[1:np]), ","))
+        # rooting depth FATES sees (last year's active layer) and the site seed pools
+        # [kg C / m2 site], comparable with FATES_SEED_BANK.
+        sbank = 0.0; sgerm = 0.0
+        cp = site.oldest_patch
+        while cp !== nothing
+            lt = cp.litter[1]
+            sbank += sum(lt.seed[1:np]) * cp.area * _C.area_inv
+            sgerm += sum(lt.seed_germ[1:np]) * cp.area * _C.area_inv
+            cp = cp.younger
+        end
+        @printf(io, ",%d,%d,%.8g,%.8g\n", inst.active_layer.altmax_lastyear_indx_col[1],
+                inst.fates.bc_in[1].max_rooting_depth_index_col, sbank, sgerm)
         flush(io)
         (d + 1) in MY_TRACE && tio !== nothing && (cohort_trace(tio, site, d + 1); flush(tio))
         if (d + 1) % 30 == 0
