@@ -122,7 +122,7 @@ function main(nsteps::Int)
         end
         CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
         (yr, mon, d, tod) = CLM.get_curr_date(tm)
-        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, CLM.nuopc_doalb(tm.nstep), nextsw, declin, declin,
             CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=tm.nstep, is_first_step=(s == 1),
             is_beg_curr_day=CLM.is_beg_curr_day(tm), is_end_curr_day=CLM.is_end_curr_day(tm),

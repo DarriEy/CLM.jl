@@ -1214,6 +1214,18 @@ water storage agrees to 3e-5. The post-day-3 GPP / transpiration shortfall remai
   From day 2 the Fortran per-PFT btran becomes erratic hour to hour (0 to 0.74), which the
   port does not reproduce, and those bursts dominate the Fortran GPP / QVEGT sums.
   Not yet closed.
+  **Update (host/coldstart-thaw):** the soil-liquid divergence was NOT phase change. A
+  per-step dump of the soil-temperature solve (`SoilTemperatureMod` instrumented, nsteps
+  0-4) shows tk, cv, fact and the phase-change bookkeeping identical; the first differing
+  term is the ground's absorbed solar at nstep 0, SABG 339 vs 387 W/m2 (FSDS 484), and so
+  `hs_soil`. Two cold-start radiation defects: (1) `init_surface_albedo_cold!` overwrote
+  Fortran InitCold's albgrd = albgri = 0.2 (SurfaceAlbedoType.F90:370-371) with
+  vis 0.20 / NIR 0.40; (2) the harness ran the albedo solve from nstep 0, whereas the NUOPC
+  cap skips it on nsteps 0 and 1 (lnd_comp_nuopc.F90:830-841), so Fortran radiates nsteps
+  0-2 with the InitCold albedos (SABV = 0). With both fixed (and #349's host coupling
+  fixes) SOILLIQ_1..4 match to 4 digits through nstep 5 and to < 5 % on every step; root
+  uptake first passes 5 % at nstep 21-45 instead of 2. GPP / QVEGT after day 3 are
+  unchanged (0.32x / 0.16x), so that shortfall is not the host soil water.
 * Host `BTRAN` (biomass-weighted over all cohorts) is 60 % high from step 1 while every
   per-PFT cohort btran matches to < 1e-3, so that offset sits in the host-side
   aggregation or in the harness's l2g weighting. Still open.
