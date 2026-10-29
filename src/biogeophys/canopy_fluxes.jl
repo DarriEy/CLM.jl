@@ -1159,7 +1159,7 @@ CanopyFluxesMod.F90:1602-1629, line for line:
 
 Written branch-free as `warm: liq' = max(0, liq+net), sno' = max(0, sno + min(0, liq+net))`
 and `cold: sno' = max(0, sno+net), liq' = liq + min(0, sno+net)`, blended by the phase
-step `smooth_heaviside(t_veg - tfrz)` — a hard 0/1 for Float64 (exact Fortran; the strict
+step `smooth_heaviside` on `t_veg - tfrz` — a hard 0/1 for Float64 (exact Fortran; the strict
 `>` is kept by sending `t_veg == tfrz` to the cold branch) and smooth for AD types. Each
 branch moves the total by exactly `net_evap` (the upstream ecidif cap keeps
 `-net_evap <= liqcan + snocan`), so the blend conserves water for AD types too. The
