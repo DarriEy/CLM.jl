@@ -37,14 +37,20 @@ const SZPF = Dict("PSI_LEAF" => "FATES_LEAF_H2OPOT_SZPF", "PSI_STEM" => "FATES_S
                   "TH_LEAF" => "FATES_LEAF_H2O_SZPF", "TH_STEM" => "FATES_STEM_H2O_SZPF",
                   "BTRAN_CO" => "FATES_BTRAN_SZPF")
 const SCALARS = ("QVEGT", "BTRAN", "EFLX_LH_TOT", "FATES_GPP", "FATES_VEGH2O", "FATES_ROOTUPTAKE",
-                 "FATES_SAPFLOW")
+                 "FATES_SAPFLOW", "FATES_NCOHORTS", "FATES_NPATCHES")
 const LAYERED = ("QROOTSINK", "SOILLIQ", "H2OSOI")
 const NPFT = 14
 const NWOODY = 11   # PFTs 1-11 are woody in the default parameter file; 12-14 are grasses
 # PFT-resolved leaf water potential / hydraulic btran (attribution of the means).
 const PERPFT = Tuple(f * "_pft" * string(k) for f in ("PSI_LEAF", "BTRAN_CO") for k in 1:NPFT)
+# PFT-resolved demography (attribution of post-daily-step divergence): density and
+# leaf / storage carbon, = FATES_NPLANT_PF [m-2], FATES_LEAFC_PF / FATES_STOREC_PF [kgC m-2].
+const DEMOG = Dict("NPLANT" => "FATES_NPLANT_PF", "LEAFC" => "FATES_LEAFC_PF",
+                   "STOREC" => "FATES_STOREC_PF")
+const PERPFT_DEMOG = Tuple(f * "_pft" * string(k) for f in ("NPLANT", "LEAFC", "STOREC") for k in 1:NPFT)
 const ALL_FIELDS = (PLANT..., SCALARS...,
-                    (f * "_" * string(j) for f in LAYERED for j in 1:NLAY)..., PERPFT...)
+                    (f * "_" * string(j) for f in LAYERED for j in 1:NLAY)..., PERPFT...,
+                    PERPFT_DEMOG...)
 
 function build_hydro()
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
@@ -69,6 +75,7 @@ function hydro_record(inst, c)
     site = inst.fates.sites[1]
     acc = Dict(k => 0.0 for k in PLANT); ntot = 0.0
     pl = zeros(NPFT); pb = zeros(NPFT); pn = zeros(NPFT)
+    dn = zeros(NPFT); dl = zeros(NPFT); ds = zeros(NPFT)
     cp = site.oldest_patch
     while cp !== nothing
         cc = cp.tallest
@@ -91,6 +98,10 @@ function hydro_record(inst, c)
                 ft = cc.pft; n = cc.n
                 pl[ft] += n * h.psi_ag[1] * 1e6; pb[ft] += n * h.btran; pn[ft] += n
             end
+            ftd = cc.pft
+            dn[ftd] += cc.n
+            dl[ftd] += cc.n * CLM.GetState(cc.prt, CLM.leaf_organ, CLM.carbon12_element)
+            ds[ftd] += cc.n * CLM.GetState(cc.prt, CLM.store_organ, CLM.carbon12_element)
             cc = cc.shorter
         end
         cp = cp.younger
@@ -101,6 +112,11 @@ function hydro_record(inst, c)
     for k in 1:NPFT
         r["PSI_LEAF_pft$k"] = pn[k] > 0 ? pl[k] / pn[k] : NaN
         r["BTRAN_CO_pft$k"] = pn[k] > 0 ? pb[k] / pn[k] : NaN
+    end
+    for k in 1:NPFT
+        r["NPLANT_pft$k"] = dn[k] * CLM.AREA_INV
+        r["LEAFC_pft$k"]  = dl[k] * CLM.AREA_INV
+        r["STOREC_pft$k"] = ds[k] * CLM.AREA_INV
     end
     wf = inst.water.waterfluxbulk_inst
     r["QVEGT"] = wf.wf.qflx_tran_veg_col[c]
@@ -122,6 +138,15 @@ function hydro_record(inst, c)
     r["FATES_VEGH2O"] = _hist(inst, :ih_h2oveg_si)
     r["FATES_ROOTUPTAKE"] = _hist(inst, :ih_rootuptake_si)
     r["FATES_SAPFLOW"] = _hist(inst, :ih_sapflow_si)
+    let ncoh = 0, npat = 0, cp = inst.fates.sites[1].oldest_patch
+        while cp !== nothing
+            npat += 1
+            cc = cp.tallest
+            while cc !== nothing; ncoh += 1; cc = cc.shorter; end
+            cp = cp.younger
+        end
+        r["FATES_NCOHORTS"] = ncoh; r["FATES_NPATCHES"] = npat
+    end
     joff = CLM.varpar.nlevsno
     ws = inst.water.waterstatebulk_inst.ws
     for j in 1:NLAY
@@ -201,6 +226,13 @@ function read_fortran(path)
             a = Array(d[f][:, :, :])
             for j in 1:NLAY
                 out[f * "_" * string(j)] = f64(vec(a[1, j, :]))
+            end
+        end
+        for (k, v) in DEMOG
+            haskey(d, v) || continue
+            x = f64(Array(d[v][:, :, :]))[1, :, :]                  # (pft, time)
+            for ft in 1:NPFT
+                out[k * "_pft" * string(ft)] = x[ft, :]
             end
         end
         np = f64(Array(d["FATES_NPLANT_SZPF"][:, :, :]))[1, :, :]   # (scpf, time)

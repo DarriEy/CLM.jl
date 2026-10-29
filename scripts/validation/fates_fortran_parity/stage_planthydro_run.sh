@@ -6,8 +6,11 @@
 # Same case and recipe as stage_soilbgc_run.sh (Bow at Banff single point,
 # I2000Clm50FatesRs => use_fates + use_fates_bgc, 2002-07-01, dtime 3600 s, an
 # UNINSTRUMENTED cesm.exe), plus `use_fates_planthydro = .true.` and an HOURLY h0
-# history of the hydraulics + host water fields. No rebuild: plant hydraulics is a
-# runtime namelist switch.
+# history of the hydraulics + host water fields. Plant hydraulics is a runtime
+# namelist switch, but the PARITY REFERENCE must be run with EXE= a cesm.exe relinked
+# with SourceMods_planthydro/FatesAllometryMod.F90 (build_patched_cesm.jl): the stock
+# ctsm5.3.012 grass hydraulics read an uninitialized sapw_area (README §"PLANT
+# HYDRAULICS"), so the stock result is not reproducible.
 #
 #   run dir : $RUN (default $SYMFLUENCE_DATA/runs/fates_hydro_1pt)
 #
@@ -68,7 +71,8 @@ FIELDS = ['QVEGT', 'QVEGE', 'QSOIL', 'QROOTSINK', 'H2OSOI', 'SOILLIQ', 'SOILICE'
           'FATES_MORTALITY_HYDRAULIC_SZPF', 'FATES_SOILMATPOT_SL', 'FATES_SOILVWC_SL',
           'FATES_LEAFC_PF', 'FATES_STOREC_PF', 'FATES_VEGC_PF', 'FATES_NPLANT_PF',
           'FATES_ELONG_FACTOR_PF', 'FATES_DROUGHT_STATUS_PF', 'FATES_MEANSMP_DROUGHTPHEN_PF',
-          'FATES_MEANLIQVOL_DROUGHTPHEN_PF', 'FATES_MORTALITY_HYDRO_CFLUX_PF']
+          'FATES_MEANLIQVOL_DROUGHTPHEN_PF', 'FATES_MORTALITY_HYDRO_CFLUX_PF',
+          'FATES_NCOHORTS', 'FATES_NPATCHES', 'FATES_RECRUITMENT_PF']
 seen, out = set(), []
 for line in open(f'{ARCH}/lnd_in'):
     line = fix(line)

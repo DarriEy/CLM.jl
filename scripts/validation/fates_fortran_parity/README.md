@@ -1143,60 +1143,84 @@ Two Fortran behaviours the port reproduces deliberately:
 * Grasses (`allom_smode = 2`): ctsm5.3.012's FATES `bsap_allom` never assigns its
   intent(out) `sapw_area`, and nothing guards it (no `woody` checks in the hydraulics, no
   conductance clamp, no `-finit-*` flags in the `-O` build), so `UpdatePlantKmax` /
-  `UpdatePlantHydrLenVol` read uninitialized stack memory. Measured by rebuilding the
-  reference `cesm.exe` from the same objects (`runs/fates_hydro_probe/`): an unmodified
-  rebuild reproduces the reference h0 bit-for-bit; adding one `write` of `a_sapwood` shows
-  **7.46 m2** in UpdatePlantKmax (every call) and ~1e-314 (sometimes ~0.3) in
-  UpdatePlantHydrLenVol, and that single write statement changes the whole run (H2OSOI by
-  up to 0.024, grass leaf psi by 7e9 Pa). The grass value is a property of the binary's
-  stack layout, so there is nothing reproducible to port. The port uses the upstream fix,
-  FATES main's `SapwoodAreaGrass` (basal cross-section, pi (d/2)^2): no NaN, and finite,
-  physical grass conductances. (Before this, the port returned 0, which made the grass stem
-  kmax 0/0 = NaN; that NaN stayed inside the grass cohort: no NaN reached root uptake,
-  BTRAN, carbon, or any history field.) Grass parity with this reference is therefore not
-  achievable; plant-water scores are woody means (PFTs 1-11).
-* The post-day-3 divergence is *not* from the grasses: with the port's grass kmax
-  `a_sapwood` forced to the probe binary's 7.46 m2 and compared against that probe
-  binary's run, grass leaf psi matches to 3.7e-4 on day 1, but after day 3 GPP is still
-  0.30x and QVEGT 0.12x — the same collapse.
+  `UpdatePlantHydrLenVol` read uninitialized stack memory. Measured by relinking the
+  stock `cesm.exe` from its own objects: an unmodified relink reproduces the stock h0
+  bit-for-bit; adding one `write` of `a_sapwood` shows 7.46 m2 in UpdatePlantKmax and
+  ~1e-314 (sometimes ~0.3) in UpdatePlantHydrLenVol, and that write alone changes the run
+  (H2OSOI by up to 0.024). The stock planthydro run is therefore not reproducible and
+  cannot be a parity target. Upstream FATES fixed it with `SapwoodAreaGrass` (basal
+  cross-section pi (d/2)^2); the port carries that fix (FatesAllometryMod.jl).
 
-## Fortran reference and result
-`stage_planthydro_run.sh` runs the archived case with `use_fates_planthydro = .true.`
-(10 days, hourly h0); the scored series are committed as `fates_planthydro_fortran.csv`.
-`fates_planthydro_parity.jl` steps the port and scores it (median per-step relative error;
-ratio = sum Julia / sum Fortran over the window):
+## The reference is a PATCHED Fortran
+Because the stock ctsm5.3.012 result depends on uninitialized memory, the planthydro
+reference is produced by `cesm.exe` relinked with one SourceMod,
+`SourceMods_planthydro/FatesAllometryMod.F90`: the ctsm5.3.012 file plus upstream
+FATES's `SapwoodAreaGrass` copied verbatim from NGEET/fates `main` and called from the
+`case(2)` branch of `bsap_allom` (`diff` against the stock file shows only those lines).
+Woody PFTs and every non-planthydro path are unaffected (nothing else reads the grass
+`sapw_area`).
 
-(With SapwoodAreaGrass; before it: PFT-1 psi after day 3 0.38, GPP ratio 0.28, QVEGT
-ratio 0.11, and 0.38 on days 2-3.)
+```bash
+julia scripts/validation/fates_fortran_parity/build_patched_cesm.jl \
+    $SYMFLUENCE_DATA/runs/fates_hydro_patched/exeA \
+    scripts/validation/fates_fortran_parity/SourceMods_planthydro/FatesAllometryMod.F90
+EXE=$SYMFLUENCE_DATA/runs/fates_hydro_patched/exeA/cesm.exe STEPS=240 \
+    bash scripts/validation/fates_fortran_parity/stage_planthydro_run.sh
+julia --project=. scripts/validation/fates_fortran_parity/fates_planthydro_parity.jl \
+    export $RUN/fates_hydro_1pt.clm2.h0.2002-07-01-00000.nc
+```
+`build_patched_cesm.jl` recompiles the given sources with the exact commands in the stock
+case's build log and relinks a private executable; the stock build tree is only read.
+Determinism (`compare_h0_bitwise.jl`, all 591 h0 variables): two runs of the patched
+executable are bit-identical, and so is a third built with an extra `write` of
+`a_sapwood` in FatesPlantHydraulicsMod (which prints the grass area as pi (d/2)^2, e.g.
+1.644e-5 m2 at d = 0.458 cm).
+
+## Fortran reference and result (patched reference)
+`fates_planthydro_fortran.csv` is the 240-step hourly extract of the patched run. Median
+per-step relative error (ratio = sum Julia / sum Fortran over the window):
 
 | field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
 |---|---|---|---|
-| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.32 |
-| leaf psi, woody mean | 1.6e-4 | 1.6e-2 | 0.51 |
-| leaf / stem water content | 4e-5 / 2e-5 | 1.3e-3 / 2.4e-3 | 0.10 / 0.06 |
-| cohort hydraulic btran | 4.1e-4 | 4.4e-2 | 0.73 |
-| FATES_VEGH2O | 1.1e-2 | 6.8e-3 | 5.1e-2 |
-| QROOTSINK layer 1 (ratio) | 3.0e-2 (1.05) | 8.0e-2 (1.02) | 0.23 (0.97) |
-| SOILLIQ layer 1 / 4 | 4.4e-3 / 0.14 | 4.1e-3 / 5.5e-2 | 2.2e-3 / 2.7e-3 |
-| EFLX_LH_TOT (ratio) | 0.14 (1.19) | 2.2e-2 (0.90) | 4.0e-2 (0.95) |
-| FATES_GPP (ratio) | 2.9e-2 (1.12) | 3.5e-2 (0.85) | 0.33 (0.30) |
-| QVEGT (ratio) | 0.13 (1.03) | 0.13 (0.66) | 0.45 (0.15) |
-| BTRAN (host, ratio) | 0.60 (1.60) | 0.56 (1.42) | 0.59 (0.49) |
+| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.26 |
+| leaf psi, woody mean | 1.6e-4 | 1.7e-2 | 0.56 |
+| leaf psi, grass PFT 12 / 14 | 3.2e-4 / 5.5e-4 | 9.2e-2 / 0.20 | 0.21 / 9.0e-2 |
+| leaf / stem water content | 4e-5 / 2e-5 | 1.8e-3 / 1.6e-3 | 0.10 / 0.07 |
+| cohort hydraulic btran | 4.1e-4 | 4.5e-2 | 0.75 |
+| FATES_VEGH2O | 2.8e-5 | 1.1e-2 | 4.1e-2 |
+| QROOTSINK layer 1 (ratio) | 2.1e-2 (1.06) | 5.8e-2 (1.02) | 0.23 (1.00) |
+| SOILLIQ layer 1 / 4 | 4.4e-3 / 0.14 | 4.3e-3 / 5.5e-2 | 2.1e-3 / 2.7e-3 |
+| EFLX_LH_TOT (ratio) | 0.14 (1.19) | 2.2e-2 (0.90) | 3.6e-2 (0.96) |
+| FATES_GPP (ratio) | 2.5e-2 (1.13) | 4.7e-2 (0.90) | 0.33 (0.32) |
+| QVEGT (ratio) | 0.11 (1.11) | 0.16 (0.80) | 0.45 (0.16) |
+| BTRAN (host, ratio) | 0.60 (1.60) | 0.54 (1.44) | 0.61 (0.51) |
 
-* The woody plant water states track the Fortran to ~1e-4 for the first day: the solver,
-  the transpiration partition, the rhizosphere and the soil coupling agree.
-* They drift from day 2 and diverge after the day-3 daily step, the step at which this
-  case's documented demography divergence starts (recruitment into the disturbed patch,
-  `cohortfuse` 58->43 vs 58->38, §"Reading of the result"). With hydraulics on, recruits
-  take their water from the soil (`RecruitWUptake`) and both models show recruit
-  leaf-potential spikes (to -600 MPa Fortran, -7000 MPa port). Not yet root-caused.
-* Host `BTRAN` is the biomass-weighted patch mean over all cohorts *including* the grasses;
-  its 60 % day-1 offset is unchanged with the grasses matched (the 7.46 experiment), so it
-  is not the grass term either — still open.
+With the patched reference the grasses track on day 1 like the woody PFTs, and plant
+water storage agrees to 3e-5. The post-day-3 GPP / transpiration shortfall remains.
+
+### Tracing the post-day-3 shortfall
+* It is not demography. Both models keep 14 cohorts / 2 patches for all 10 days (no
+  recruitment survives with hydraulics on). Per-PFT density, leaf C and storage C agree
+  to < 0.4 % (woody) and < 6 % (grass) through day 10.
+* It is none of the daily-step suspects. Cohort fusion/termination never fires; the
+  daily soil pack, `UpdateSizeDepPlantHydStates`, `UpdateSizeDepRhizVolLenCon` and
+  `UpdateH2OVeg` were re-diffed against the Fortran line by line and match.
+* The first quantities to diverge (scan of every scored field, threshold 5 %) are the
+  HOST soil liquid in layers 1-4 at nstep 2 (cold-start thaw: SOILLIQ_1 2.93 vs 3.34
+  kg/m2) together with LH / QVEGT. The FATES root uptake by layer follows at nstep 19-22
+  (first daytime uptake), then cohort btran / leaf psi at the day-2 daily step (n 26) and
+  every PFT by n 48-50. This is the documented host top-soil phase-change residual (see
+  §"SOIL-BGC COUPLING"), now propagating through the rhizosphere into the plant water.
+  From day 2 the Fortran per-PFT btran becomes erratic hour to hour (0 to 0.74), which the
+  port does not reproduce, and those bursts dominate the Fortran GPP / QVEGT sums.
+  Not yet closed.
+* Host `BTRAN` (biomass-weighted over all cohorts) is 60 % high from step 1 while every
+  per-PFT cohort btran matches to < 1e-3, so that offset sits in the host-side
+  aggregation or in the harness's l2g weighting. Still open.
 * The site is extremely water-stressed (cold-start frozen soil; leaf psi ~ -15 MPa), so
   transpiration is ~1e-8 mm/s and QVEGT / BTRAN relative errors are on near-zero values.
 * Column water balance with hydraulics on (plant water in the budget): |errh2o| < 6e-13 mm
-  on every non-daily step; the daily steps at day 3/4 leave 1e-9 mm and day 8 9.5e-5 mm
-  (the daily dynamics do not conserve the stored plant water exactly, and Fortran's check
-  of that is the inert one above). Step 1 carries a 0.118 mm residual that is identical
-  with hydraulics off (the first daily step re-weights the cold-start patches mid-step).
+  on every non-daily step; the daily steps leave up to 6.8e-5 mm (the daily dynamics do
+  not conserve the stored plant water exactly, and Fortran's check of that is the inert
+  one above). Step 1 carries a 0.118 mm residual that is identical with hydraulics off
+  (the first daily step re-weights the cold-start patches mid-step).
