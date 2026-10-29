@@ -1675,6 +1675,55 @@ The host path is ported and unit-tested, and the enumeration fix makes the mode 
 correct. The real `clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc` climatology
 is not staged on this box; only the synthetic uniform stream is.
 
+## Fuel-load residual localized (2026-10-29): litter and live grass, not fuel
+
+The script now also scores the aboveground litter the fuel is built from,
+`FATES_LITTER_AG_FINE_EL` and `FATES_LITTER_AG_CWD_EL` (extract refreshed; the old
+columns are byte-identical). FatesFuelMod and SFMainMod `UpdateFuelCharacteristics`
+(SFMainMod.F90:179-197) were re-read against the Fortran: class map (FatesFuelClassesMod.F90:14-19,
+trunks = 4 excluded), `UpdateLiveGrass` (FatesPatchMod.F90:784-812), the
+`(1 - SF_val_miner_total)` reduction in `rate_of_spread` that history reads
+(FatesHistoryInterfaceMod.F90:2691), patch area weighting, fuse, spawn and the call
+order in `ed_ecosystem_dynamics` all match. In both models each fuel class is its
+litter pool x 0.945, so the fuel gap is a litter / live-grass gap. A unit test pins
+this mapping (`test_fates_sfmain.jl`).
+
+Integration state (`integration/wave-2026-10`), mode 1, default parameters, days 380-412:
+
+| | Fortran | Julia | J/F |
+|---|---|---|---|
+| fuel (`FATES_FUEL_AMOUNT`) | 0.1625 | 0.1829 | 1.13 |
+| twigs + small branches (FC1+FC2) | 0.0468 | 0.0405 | 0.87 |
+| dead leaves (FC5) | 0.0670 | 0.0716 | 1.07 |
+| live grass (FC6) | 0.0488 | 0.0709 | 1.45 |
+| day 410 ag fine / ag CWD litter | 0.0968 / 0.0577 | 0.1025 / 0.0516 | |
+| peak FI, burn days (> 50 kW/m) | 24.3 kW/m, 0 | 32.4 kW/m, 2 (410-411) | |
+
+The first divergence is the cold-deciduous leaf-off date. Fortran drops the PFT 3/6
+leaves on day 39; Julia drops them on day 11. EDPhysiologyMod `phenology` drops when
+more than `phen_ncolddayslim` = 5 of the last 10 daily `tveg24` means are below
+`phen_coldtemp` = 7.5 C. On day 11 the memory holds days 2-11, and day 7 decides it:
+`FATES_TVEG24` = 7.514 C in Fortran and 7.399 C in Julia, a 0.115 K canopy-temperature
+difference. So Julia counts 6 cold days and Fortran 5. `tveg24` is the 24-h mean of the
+host `t_veg_patch` (clmfates_interfaceMod.F90:2612/3239 -> FatesInterfaceMod.F90:2119),
+so this is a host canopy-temperature residual, not a FATES or fuel defect.
+
+Diagnostic run: `PHEN_TMEM_FROM_FORTRAN=1` replaces each day's phenology memory entry
+with the Fortran `FATES_TVEG24`. Julia then drops its leaves on day 39 as Fortran does,
+and the fuel tracks Fortran for ten months (day 40 0.0232 / 0.0232, day 240 0.0760 /
+0.0766, day 300 0.0914 / 0.0925). The second divergence is spring 2003 live grass. In
+days 241-330 (Feb-May) Julia's `TVEG24` runs +3.1 K warm (up to 9 K on single days),
+over a +0.5 to +1.4 K warm bias from October onward. Grass flushes and grows earlier
+(FC6 2.3x on days 301-330, 3x on days 331-360), and the run lands on the PR #347
+picture: fuel x1.23, peak FI 45.8 kW/m, 4 burn days. The +27 % reported before is this
+second residual. On the current integration state the early leaf-off partly offsets it
+(less woody litter, fewer leaves dropped).
+
+TVEG24 by 30-day block (J - F): days 1-90 +0.00 K, days 91-210 +0.5 to +0.85 K, days 211-240
++1.4 K, days 241-330 +2.7 to +3.2 K, days 331-412 -0.3 to +0.6 K. The remaining fuel residual
+is the host winter/spring canopy temperature over snow. Fix it there; SPITFIRE needs no
+change.
+
 ---
 
 # RESEARCH MODES (2026-10-29): tree damage, ST3, prescribed physiology, cohort age, seed dispersal, inventory init
