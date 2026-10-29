@@ -11,8 +11,21 @@
 #       julia --project=. scripts/fates_parity_multiyear.jl
 #
 # Reuses `build()` from scripts/fates_fortran_parity.jl (the flag-audited harness).
-# The calendar is NOLEAP (Feb 29 skipped), matching the CESM run, and the forcing
-# file rolls over each 1 January (clmforc.YYYY.nc), as DATM does.
+# The forcing file rolls over each 1 January (clmforc.YYYY.nc), as DATM does.
+#
+# CALENDAR (FATES_MY_CALENDAR, default `gregorian`). It must match the CLOCK_attributes
+# `calendar` of the Fortran case being reproduced. The fates_parity_1pt run dir has
+# `calendar = GREGORIAN` (lnd.log: "Calendar type: GREGORIAN"; the h0 file holds 1461
+# days for 2002-07-01..2006-07-01).
+#   gregorian : model days include Feb 29, and the standard-calendar clmforc file is read
+#               at the same real date.
+#   noleap    : Feb 29 is skipped, and DATM indexes the standard-calendar forcing by
+#               elapsed NO_LEAP time, so from Mar 1 of a leap year the record read is
+#               the PREVIOUS calendar day (the mapping in fates_spitfire_parity.jl, #347).
+# The FATES clock follows the same calendar (CLM.FATES_HLM_CALENDAR).
+# An earlier version of this script stepped NOLEAP against the GREGORIAN reference
+# with real-date forcing. That shifted every Julia day by one against Fortran from
+# 2004-03-01 on (years 3-4 of the #341 comparison).
 # ==========================================================================
 Base.include(@__MODULE__, joinpath(@__DIR__, "fates_fortran_parity.jl"))
 
@@ -21,8 +34,12 @@ const MY_OUT  = get(ENV, "FATES_MY_OUT", joinpath(@__DIR__, "fates_parity_multiy
 # optional per-cohort trace: comma-separated model days (1-based) to dump every cohort
 const MY_TRACE = Set(parse.(Int, filter(!isempty, split(get(ENV, "FATES_MY_TRACE", ""), ','))))
 
-"Noleap model day-start for elapsed day `d` (0-based) from START."
-function noleap_day(d::Int)
+const MY_CALENDAR = Symbol(get(ENV, "FATES_MY_CALENDAR", "gregorian"))
+MY_CALENDAR in (:gregorian, :noleap) || error("FATES_MY_CALENDAR must be gregorian or noleap")
+
+"Model day-start for elapsed day `d` (0-based) from START, in MY_CALENDAR."
+function model_day_start(d::Int)
+    MY_CALENDAR === :gregorian && return Date(START) + Day(d)
     t = Date(START); k = 0
     while k < d
         t += Day(1)
@@ -30,6 +47,13 @@ function noleap_day(d::Int)
         k += 1
     end
     return t
+end
+
+"Forcing-file time read at model time `cur` (DATM's elapsed-time indexing under NO_LEAP)."
+function forcing_time(cur::DateTime)
+    MY_CALENDAR === :gregorian && return cur
+    y = year(cur)
+    (isleapyear(y) && month(cur) >= 3) ? cur - Day(1) : cur
 end
 
 function site_summary(site)
@@ -87,6 +111,7 @@ function cohort_trace(io, site, d)
 end
 
 function main_multiyear()
+    _C.FATES_HLM_CALENDAR[] = MY_CALENDAR   # before build(): clm_fates_init! sets the clock
     inst, bounds, filt, filt_ia, config, _tm = build()
     site = inst.fates.sites[1]
     np = _C.numpft[]
@@ -130,7 +155,7 @@ function main_multiyear()
     spd = round(Int, 86400 / DTIME)
     nstep = 0; t0 = time()
     for d in 0:MY_DAYS-1
-        dstart = noleap_day(d)
+        dstart = model_day_start(d)
         for k in 0:spd-1
             nsteps_this = (d == 0 && k == 0) ? (0:1) : (nstep+1:nstep+1)   # step-0 replay
             for i in nsteps_this
@@ -144,7 +169,7 @@ function main_multiyear()
                 (declin, _e1)   = _C.compute_orbital(calday)
                 (declinm1, _e2) = _C.compute_orbital(calday - DTIME / _C.SECSPDAY)
                 _C.init_daylength!(inst.gridcell, declin, declinm1, _C.ORB_OBLIQR_DEFAULT, 1:ng)
-                _C.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)
+                _C.read_forcing_step!(fr, inst.atm2lnd, forcing_time(cur), ng, nc)
                 _C.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
                 _C.clm_drv!(config, inst, filt, filt_ia, bounds, true, calday + DTIME/_C.SECSPDAY,
                     declin, declin, _C.ORB_OBLIQR_DEFAULT, false, false, "", false;

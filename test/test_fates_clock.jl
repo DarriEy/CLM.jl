@@ -66,7 +66,21 @@ using CLM
             CLM.hlm_day_of_year[] == 1 && (nreset += 1)   # NH gddstart
         end
         @test nreset == 2
+
+        # GREGORIAN host calendar (the fates_parity_1pt case): leap years count
+        CLM.FATES_HLM_CALENDAR[] = :gregorian
+        CLM.hlm_reference_date[] = 20020701
+        CLM.fates_get_and_set_time!(2004, 3, 1, 0)
+        @test CLM.hlm_day_of_year[] == 60        # Feb 29 exists in 2004
+        @test CLM.hlm_days_per_year[] == 366
+        @test CLM.hlm_freq_day[] ≈ 1 / 366
+        @test CLM.hlm_model_day[] == 609.0      # 2002-07-01 -> 2004-03-01
+        CLM.fates_get_and_set_time!(2004, 12, 31, 0)
+        @test CLM.hlm_day_of_year[] == CLM.hlm_days_per_year[] - 1   # trim_canopy gate
+        CLM.fates_get_and_set_time!(0, 1, 1, 0)                      # year wrap
+        @test CLM.hlm_current_year[] == 2005 && CLM.hlm_days_per_year[] == 365
     finally
+        CLM.FATES_HLM_CALENDAR[] = :noleap
         (CLM.hlm_current_year[], CLM.hlm_current_month[], CLM.hlm_current_day[],
          CLM.hlm_current_tod[], CLM.hlm_current_date[], CLM.hlm_reference_date[],
          CLM.hlm_model_day[], CLM.hlm_day_of_year[], CLM.hlm_days_per_year[],

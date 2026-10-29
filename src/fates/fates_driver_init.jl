@@ -378,9 +378,13 @@ Set the FATES clock module-globals from the host date. Mirrors the CTSM host
 routine `GetAndSetTime` (clmfates_interfaceMod.F90:3730-3786), which runs at FATES
 init and at the top of every daily `dynamics_driv` (line 1068):
 
-* `day_of_year = floor(timemgr_datediff(jan01_curr_year, now))` — 0-based, NOLEAP;
+* `day_of_year = floor(timemgr_datediff(jan01_curr_year, now))` — 0-based;
 * `model_day   = timemgr_datediff(reference_date, now)` [days, fractional];
-* `days_per_year = 365`, `freq_day = 1/365` (the NOLEAP calendar).
+* `days_per_year = get_curr_days_per_year()`, `freq_day = 1/days_per_year`,
+
+all in the HOST calendar, [`FATES_HLM_CALENDAR`](@ref): `:noleap` (CTSM's default,
+`calendar = NO_LEAP`) or `:gregorian` (`calendar = GREGORIAN` in the case's
+nuopc.runconfig CLOCK_attributes; the fates_parity_1pt case runs GREGORIAN).
 
 `hlm_reference_date[]` (YYYYMMDD) must be set first (`clm_fates_init!` sets it to
 the run start date, CTSM's `ref_ymd` default). A `year <= 0` means "the caller does
@@ -388,19 +392,37 @@ not track the year": the year is then carried forward from the previous call and
 advanced when the day of year wraps (`clm_drv!`'s `year` kwarg defaults to 0).
 """
 function fates_get_and_set_time!(year::Integer, mon::Integer, day::Integer, tod::Integer)
-    doy = _fates_noleap_doy0(mon, day)
     if year <= 0
         year = hlm_current_year[]
-        if hlm_day_of_year[] != fates_unset_int && doy < hlm_day_of_year[]
+        if hlm_day_of_year[] != fates_unset_int &&
+           _fates_noleap_doy0(mon, day) < _fates_noleap_doy0(hlm_current_month[], hlm_current_day[])
             year += 1
         end
     end
     ry, rm, rd = _fates_yyyymmdd_split(hlm_reference_date[])
-    model_day = 365.0 * (year - ry) + (doy - _fates_noleap_doy0(rm, rd)) + tod / sec_per_day
+    if FATES_HLM_CALENDAR[] === :gregorian
+        now = Date(year, mon, day)
+        doy = Dates.dayofyear(now) - 1
+        dpy = Dates.daysinyear(year)
+        model_day = Float64(Dates.value(now - Date(ry, rm, rd))) + tod / sec_per_day
+    else
+        doy = _fates_noleap_doy0(mon, day)
+        dpy = 365
+        model_day = 365.0 * (year - ry) + (doy - _fates_noleap_doy0(rm, rd)) + tod / sec_per_day
+    end
     SetFatesTime(year, mon, day, tod, year * 10000 + mon * 100 + day,
-                 hlm_reference_date[], model_day, doy, 365, 1.0 / 365.0)
+                 hlm_reference_date[], model_day, doy, dpy, 1.0 / dpy)
     return nothing
 end
+
+"""
+    FATES_HLM_CALENDAR :: Ref{Symbol}
+
+The host model calendar the FATES clock follows: `:noleap` (default; CTSM
+`NO_LEAP`) or `:gregorian`. Set it before `clm_initialize!` / `clm_fates_init!`
+to match the case being reproduced.
+"""
+const FATES_HLM_CALENDAR = Ref(:noleap)
 
 """
     clm_fates_init!(inst::CLMInstances; nsites=1, numpft_in=nothing, nlevsoil,
