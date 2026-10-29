@@ -197,6 +197,12 @@ function build_bow_inst(; dtime::Int=3600, use_aquifer_layer::Bool=false,
         # Julia defaults false → the bsun weight is skipped → leaf_mr ~1/bsun
         # too high (grass bsun≈0.42 → 2.2× high; the grass availc residual).
         inst.photosyns.modifyphoto_and_lmr_forcrop = true
+        # Bow lnd_in lnc_opt=.true., vcmax_opt=3 (CTSM namelist defaults for use_cn /
+        # use_flexibleCN). lnc_opt=.true. takes canopy-top leaf N from the prognostic
+        # leafn (PhotosynthesisMod.F90:3168-3204) instead of 1/(slatop*leafcn); at Bow
+        # Fortran's lnca is ~13% above the static value, which sets the Atkin leaf MR.
+        inst.photosyns.lnc_opt = true
+        inst.photosyns.vcmax_opt = 3
     end
     # Bow lnd_in &photosyns_inparm flags apply regardless of CN. The SP+PHS+LUNA parity
     # path (use_luna, use_cn=false) must still honor them, else daytime leaf respiration
