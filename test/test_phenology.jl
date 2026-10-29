@@ -362,6 +362,30 @@
                 mask_soilc=mask_soilc)
     end
 
+    # The crop-harvest branch of cn_offset_litterfall! (CNOffsetLitterfall's
+    # `ivt >= npcropmin` block) reads the grain, seed-deficit, biofuel and residue
+    # arrays that make_test_data leaves unallocated. Zero-fill every still-empty
+    # array of those structs (patch-sized; reproductive / harvest dims from varpar)
+    # so the crop-path tests run under --check-bounds=yes.
+    function alloc_crop_offset!(d; np::Int=1, npft::Int=20)
+        for obj in (d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf, d.crop, d.cnveg_state)
+            for f in fieldnames(typeof(obj))
+                v = getfield(obj, f)
+                (v isa AbstractArray && isempty(v)) || continue
+                n = ndims(v)
+                dims = n == 1 ? (np,) : n == 2 ? (np, CLM.NREPR) : (np, CLM.MXHARVESTS, CLM.NREPR)
+                setfield!(obj, f, zeros(eltype(v), dims...))
+            end
+        end
+        for f in fieldnames(typeof(d.pftcon))
+            v = getfield(d.pftcon, f)
+            (v isa AbstractArray && isempty(v)) || continue
+            dims = ndims(v) == 1 ? (npft,) : (npft, CLM.NREPR)
+            setfield!(d.pftcon, f, zeros(eltype(v), dims...))
+        end
+        return d
+    end
+
     # =====================================================================
     # seasonal_decid_onset
     # =====================================================================
@@ -780,7 +804,7 @@
         @test d.cnveg_cf.leafc_to_litter_patch[1] == 0.0
 
         # ... but a prognostic-crop patch DOES dump its leaves.
-        dc = make_test_data()
+        dc = alloc_crop_offset!(make_test_data())
         dc.cnveg_state.offset_flag_patch[1] = 1.0
         dc.cnveg_state.offset_counter_patch[1] = dc.pstate.dt
         CLM.cn_offset_litterfall!(dc.pstate, dc.mask_soilp, dc.pftcon,
@@ -790,7 +814,7 @@
     end
 
     @testset "cn_offset_litterfall! CNratio_floating" begin
-        d = make_test_data()
+        d = alloc_crop_offset!(make_test_data())
         dt = d.pstate.dt
         d.cnveg_state.offset_flag_patch[1] = 1.0
         d.cnveg_state.offset_counter_patch[1] = dt
