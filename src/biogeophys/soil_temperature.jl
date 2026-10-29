@@ -666,7 +666,12 @@ end
                         excess_ice[c, j] / T(DENICE)) / (dz[c, jj] * watsat[c, j])
                 satw = min(one(T), satw)   # HARD: constant cap
                 if satw > T(1.0e-7)
-                    if t_soisno[c, jj] >= T(TFRZ)
+                    # Branch on the PRIMAL temperature (`_primal`, smooth_ad.jl): a melting layer
+                    # sits EXACTLY at tfrz, and ForwardDiff >= 1.0 resolves that tie from the
+                    # partials (roundoff noise there) — picking the frozen Kersten number (thk
+                    # 0.94 vs 1.40 W/m/K) where the Float64 run takes the thawed one. Identity on
+                    # AbstractFloat → byte-identical default.
+                    if _primal(t_soisno[c, jj]) >= _primal(T(TFRZ))
                         dke = max(zero(T), log10(satw) + one(T))   # HARD: constant-0 branch; Kersten number. Also removes the log10 singular-derivative hazard the _SMOOTH_SAT guard exists for.
                     else
                         dke = satw
@@ -685,12 +690,12 @@ end
                     thk[c, jj] = T(THK_BEDROCK)
                 end
             elseif lit == ISTICE
-                thk[c, jj] = t_soisno[c, jj] < T(TFRZ) ? T(TKICE) : T(TKWAT)
+                thk[c, jj] = _primal(t_soisno[c, jj]) < _primal(T(TFRZ)) ? T(TKICE) : T(TKWAT)
             elseif lit == ISTWET
                 if j > nlevsoi
                     thk[c, jj] = T(THK_BEDROCK)
                 else
-                    thk[c, jj] = t_soisno[c, jj] < T(TFRZ) ? T(TKICE) : T(TKWAT)
+                    thk[c, jj] = _primal(t_soisno[c, jj]) < _primal(T(TFRZ)) ? T(TKICE) : T(TKWAT)
                 end
             end
         end
@@ -1938,6 +1943,13 @@ Adapt.@adapt_structure PcbTmp
         mk = T(pck)  # latent-heat mass-clamp sharpness (PHASE_CHANGE_MASS_K)
         smooth_lab = _pc_smooth(T)   # smooth the melt/freeze LABEL transition? (Dual / :always)
         tk = T(ptk)                  # melt-label sharpness (PHASE_CHANGE_TEMP_K), temperature axis
+        # Every phase-change BRANCH below decides on the primal value (`_primal`, smooth_ad.jl;
+        # identity on AbstractFloat → byte-identical default/GPU). The state is pinned EXACTLY at
+        # thresholds here (t_soisno = tfrz by assignment; h2osoi_liq = max(0, wmass0 − ice) = 0;
+        # heatr ≡ 0 when the melt is not mass-limited), so these tests TIE in value with
+        # roundoff-noise partials, and ForwardDiff >= 1.0 breaks ties on the partials — sending
+        # the Dual down a branch the Float64 primal (and central FD) never takes (§5c, θ=4.981).
+        tfp = _primal(tfrz)
         l = landunit[c]
         it = itype[c]
         wallroof = (it == ICOL_SUNWALL || it == ICOL_SHADEWALL || it == ICOL_ROOF)
@@ -1981,15 +1993,15 @@ Adapt.@adapt_structure PcbTmp
                     # layer is byte-identical to the hard test below; only a ~0.036 K band is
                     # rounded. Freeze is excluded where melt fired (mutually exclusive, as the
                     # hard `t = tfrz` made them below).
-                    if lyr.h2osoi_ice[c, jj] > zero(T)
+                    if _primal(lyr.h2osoi_ice[c, jj]) > 0
                         dmelt = smooth_max(zero(T), lyr.t_soisno[c, jj] - tfrz; k = tk)
-                        if dmelt > zero(T)
+                        if _primal(dmelt) > 0
                             imelt[c, jj] = 1
                             tmp.tinc[c, jj] = -dmelt
                             lyr.t_soisno[c, jj] -= dmelt
                         end
                     end
-                    if imelt[c, jj] != 1 && lyr.h2osoi_liq[c, jj] > zero(T) && lyr.t_soisno[c, jj] < tfrz
+                    if imelt[c, jj] != 1 && _primal(lyr.h2osoi_liq[c, jj]) > 0 && _primal(lyr.t_soisno[c, jj]) < tfp
                         imelt[c, jj] = 2
                         tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
                         lyr.t_soisno[c, jj] = tfrz
@@ -2016,13 +2028,13 @@ Adapt.@adapt_structure PcbTmp
             tmp.supercool[c, j] = zero(T)
             active = (!wallroof && j <= nlevgrnd) || (wallroof && j <= nlevurb)
             if active
-                if lyr.h2osoi_ice[c, jj] > zero(T) && lyr.t_soisno[c, jj] > tfrz
+                if _primal(lyr.h2osoi_ice[c, jj]) > 0 && _primal(lyr.t_soisno[c, jj]) > tfp
                     imelt[c, jj] = 1
                     tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
                     lyr.t_soisno[c, jj] = tfrz
                 end
 
-                if lyr.excess_ice[c, j] > zero(T) && lyr.t_soisno[c, jj] > tfrz
+                if _primal(lyr.excess_ice[c, j]) > 0 && _primal(lyr.t_soisno[c, jj]) > tfp
                     imelt[c, jj] = 1
                     tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
                     lyr.t_soisno[c, jj] = tfrz
@@ -2030,21 +2042,21 @@ Adapt.@adapt_structure PcbTmp
 
                 tmp.supercool[c, j] = zero(T)
                 if lun_itype[l] == ISTSOIL || lun_itype[l] == ISTCROP || it == ICOL_ROAD_PERV
-                    if lyr.t_soisno[c, jj] < tfrz
+                    if _primal(lyr.t_soisno[c, jj]) < tfp
                         smp = hfus * (tfrz - lyr.t_soisno[c, jj]) / (grav * lyr.t_soisno[c, jj]) * thou
                         tmp.supercool[c, j] = pin.watsat[c, j] * (smp / pin.sucsat[c, j])^(-one(T) / pin.bsw[c, j])
                         tmp.supercool[c, j] *= pin.dz[c, jj] * thou
                     end
                 end
 
-                if lyr.h2osoi_liq[c, jj] > tmp.supercool[c, j] && lyr.t_soisno[c, jj] < tfrz
+                if _primal(lyr.h2osoi_liq[c, jj]) > _primal(tmp.supercool[c, j]) && _primal(lyr.t_soisno[c, jj]) < tfp
                     imelt[c, jj] = 2
                     tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
                     lyr.t_soisno[c, jj] = tfrz
                 end
 
-                if colv.h2osno_no_layers[c] > zero(T) && j == 1
-                    if lyr.t_soisno[c, jj] > tfrz
+                if _primal(colv.h2osno_no_layers[c]) > 0 && j == 1
+                    if _primal(lyr.t_soisno[c, jj]) > tfp
                         imelt[c, jj] = 1
                         tmp.tinc[c, jj] = tfrz - lyr.t_soisno[c, jj]
                         lyr.t_soisno[c, jj] = tfrz
@@ -2080,21 +2092,21 @@ Adapt.@adapt_structure PcbTmp
                     end
                 end
 
-                if imelt[c, jj] == 1 && tmp.hm[c, jj] < zero(T)
+                if imelt[c, jj] == 1 && _primal(tmp.hm[c, jj]) < 0
                     tmp.hm[c, jj] = zero(T)
                     imelt[c, jj] = 0
                 end
-                if imelt[c, jj] == 2 && tmp.hm[c, jj] > zero(T)
+                if imelt[c, jj] == 2 && _primal(tmp.hm[c, jj]) > 0
                     tmp.hm[c, jj] = zero(T)
                     imelt[c, jj] = 0
                 end
 
-                if imelt[c, jj] > 0 && abs(tmp.hm[c, jj]) > zero(T)
+                if imelt[c, jj] > 0 && abs(_primal(tmp.hm[c, jj])) > 0
                     tmp.xm[c, jj] = tmp.hm[c, jj] * dtime / hfus
 
                     # Unresolved snow melting
                     if j == 1
-                        if colv.h2osno_no_layers[c] > zero(T) && tmp.xm[c, jj] > zero(T)
+                        if _primal(colv.h2osno_no_layers[c]) > 0 && _primal(tmp.xm[c, jj]) > 0
                             temp1 = colv.h2osno_no_layers[c]
                             # HARD floor (see the mass-identity note at the h2osoi_liq
                             # update below): xm > 0 here, so `temp1 - xm < temp1` and the
@@ -2105,7 +2117,7 @@ Adapt.@adapt_structure PcbTmp
                             propor = colv.h2osno_no_layers[c] / temp1
                             colv.snow_depth[c] = propor * colv.snow_depth[c]
                             heatr = tmp.hm[c, jj] - hfus * (temp1 - colv.h2osno_no_layers[c]) / dtime
-                            if heatr > zero(T)
+                            if _primal(heatr) > 0
                                 tmp.xm[c, jj] = heatr * dtime / hfus
                                 tmp.hm[c, jj] = heatr
                             else
@@ -2124,22 +2136,22 @@ Adapt.@adapt_structure PcbTmp
                     end
 
                     heatr = zero(T)
-                    if tmp.xm[c, jj] > zero(T)
+                    if _primal(tmp.xm[c, jj]) > 0
                         lyr.h2osoi_ice[c, jj] = smooth_max(zero(T), tmp.wice0[c, jj] - tmp.xm[c, jj]; k = mk)
                         heatr = tmp.hm[c, jj] - hfus * (tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
                         tmp.xm2[c, jj] = tmp.xm[c, jj] - lyr.h2osoi_ice[c, jj]
-                        if lyr.h2osoi_ice[c, jj] == zero(T)
-                            if tmp.wexice0[c, jj] >= zero(T) && tmp.xm2[c, jj] > zero(T) && j >= 2
+                        if _primal(lyr.h2osoi_ice[c, jj]) == 0
+                            if _primal(tmp.wexice0[c, jj]) >= 0 && _primal(tmp.xm2[c, jj]) > 0 && j >= 2
                                 lyr.excess_ice[c, j] = smooth_max(zero(T), tmp.wexice0[c, jj] - tmp.xm2[c, jj]; k = mk)
                                 heatr = tmp.hm[c, jj] - hfus * (tmp.wexice0[c, jj] - lyr.excess_ice[c, j] +
                                         tmp.wice0[c, jj] - lyr.h2osoi_ice[c, jj]) / dtime
                             end
                         end
-                    elseif tmp.xm[c, jj] < zero(T)
+                    elseif _primal(tmp.xm[c, jj]) < 0
                         if j <= 0
                             lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj], tmp.wice0[c, jj] - tmp.xm[c, jj]; k = mk)
                         else
-                            if tmp.wmass0[c, jj] - tmp.wexice0[c, jj] < tmp.supercool[c, j]
+                            if _primal(tmp.wmass0[c, jj] - tmp.wexice0[c, jj]) < _primal(tmp.supercool[c, j])
                                 lyr.h2osoi_ice[c, jj] = zero(T)
                             else
                                 lyr.h2osoi_ice[c, jj] = smooth_min(tmp.wmass0[c, jj] - tmp.wexice0[c, jj] - tmp.supercool[c, j],
@@ -2167,7 +2179,14 @@ Adapt.@adapt_structure PcbTmp
                     # the phases, so it is mass-neutral.
                     lyr.h2osoi_liq[c, jj] = max(zero(T), tmp.wmass0[c, jj] - lyr.h2osoi_ice[c, jj] - ei_val)
 
-                    if abs(heatr) > zero(T)
+                    # `_primal`: heatr is IDENTICALLY zero in exact arithmetic when the melt/freeze
+                    # was not mass-limited (xm = hm*dtime/hfus is removed exactly), so its value is
+                    # 0 but its partials are roundoff noise. ForwardDiff >= 1.0 breaks the
+                    # `abs(heatr) > 0` value tie on those partials and would add fact*heatr — pure
+                    # noise — to ∂t_soisno of a layer pinned at tfrz, which then flips the next
+                    # step's tfrz-tie branches (thermal conductivity) away from the Float64 path.
+                    # Identity on AbstractFloat → byte-identical default.
+                    if abs(_primal(heatr)) > 0
                         if j == snl[c] + 1
                             if j == 1
                                 lyr.t_soisno[c, jj] += pin.fact[c, jj] * heatr /
@@ -2192,7 +2211,7 @@ Adapt.@adapt_structure PcbTmp
                         end
 
                         if j <= 0
-                            if lyr.h2osoi_liq[c, jj] * lyr.h2osoi_ice[c, jj] > zero(T)
+                            if _primal(lyr.h2osoi_liq[c, jj] * lyr.h2osoi_ice[c, jj]) > 0
                                 lyr.t_soisno[c, jj] = tfrz
                             end
                         end

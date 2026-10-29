@@ -210,6 +210,56 @@ which is AD-neutral for calibration (AD and DDS use the same smooth path). Net: 
 layer-count — the last discrete residual of the forward-AD smoothness boundary — is resolved for the
 melt window; the gradient is now benign across the full θ sweep, default-exact.**
 
+**Stage 3: the θ=4.981 residual was not a kink. It was a ForwardDiff tie-break.** The isolated
+4.5e-2 point was reproduced (FwdDiff 15.68 vs FD 16.42) and bracketed. It is **not** FD truncation
+or a straddle: FD is **h-independent** (16.4250437 for every h from 1e-4 to 1e-6), and the bad
+region is an *interval* (θ ∈ ~[4.978, 4.989]) where the AD slope is wrong while the loss itself is
+smooth. Locating it took three probes in turn. A Dual-vs-FD field walk found nothing until step 14.
+A **primal** walk (Dual value vs Float64 at the *same* θ) put the first divergence at step 14
+inside `soil_temperature!`: top-soil `thk` was 0.943 on the Dual path and 1.398 on Float64, with
+`t_h2osfc` 0.26 K off. A fork test then showed that every Dual-typed field was bit-identical to
+Float64 going in, and that a Dual built from the Float64 state reproduced Float64 exactly. So the
+only difference left was the **partials**.
+
+The cause is ForwardDiff ≥ 1.0 semantics (1.4.3 here). An exact-value tie in `<`/`<=`/`>=`/`==` is
+broken by comparing **partials**: `Dual(tfrz, ∂) >= tfrz` is `∂ >= 0`. CLM pins state **exactly**
+at thresholds by assignment. A melting layer gets `t_soisno = tfrz`. After melt,
+`h2osoi_liq = max(0, wmass0 − ice)` is exactly 0. The phase-change residual
+`heatr = hm − hfus·(wice0 − ice)/dtime` is identically 0 whenever the melt is not mass-limited.
+At those ties the value is exact but the partials are **roundoff noise**, so the noise sign chose
+the branch. Two chains were found:
+(i) `abs(heatr) > 0` passed on the noise, adding `fact·heatr` noise to `∂t_soisno` of the pinned top
+soil layer. The next step's Kersten test `t_soisno >= tfrz` then took the **frozen** branch
+(thk 0.94 instead of 1.40 W/m/K).
+(ii) the snow test `h2osoi_liq·h2osoi_ice > 0` passed on a zero-valued, noise-partialled liquid
+mass and reset the bottom snow layer to `tfrz` (Dual 273.150 K vs Float64 273.116 K).
+Central FD runs in Float64, which never takes these branches, so the AD differentiated a function
+the primal never evaluates.
+
+**Fix: decide branches on the primal value.** `_primal(x)` (`smooth_ad.jl`) strips partials and is
+the **identity on every `AbstractFloat`**. It now drives every branch test in the phase-change kernel
+(identification, `hm`/`xm`/`heatr` guards, the `liq·ice` reset) and the three `t_soisno`-vs-`TFRZ`
+tests in the soil/snow thermal-conductivity kernel. It is not a smoothing, so there is no `k` and no
+physics bias. Under a Dual the branch is now exactly the Float64 branch. Float64 and Float32 are
+byte-identical by construction, which is stronger than a `_pc_smooth(T)` gate.
+
+| `CLM_SMOOTH=always` sweep, 28 points | before | after |
+|---|---|---|
+| θ = 4.981 | **4.54e-2** | **2.8e-11** |
+| worst point over the sweep | 4.54e-2 (θ=4.981) | **6.2e-3** (θ=2.537) |
+| points with rel ≤ 1e-8 | 0 / 28 | **21 / 28** |
+| typical settled point | ~1e-3 | **~1e-10** |
+
+The second-to-last row corrects §5b. The "~2–6e-4 / ~1e-3 FD-truncation-limited settled-melt
+residual" was **mostly this same tie artifact, not truncation**. With branches on the primal,
+settled points agree with central FD to ~1e-10. Seven points stay above 1e-8 (θ = 0.50, 0.91,
+1.32, 2.33, 2.54, 2.74, 3.35; worst 6.2e-3). The worst one, θ=2.537, was checked directly and is
+**not** a tie-break: a primal walk finds no Dual/Float64 divergence over all 480 steps. It is an FD
+straddle of a genuine kink (§3/§4) sitting 1e-5 to 3e-5 from θ. The FD error is **non-monotone in h**
+(6.0e-4, 2.0e-3, 6.2e-3, 2.1e-2 at h = 1e-3, 3e-4, 1e-4, 3e-5). It then collapses to **1.5e-10 at
+h = 1e-5**, once the bracket no longer reaches the kink. Neighbours at θ ± 5e-4 agree to ~1e-11.
+The AD derivative at θ is exact; the sweep's h = 1e-4 FD is the inexact side.
+
 ## 6. The photosynthesis claim, corrected
 
 The earlier "Farquhar photosynthesis is Dual-clean" claim was **unproven — potentially vacuous**.
@@ -234,14 +284,23 @@ is full of, **with a smooth-region control** to prove any error is the transitio
 This is the same class as the port's other hard-won lessons — *conservation is not accuracy*,
 *vacuous checks*: assert the **value** (the gradient, across a transition), never that it merely ran.
 
-**Bottom line.** CLM.jl has **no forward-AD type wall** — the whole per-step physics is `Dual`-clean.
-Its forward-AD boundary is **smoothness**: the discrete snow events make the streamflow loss
-piecewise-smooth. The continuous heat/mass partitions were already smoothed; **Phase-3 now also
-smooths the `imelt` melt label** on the temperature axis (negligible bias, default byte-identical),
-removing the label-flip gradient spikes (§5b). The gradient is **exact away from transitions and
-usable across sparse ones (and empirically calibrates real basins)**. The integer layer count
-`snl` — once the last discontinuity — is now held fixed through the melt window under smooth mode
-(§5c, Stages 1–2): across the full θ sweep `snl` stays constant and the sweep verdict is
-gradient-BENIGN, default byte-identical. One isolated point (θ=4.981, rel 4.5e-2) remains and is
-**not** `snl`-related; it is undiagnosed. `Dual`-clean is necessary but not sufficient; smoothness
-is the deeper requirement, and it is now closed for the snow melt window.
+**A gate can also fail for a reason that is not a kink (§5c, Stage 3).** Before attributing an
+AD-vs-FD gap to non-smoothness, check two things. First, FD must be **h-stable**. Second, the Dual
+**primal** must equal the Float64 primal at the same θ. If FD is h-independent and the primals
+diverge, the AD is differentiating a different branch from the one the model takes. In ForwardDiff
+≥ 1.0 this happens at any **exact tie**: comparisons break value ties on partials, and a model that
+pins state at thresholds by assignment hands them roundoff-noise partials. The θ=4.981 "residual"
+was exactly this case. So was most of the "~1e-3 FD-truncation floor" that had been accepted as
+irreducible. Branching on `_primal(x)` removes it without smoothing anything.
+
+**Bottom line.** CLM.jl has **no forward-AD type wall**: the whole per-step physics is `Dual`-clean.
+Its forward-AD boundary is **smoothness**, because the discrete snow events make the streamflow loss
+piecewise-smooth. The continuous heat/mass partitions were already smoothed. Phase-3 then smoothed
+the `imelt` melt label (§5b) and held the `snl` layer count fixed through melt (§5c, Stages 1–2).
+Stage 3 made the phase-change and thermal-conductivity branches decide on the primal value, so a
+Dual follows the Float64 branch at exact ties. The `CLM_SMOOTH=always` θ_snow sweep now has
+**FwdDiff == central FD to ≤ 1e-8 at 21 of 28 points**, with a worst case of **6.2e-3**. That worst
+case is at points where the primal is identical and the remaining gap is a genuine piecewise-smooth
+kink inside the FD bracket. All of this is default byte-identical. `Dual`-clean is necessary but not
+sufficient. Smoothness is the deeper requirement, **and so is branch-consistency**: the Dual must
+take the same branch as the primal it is differentiating.
