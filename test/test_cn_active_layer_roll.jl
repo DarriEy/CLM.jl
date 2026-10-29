@@ -39,7 +39,8 @@ include(joinpath(@__DIR__, "testdata.jl"))
             al.alt_col .= 0.0; al.altmax_col .= 2.0; al.altmax_lastyear_col .= 0.0
             al.alt_indx_col .= 0; al.altmax_indx_col .= 8; al.altmax_lastyear_indx_col .= 0
             temp = CLM.TemperatureData()
-            temp.t_soisno_col = fill(CLM.TFRZ + 2.0, 1, nlevsno + nlevgrnd)   # thawed
+            # frozen (midwinter): this step's thaw depth does not raise last year's max
+            temp.t_soisno_col = fill(CLM.TFRZ - 5.0, 1, nlevsno + nlevgrnd)
             col = CLM.ColumnData(); col.gridcell = [1]
             col.nbedrock = [nlev]; col.is_fates = [false]
             grc = CLM.GridcellData(); grc.lat = [deg2rad(51.36)]
