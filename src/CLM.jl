@@ -638,6 +638,9 @@ include("fates/fates_driver_init.jl")
 # column/patch state and the FATES site boundary conditions. Depends on
 # CLMInstances + fates_driver_init.jl (the cold-start that builds inst.fates).
 include("fates/fates_driver_bc.jl")
+# use_fates_bgc host coupling: FATES litter -> CLM decomposition pools
+# (UpdateC/NLitterFluxes) and CLM HR/soil C -> FATES history (wrap_update_hifrq_hist).
+include("fates/fates_driver_soilbgc.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

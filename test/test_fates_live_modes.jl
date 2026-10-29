@@ -213,7 +213,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
     fates = _C.clm_fates_init!(inst; nsites=1, nlevsoil=nlevsoil,
                                nlevdecomp=nlevdecomp, init_kwargs...)
 
-    config = _C.CLMDriverConfig(use_fates=true, use_aquifer_layer=false,
+    config = _C.CLMDriverConfig(use_fates=true, use_fates_bgc=false, use_aquifer_layer=false,
                                 use_hydrstress=false, use_luna=false)
 
     function set_forcing!(inst, sunfrac)

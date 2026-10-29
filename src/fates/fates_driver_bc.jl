@@ -764,6 +764,8 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     #    unused by the body, which indexes only by site.
     canopy_summarization!(fates.nsites, fates.sites, fates.bc_in)
     update_hlm_dynamics!(fates.nsites, fates.sites, site_col, fates.bc_out)
+    # wrap_update_hlmfates_dyn's litter-quality hand-off (decomp_method /= no_soil_decomp).
+    use_fates_bgc && fates_update_litr_lig_c_to_n!(inst)
 
     # 6. per FATES column: unpack the canopy structure into CLM for each vegetated
     #    patch (the ifp walk — a disturbance can split one patch into several), then

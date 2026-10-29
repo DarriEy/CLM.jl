@@ -169,6 +169,9 @@ function cn_driver_no_leaching!(
         woody::AbstractVector{<:Real},
         harvdate::AbstractVector{<:Integer},
         col_is_fates::AbstractVector{Bool},
+        # FATES interface (inst.fates): the litter-flux source for FATES columns under
+        # use_fates_bgc. `nothing` (default) => no FATES litter coupling.
+        fates_inst = nothing,
         cascade_donor_pool::AbstractVector{<:Integer},
         cascade_receiver_pool::AbstractVector{<:Integer},
         # Time step
@@ -704,7 +707,11 @@ function cn_driver_no_leaching!(
                 use_lch4=_lch4,
                 anoxia=_lch4,
                 o2stress_unsat=_o2stress_unsat,
-                col_dz=_col_dz)
+                col_dz=_col_dz,
+                # FATES owns CWD: without this the CWD->litter pathfrac/rf kernel
+                # wrote at cascade index i_cwdl3 - 1 = -1 under FATES soil BGC (an
+                # out-of-bounds @inbounds store that corrupted the heap).
+                use_fates=config.use_fates)
         end
 
         # 2. Potential decomposition and mineral N flux
@@ -827,6 +834,9 @@ function cn_driver_no_leaching!(
                 cascade_receiver_pool=cascade_receiver_pool,
                 use_nitrif_denitrif=config.use_nitrif_denitrif,
                 use_fun=config.use_fun,
+                # cnallocate_carbon_only() (suplnitro='ALL'; set by
+                # soil_bgc_competition_init!). False for the CLM-BGC default 'NONE'.
+                carbon_only=competition_state.carbon_only,
                 fun_hook=_fun_hook)
         end
 
@@ -1064,6 +1074,14 @@ function cn_driver_no_leaching!(
     # --------------------------------------------------
     # CStateUpdate1
     # --------------------------------------------------
+    # FATES columns: CStateUpdate1 asks FATES for the litter C fluxes
+    # (clm_fates%UpdateCLitterFluxes, CNCStateUpdate1Mod.F90:193-200) in place of the
+    # CN phenology litter input; the cascade HR/transfer terms follow in the kernel.
+    if config.use_fates_bgc && fates_inst !== nothing
+        fates_update_c_litter_fluxes!(fates_inst, soilbgc_cf, col_is_fates, mask_bgc_soilc;
+            dtime = dt, nlevdecomp = nlevdecomp, decomp_method = config.decomp_method,
+            i_met_lit = i_litr_min)
+    end
     c_state_update1!(cnveg_cs, cnveg_cf, soilbgc_cf;
         mask_soilc=mask_bgc_soilc,
         mask_soilp=mask_bgc_vegp,
@@ -1123,6 +1141,10 @@ function cn_driver_no_leaching!(
     # --------------------------------------------------
     # NStateUpdate1
     # --------------------------------------------------
+    # FATES columns: clm_fates%UpdateNLitterFluxes (CNNStateUpdate1Mod.F90:149-156).
+    if config.use_fates_bgc && fates_inst !== nothing
+        fates_update_n_litter_fluxes!(fates_inst, soilbgc_nf, col_is_fates, mask_bgc_soilc)
+    end
     n_state_update1!(cnveg_ns, cnveg_nf, soilbgc_nf;
         mask_soilc=mask_bgc_soilc,
         mask_soilp=mask_bgc_vegp,

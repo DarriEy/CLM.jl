@@ -558,6 +558,9 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         woody::AbstractVector{<:Real},
         harvdate::AbstractVector{<:Integer},
         col_is_fates::AbstractVector{Bool},
+        # FATES interface (inst.fates) — the litter-flux source for FATES columns
+        # under use_fates_bgc (UpdateC/NLitterFluxes). `nothing` without FATES.
+        fates_inst = nothing,
         cascade_donor_pool::AbstractVector{<:Integer},
         cascade_receiver_pool::AbstractVector{<:Integer},
         dt::Real,
@@ -703,6 +706,7 @@ function cn_vegetation_ecosystem_pre_drainage!(veg::CNVegetationData;
         woody=woody,
         harvdate=harvdate,
         col_is_fates=col_is_fates,
+        fates_inst=fates_inst,
         cascade_donor_pool=cascade_donor_pool,
         cascade_receiver_pool=cascade_receiver_pool,
         dt=dt,

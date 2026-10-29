@@ -318,7 +318,7 @@ const _C = CLM
             @test inst.fates !== nothing
             @test inst.fates.nsites == 2
 
-            config = _C.CLMDriverConfig(use_fates=true, use_aquifer_layer=false,
+            config = _C.CLMDriverConfig(use_fates=true, use_fates_bgc=false, use_aquifer_layer=false,
                                         use_hydrstress=false, use_luna=false)
 
             function set_forcing!(inst, sunfrac)

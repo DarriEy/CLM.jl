@@ -107,6 +107,12 @@ function clm_initialize!(;
     use_c13::Bool = false,
     use_c14::Bool = false,
     use_fates::Bool = false,
+    # CTSM controlMod.F90:474-479 sets use_fates_bgc = .not. use_fates_sp whenever
+    # use_fates: a (non-SP) FATES run carries CLM's CENTURY soil biogeochemistry, fed
+    # by the FATES litter fluxes. `nothing` resolves to that default (= use_fates, as
+    # the port has no FATES-SP init path). Pass `false` for the legacy FATES-without-
+    # soil-BGC configuration.
+    use_fates_bgc::Union{Bool,Nothing} = nothing,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
     # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
@@ -231,6 +237,13 @@ function clm_initialize!(;
     # (disturbance) patches are dropped from the HLM coupling.
     varctl.use_fates = use_fates
     varctl.fates_maxpatch = use_fates ? fates_maxpatch_total() : 0
+    _fates_bgc = use_fates && (use_fates_bgc === nothing ? true : use_fates_bgc)
+    _fates_bgc && decomp_method != 1 &&
+        error("clm_initialize!: FATES soil BGC is ported for CENTURY (decomp_method=1) only")
+    varctl.use_fates_bgc = _fates_bgc
+    # The soil-BGC cascade (pools/transitions, decomp params, competition) runs for
+    # use_cn OR use_fates_bgc (clm_instMod.F90 / CNDriverInit gate on both).
+    _soil_bgc = use_cn || _fates_bgc
 
     # ---- Step 2: Read surface file metadata ----
     (numpft, numcft) = surfrd_get_num_patches(fsurdat)
@@ -322,7 +335,13 @@ function clm_initialize!(;
     inst.bgc_vegetation.config.decomp_method = decomp_method
     # clm5_0 BGC defaults to nitrification/denitrification ON (use_nitrif_denitrif);
     # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
-    inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
+    inst.bgc_vegetation.config.use_nitrif_denitrif = _soil_bgc
+    # FATES soil BGC: the facade/driver run the soil-only CN path (the bgc_vegp filter
+    # is empty — FATES owns the vegetation) and CStateUpdate1 pulls the FATES litter
+    # fluxes into the decomposition pools (clmfates_interfaceMod UpdateCLitterFluxes).
+    inst.bgc_vegetation.config.use_fates_bgc = _fates_bgc
+    inst.bgc_vegetation.driver_config.use_fates = use_fates
+    inst.bgc_vegetation.driver_config.use_fates_bgc = _fates_bgc
     # clm5_0 BGC also defaults to FUN (Fixation & Uptake of Nitrogen) + flexible
     # leaf C:N ON (the Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true.).
     # FUN is left OFF by default here ONLY to keep the default (use_fun=false) path
@@ -347,7 +366,10 @@ function clm_initialize!(;
     # only place the pool count is baked; downstream everything reads config.ndecomp_*.
     _mimics = use_cn && decomp_method == 2
     ndecomp_pools = _mimics ? 8 : 7
-    ndecomp_cascade_transitions = _mimics ? 15 : (use_cn ? 10 : 5)
+    # FATES-BGC CENTURY uses 6 pools / 8 transitions (no CWD — FATES owns it); the
+    # arrays keep the CN 7/10 allocation and the unused CWD slot stays zero, while the
+    # driver loops run over CLMDriverConfig's 6/8.
+    ndecomp_cascade_transitions = _mimics ? 15 : (_soil_bgc ? 10 : 5)
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                   nlevdecomp_full=nlevdecomp_full,
                   ndecomp_pools=ndecomp_pools,
@@ -593,8 +615,8 @@ function clm_initialize!(;
         accum_factor = scf_accum, n_melt_coef = scf_nmelt)
     inst.scf_method = scf
 
-    # ---- Step 15f: Initialize decomposition cascade for CN mode ----
-    if use_cn
+    # ---- Step 15f: Initialize decomposition cascade for CN / FATES-BGC mode ----
+    if _soil_bgc
         # Read BGC decomposition parameters from param file
         NCDatasets.Dataset(paramfile) do ds
             ndecomp_pools_max = 7
@@ -669,13 +691,18 @@ function clm_initialize!(;
                                       ndecomp_pools_max=7,
                                       ndecomp_cascade_transitions_max=10,
                                       spinup_state=0,
-                                      use_fates=false)
+                                      use_fates=_fates_bgc)
         end
 
         # Initialize competition state
+        # suplnitro: CLM-BGC namelist default 'NONE'; a carbon-only FATES run
+        # (fates_parteh_mode=1) MUST use 'ALL' (controlMod.F90:481-487 endruns
+        # otherwise), i.e. CNAllocate carbon_only — mineral N is supplemented so N
+        # never limits decomposition (fpi = 1).
         soil_bgc_competition_init!(inst.competition_state,
                                     inst.competition_params;
-                                    dt=Float64(dtime))
+                                    dt=Float64(dtime),
+                                    suplnitro = _fates_bgc ? SUPLN_ALL : SUPLN_NONE)
     end
 
     # ---- Step 15g: InitCold for the soil-BGC / CN-vegetation state ----------
@@ -700,6 +727,16 @@ function clm_initialize!(;
                           nlevdecomp = varpar.nlevdecomp,
                           nlevdecomp_full = nlevdecomp_full,
                           ndecomp_pools = (use_cn && decomp_method == 2) ? 8 : 7)
+    if _fates_bgc
+        # FATES-BGC: the CWD slot (pool 7) of the CN-sized arrays is unused (FATES owns
+        # CWD; ndecomp_pools = 6). InitCold seeds it from initial_stock = 0 and a zero
+        # initial C:N, which leaves 0/0 in the N pool; hold the slot at exactly zero.
+        _fates_zero_unused_cwd_slot!(inst)
+        # fates_litter_flux is allocated per column only under use_fates
+        # (SoilBiogeochemCarbon/NitrogenFluxType InitAllocate).
+        inst.soilbiogeochem_carbonflux.fates_litter_flux = fill(NaN, nc)
+        inst.soilbiogeochem_nitrogenflux.fates_litter_flux = fill(NaN, nc)
+    end
 
     # ---- Step 15h: InitAccBuffer / InitAccVars -------------------------------
     # Fortran's accumulator setup phase (clm_instMod.F90 `init_accflds`, then
@@ -734,8 +771,10 @@ function clm_initialize!(;
     if use_fates
         varctl.use_fates = true
         nlevsoil_fates = varpar.nlevsoi
-        # Carbon-only / non-vertsoilc cold start => one decomposition layer.
-        nlevdecomp_fates = 1
+        # CTSM clm_varpar.F90:302-310: nlevdecomp = nlevsoi when use_fates and not
+        # use_fates_sp, and clmfates_interfaceMod passes use_vertsoilc=1. Without soil
+        # BGC the legacy one-layer configuration is kept.
+        nlevdecomp_fates = _fates_bgc ? varpar.nlevdecomp : 1
         # Flag the FATES columns BEFORE the FATES cold start, as the Fortran host does
         # (clmfates_interfaceMod::init sets `col%is_fates(c) = .true.` for every istsoil
         # column, ahead of init_coldstart). The cold-start canopy transfer
@@ -757,6 +796,8 @@ function clm_initialize!(;
                         current_day = day(start_date),
                         fates_pft_areafrac = fates_pft_areafrac,
                         fates_biogeog_screen = fates_biogeog_screen,
+                        use_vertsoilc = _fates_bgc,
+                        decomp_method = _fates_bgc ? "CENTURY" : "CTC",
                         dtime = dtime)
     end
 
@@ -776,6 +817,30 @@ function clm_initialize!(;
     end
 
     return (inst, bounds, filt, tm)
+end
+
+"""
+    _fates_zero_unused_cwd_slot!(inst)
+
+Zero the CWD pool slot (index 7) of the soil C/N state arrays under FATES soil BGC,
+where CENTURY runs 6 pools and FATES owns coarse woody debris.
+"""
+function _fates_zero_unused_cwd_slot!(inst)
+    i_cwd_slot = 7
+    for st in (inst.soilbiogeochem_carbonstate, inst.soilbiogeochem_nitrogenstate)
+        for f in (:decomp_cpools_vr_col, :decomp_npools_vr_col)
+            hasproperty(st, f) || continue
+            a = getproperty(st, f)
+            ndims(a) == 3 && size(a, 3) >= i_cwd_slot && (a[:, :, i_cwd_slot] .= 0.0)
+        end
+        for f in (:decomp_cpools_col, :decomp_cpools_1m_col, :decomp_npools_col,
+                  :decomp_npools_1m_col)
+            hasproperty(st, f) || continue
+            a = getproperty(st, f)
+            ndims(a) == 2 && size(a, 2) >= i_cwd_slot && (a[:, i_cwd_slot] .= 0.0)
+        end
+    end
+    return inst
 end
 
 """

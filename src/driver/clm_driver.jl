@@ -174,9 +174,13 @@ function Base.getproperty(c::CLMDriverConfig, s::Symbol)
     elseif s === :no_soil_decomp
         return m isa CNMode ? m.no_soil_decomp : 0
     elseif s === :ndecomp_pools
-        return m isa CNMode ? m.ndecomp_pools : 7
+        # FATES-BGC CENTURY drops the CWD pool (FATES owns CWD):
+        # SoilBiogeochemDecompCascadeConType.F90 init_decomp_cascade_constants
+        # sets ndecomp_pools=6 / ndecomp_cascade_transitions=8 when use_fates_bgc.
+        return m isa CNMode ? m.ndecomp_pools : (m isa FATESMode && m.use_fates_bgc ? 6 : 7)
     elseif s === :ndecomp_cascade_transitions
-        return m isa CNMode ? m.ndecomp_cascade_transitions : 10
+        return m isa CNMode ? m.ndecomp_cascade_transitions :
+               (m isa FATESMode && m.use_fates_bgc ? 8 : 10)
     elseif s === :i_litr_min
         return m isa CNMode ? m.i_litr_min : 1
     elseif s === :i_litr_max
@@ -196,7 +200,10 @@ end
 
 # Backward-compatible keyword constructor: CLMDriverConfig(use_cn=true, ...)
 function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
-                          use_fates_sp::Bool=false, use_fates_bgc::Bool=false,
+                          use_fates_sp::Bool=false,
+                          # CTSM controlMod.F90:474-479: use_fates_bgc = .not. use_fates_sp
+                          # whenever use_fates. `nothing` resolves to that default.
+                          use_fates_bgc::Union{Bool,Nothing}=nothing,
                           use_lch4::Bool=false, use_c13::Bool=false, use_c14::Bool=false,
                           use_crop::Bool=false, use_cropcal_streams::Bool=false,
                           use_matrixcn::Bool=false, use_cndv::Bool=false,
@@ -247,7 +254,8 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
         i_cwd = 8
     end
     if use_fates
-        mode = FATESMode(; use_fates_sp, use_fates_bgc,
+        _use_fates_bgc = use_fates_bgc === nothing ? !use_fates_sp : use_fates_bgc
+        mode = FATESMode(; use_fates_sp, use_fates_bgc = _use_fates_bgc,
                           fates_spitfire_mode, fates_seeddisp_cadence)
     elseif use_cn
         mode = CNMode(; use_lch4, use_c13, use_c14, use_crop,
@@ -664,6 +672,13 @@ function clm_drv!(config::CLMDriverConfig,
     # config.use_fates is a compile-time property of CLMDriverConfig{Mode}, so the branch
     # folds away and the differentiable !use_fates entry never sees the wrapper.
     if config.use_fates
+        # FATES soil BGC needs the decomposition cascade that clm_initialize!(use_fates=
+        # true) builds; a hand-assembled instance without it must say use_fates_bgc=false.
+        config.use_fates_bgc && !_decomp_initialized(inst.decomp_cascade) &&
+            error("clm_drv!: use_fates_bgc (the CTSM default for non-SP FATES) needs the " *
+                  "soil decomposition cascade, which this instance does not have. Build it " *
+                  "with clm_initialize!(use_fates=true), or pass " *
+                  "CLMDriverConfig(use_fates=true, use_fates_bgc=false).")
         return GPUArraysCore.@allowscalar clm_drv_core!(config, inst, filt,
             filt_inactive_and_active, bounds_proc, doalb, nextsw_cday, declinp1, declin,
             obliqr, rstwr, nlend, rdate, rof_prognostic, nstep, is_first_step,
@@ -1657,12 +1672,9 @@ function clm_drv_core!(config::CLMDriverConfig,
         # flushes → carbon starvation → a phantom boom/bust die-back on multi-year runs.
         UpdateFatesRMeansTStep(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
 
-        # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
-        # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
-        # the just-computed cohort per-step fluxes. Write-only; no-op until the
-        # history interface is built (clm_fates_init!). Mirrors the Fortran host's
-        # update_history_hifrq in the timestep path.
-        fates_hifrq_history_step!(inst; dt_tstep=dtime)
+        # (The per-timestep "hifrq" FATES history fill runs in the FATES dynamics
+        # block below, after EcosystemDynamicsPostDrainage, where the Fortran calls
+        # wrap_update_hifrq_hist — it needs this step's soil HR.)
 
         # W4c plant-hydraulics — FATES.  When plant hydraulics is enabled
         # (hlm_use_planthydro==itrue), run hydraulics_drive AFTER the photosynthesis
@@ -2346,6 +2358,7 @@ function clm_drv_core!(config::CLMDriverConfig,
             woody=pftcon.woody,
             harvdate=inst.crop.harvdate_patch,
             col_is_fates=col.is_fates,
+            fates_inst=(config.use_fates_bgc ? inst.fates : nothing),
             cascade_donor_pool=inst.decomp_cascade.cascade_donor_pool,
             cascade_receiver_pool=inst.decomp_cascade.cascade_receiver_pool,
             dt=dtime,
@@ -2624,7 +2637,10 @@ function clm_drv_core!(config::CLMDriverConfig,
         # diagnostics (no downstream physics reads them), so this is an output-correctness
         # fix. totvegc_col/totvegn_col (for the ecosystem totals) are aggregated from the
         # veg patch totals via p2c_1d! (unity scale).
-        if config.use_cn && _decomp_initialized(inst.decomp_cascade)
+        # FATES-BGC runs the same end-of-step soil summary (CNDriverSummarizeStates ->
+        # soilbiogeochem_carbonstate_inst%Summary); FATES columns carry no CN veg
+        # carbon (`if (col%is_fates(c)) totvegc_col = 0`), so the veg aggregates stay 0.
+        if (config.use_cn || config.use_fates_bgc) && _decomp_initialized(inst.decomp_cascade)
             _scs = inst.soilbiogeochem_carbonstate
             _sns = inst.soilbiogeochem_nitrogenstate
             _dc  = inst.decomp_cascade
@@ -2651,13 +2667,15 @@ function clm_drv_core!(config::CLMDriverConfig,
             # were themselves dead. Same story verbatim on the N side (totn_p2c_col).
             _tvc  = zeros(bc.endc); _tvn  = zeros(bc.endc)
             _tp2c = zeros(bc.endc); _tn2c = zeros(bc.endc)
-            p2c_1d!(_tvc,  _ccs.totvegc_patch, bc, "unity", pch)
-            p2c_1d!(_tvn,  _cns.totvegn_patch, bc, "unity", pch)
-            p2c_1d!(_tp2c, _ccs.totc_patch,    bc, "unity", pch)
-            p2c_1d!(_tn2c, _cns.totn_patch,    bc, "unity", pch)
-            # Keep the canonical fields in sync (they are history/restart outputs).
-            if !isempty(_ccs.totc_p2c_col); copyto!(_ccs.totc_p2c_col, _tp2c); end
-            if !isempty(_cns.totn_p2c_col); copyto!(_cns.totn_p2c_col, _tn2c); end
+            if config.use_cn
+                p2c_1d!(_tvc,  _ccs.totvegc_patch, bc, "unity", pch)
+                p2c_1d!(_tvn,  _cns.totvegn_patch, bc, "unity", pch)
+                p2c_1d!(_tp2c, _ccs.totc_patch,    bc, "unity", pch)
+                p2c_1d!(_tn2c, _cns.totn_patch,    bc, "unity", pch)
+                # Keep the canonical fields in sync (they are history/restart outputs).
+                if !isempty(_ccs.totc_p2c_col); copyto!(_ccs.totc_p2c_col, _tp2c); end
+                if !isempty(_cns.totn_p2c_col); copyto!(_cns.totn_p2c_col, _tn2c); end
+            end
             soil_bgc_carbon_state_summary!(_scs, filt.allc, bc_col;
                 nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
                 dzsoi_decomp_vals=dzsoi_decomp[], zisoi_vals=zisoi[],
@@ -2692,8 +2710,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     # FATES dynamics
     # ========================================================================
     if config.use_fates
-        # Placeholder: clm_fates%WrapUpdateFatesRmean(...) [FATES running mean]
-        # Placeholder: clm_fates%wrap_update_hifrq_hist(...) [FATES history]
+        # clm_fates%wrap_update_hifrq_hist (clm_driver.F90:1132): hand this step's soil
+        # HR / SOMC / LITC to FATES (bc_in.tot_het_resp/tot_somc/tot_litc; zero without
+        # soil decomposition) and fill the per-timestep FATES history — site GPP/AR/NEP/
+        # HR + conductance + veg-temp + radiation-error diagnostics. Write-only; no-op
+        # until the history interface is built (clm_fates_init!). (The FATES running
+        # means, which Fortran updates just before this, are rolled in the canopy-flux
+        # block above.)
+        if inst.fates !== nothing
+            fates_wrap_update_hifrq_hist!(inst; dtime=dtime,
+                decomp_active=config.use_fates_bgc && config.decomp_method != config.no_soil_decomp)
+        end
 
         # FATES parity instrumentation — "fast" (sub-daily) phase. Fires on EVERY
         # timestep at exactly the point the Fortran clm_driver does (after the
