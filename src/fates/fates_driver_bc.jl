@@ -200,7 +200,14 @@ function fates_set_filters!(inst::CLMInstances; c::Int, s::Int, set_active::Bool
     if !isempty(pch.is_bareground); pch.is_bareground[bg] = true; end
     wt_bg = max(0.0, 1.0 - sum_canopy)
     if !isempty(pch.wt_ed); pch.wt_ed[bg] = wt_bg; end
-    pch.wtcol[bg] = wt_bg
+    # The HLM weight itself (wtcol) only moves here at the cold start. On the daily
+    # step Fortran wrap_update_hlmfates_dyn writes patch%wt_ed alone; wtcol = wt_ed is
+    # applied by dynSubgrid_driver -> dyn_ED (dynEDMod.F90:34) at the top of the NEXT
+    # timestep, before BeginWaterColumnBalance. Re-weighting mid-step moved the
+    # per-patch canopy water / plant storage between begwb and endwb (an errh2o of
+    # ~1e-4 mm once the CLM5 interception put water on the canopy).
+    # fates_apply_deferred_activation! is that dyn_ED.
+    set_active && (pch.wtcol[bg] = wt_bg)
 
     # Vegetated HLM patches (+ifp): weight = canopy_fraction_pa[ifp].
     for (ifp, p) in fates_veg_patches(site, c, col)
@@ -208,16 +215,14 @@ function fates_set_filters!(inst::CLMInstances; c::Int, s::Int, set_active::Bool
              bc_out.canopy_fraction_pa[ifp] : 0.0
         if !isempty(pch.is_veg); pch.is_veg[p] = true; end
         if !isempty(pch.wt_ed);  pch.wt_ed[p] = wt;    end
-        pch.wtcol[p] = wt
-        set_active && (pch.active[p] = true)
+        set_active && (pch.wtcol[p] = wt; pch.active[p] = true)
     end
 
     # Reserved-but-unused vegetated slots (a fuse/merge can leave fewer live
     # patches than were reserved): zero them and mark inactive so the column
     # averaging skips them.
     for p in (pi + npatch + 1):pf
-        pch.wtcol[p] = 0.0
-        set_active && (pch.active[p] = false)
+        set_active && (pch.wtcol[p] = 0.0; pch.active[p] = false)
     end
 
     return inst
@@ -250,6 +255,19 @@ function fates_apply_deferred_activation!(inst::CLMInstances)
         col.is_fates[c] || continue
         pi = col.patchi[c]; pf = col.patchf[c]
         (1 <= pi && pi <= pf && pf <= length(pch.active)) || continue
+        # dyn_ED (dynEDMod.F90:30-38): wtcol = wt_ed on the FATES column's veg and
+        # bare-ground patches, 0 elsewhere -- then is_active_p.
+        if !isempty(pch.wt_ed)
+            for p in pi:pf
+                isv = !isempty(pch.is_veg) && pch.is_veg[p]
+                isb = !isempty(pch.is_bareground) && pch.is_bareground[p]
+                if isv || isb
+                    isfinite(pch.wt_ed[p]) && (pch.wtcol[p] = pch.wt_ed[p])
+                else
+                    pch.wtcol[p] = 0.0
+                end
+            end
+        end
         for p in pi:pf
             pch.active[p] = col.active[c] && pch.wtcol[p] > 0.0
         end
