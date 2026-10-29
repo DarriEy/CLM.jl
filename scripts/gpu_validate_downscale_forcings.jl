@@ -136,12 +136,25 @@ function reference!(f)
                 (rho_est_c / rho_est_g)
         end
     end
+    # pco2/po2: rescaled ONCE per gridcell by (weighted-mean column pbot_ds) /
+    # pbot_nd, mirroring the two-pass kernels from 5d27c43/15b7601 (the old
+    # per-column `(x/pbot_nd)*pbot_ds` reference here predates them and compounded
+    # the ratio for multi-column gridcells). Weight = wtgcell, NaN -> 1, <0 -> 0.
+    ng = length(a2l.forc_pco2_grc)
+    psum = zeros(ng); wsum = zeros(ng)
     for c in bc_col
         g = col.gridcell[c]
-        pbot_nd = a2l.forc_pbot_not_downscaled_grc[g]; pbot_ds = a2l.forc_pbot_downscaled_col[c]
+        w = col.wtgcell[c]; w = isfinite(w) ? max(w, 0.0) : 1.0
+        psum[g] += a2l.forc_pbot_downscaled_col[c] * w
+        wsum[g] += w
+    end
+    for g in 1:ng
+        pbot_nd = a2l.forc_pbot_not_downscaled_grc[g]
+        pbot_ds = wsum[g] > 0.0 ? psum[g] / wsum[g] : 0.0
         if pbot_nd > 0.0 && pbot_ds > 0.0
-            a2l.forc_pco2_grc[g] = (a2l.forc_pco2_grc[g] / pbot_nd) * pbot_ds
-            a2l.forc_po2_grc[g]  = (a2l.forc_po2_grc[g]  / pbot_nd) * pbot_ds
+            r = pbot_ds / pbot_nd
+            a2l.forc_pco2_grc[g] *= r
+            a2l.forc_po2_grc[g]  *= r
         end
     end
     # partition_precip

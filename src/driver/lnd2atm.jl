@@ -154,6 +154,9 @@ end
 # lnd2atm_rof! — the `! lnd -> rof` block of `lnd2atm`
 # =========================================================================
 
+# Non-finite dynbal correction = "unset" = no correction (see lnd2atm_rof! below).
+@inline _finite_or_zero(d) = isfinite(d) ? d : zero(d)
+
 """
     lnd2atm_rof!(l2a, waterflux, col, lun, grc, bounds_c, bounds_l, bounds_g;
                  use_hillslope_routing = false,
@@ -215,9 +218,8 @@ function lnd2atm_rof!(
         hillslope_streamflow_to_grc!(l2a.qflx_rofliq_stream_grc,
             wf.volumetric_streamflow_lun, lun, grc, bounds_l, bounds_g)
     else
-        for g in bounds_g
-            l2a.qflx_rofliq_stream_grc[g] = zero(eltype(l2a.qflx_rofliq_stream_grc))
-        end
+        # Broadcast, not a scalar loop: these are device arrays on a GPU inst.
+        fill!(view(l2a.qflx_rofliq_stream_grc, bounds_g), zero(eltype(l2a.qflx_rofliq_stream_grc)))
     end
 
     # --- surface / subsurface / perched runoff (lnd2atmMod.F90:356-415) ---
@@ -257,13 +259,12 @@ function lnd2atm_rof!(
     # which is what an unwritten field means.
     c2g_urbanf!(l2a.qflx_rofliq_qgwl_grc, wf.qflx_qrgwl_col, col, lun, bounds_c, bounds_g)
     c2g_urbanf!(l2a.qflx_rofliq_grc, wf.qflx_runoff_col, col, lun, bounds_c, bounds_g)
+    # Broadcast form (device-safe): a non-finite d contributes exactly 0, and
+    # x - 0.0 == x bit-for-bit, so this equals the skip-if-non-finite scalar loop.
     if length(wf.qflx_liq_dynbal_grc) >= last(bounds_g)
-        for g in bounds_g
-            d = wf.qflx_liq_dynbal_grc[g]
-            isfinite(d) || continue
-            l2a.qflx_rofliq_qgwl_grc[g] -= d
-            l2a.qflx_rofliq_grc[g]      -= d
-        end
+        d = view(wf.qflx_liq_dynbal_grc, bounds_g)
+        view(l2a.qflx_rofliq_qgwl_grc, bounds_g) .-= _finite_or_zero.(d)
+        view(l2a.qflx_rofliq_grc, bounds_g)      .-= _finite_or_zero.(d)
     end
 
     # --- irrigation withdrawal (lnd2atmMod.F90:455-458) ---
@@ -272,10 +273,8 @@ function lnd2atm_rof!(
     # --- ice runoff, minus the dynbal correction (lnd2atmMod.F90:460-468) ---
     c2g_urbanf!(l2a.qflx_rofice_grc, l2a.qflx_ice_runoff_col, col, lun, bounds_c, bounds_g)
     if length(wf.qflx_ice_dynbal_grc) >= last(bounds_g)
-        for g in bounds_g
-            d = wf.qflx_ice_dynbal_grc[g]
-            isfinite(d) && (l2a.qflx_rofice_grc[g] -= d)
-        end
+        view(l2a.qflx_rofice_grc, bounds_g) .-=
+            _finite_or_zero.(view(wf.qflx_ice_dynbal_grc, bounds_g))
     end
 
     # --- total evapotranspiration (waterlnd2atm_type%qflx_evap_tot_grc) ---
