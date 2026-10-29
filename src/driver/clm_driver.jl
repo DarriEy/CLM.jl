@@ -1323,12 +1323,19 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # BIOGEOPHYSICS PRE-FLUX CALCULATIONS — WIRED
     # ========================================================================
+    # FATES: TransferZ0mDisp, and SetZ0mDisp skips the FATES patches
+    # (BiogeophysPreFluxCalcsMod.F90:162-173).
+    fates_pif = nothing
+    if config.use_fates && inst.fates !== nothing
+        fates_transfer_z0m_disp!(inst)
+        fates_pif = fates_patch_is_fates(inst)
+    end
     biogeophys_pre_flux_calcs!(cs, ef, fv, temp, ss, wsb, wdb, wfb,
                                 col, lun, pch,
                                 a2l.forc_t_downscaled_col, a2l.forc_th_downscaled_col, forc_q_col,
                                 a2l.forc_hgt_u_grc, a2l.forc_hgt_t_grc, a2l.forc_hgt_q_grc,
                                 filt.nolakec, filt.nolakep, filt.urbanc,
-                                bc_col, bc_patch)
+                                bc_col, bc_patch; patch_is_fates=fates_pif)
 
     # Soil evaporation resistance (soilbeta or soilresis)
     calc_soilevap_resis!(col, lun, ss, wsb, wdb, temp,
