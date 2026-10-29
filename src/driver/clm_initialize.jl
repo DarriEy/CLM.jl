@@ -134,6 +134,24 @@ function clm_initialize!(;
     # 2 = CNP (prt_cnp_flex_allom_hyp). Under CLM, CNP runs with prescribed N/P
     # uptake (fates_cnp_prescribed_nuptake/puptake; see clm_fates_init!).
     fates_parteh_mode::Int = 1,
+    # FATES land use (CTSM &clm_inparm). All off by default.
+    #   * fates_harvest_mode: 'no_harvest' | 'event_code' (FATES logging on the
+    #     fates_landuse_logging_event_code schedule) | 'luhdata_area' / 'luhdata_mass'
+    #     (logging at the LUH2 harvest rates, area fraction or carbon; need use_fates_luh)
+    #   * use_fates_luh: LUH2 land-use states + transitions from `fluh_timeseries`
+    #     (with fixed biogeography also the landuse x PFT map `flandusepftdat`)
+    #   * use_fates_lupft: build-namelist shorthand for luh + nocomp + fixed biogeog
+    #     with the landuse x PFT map (no runtime switch of its own)
+    #   * use_fates_potentialveg: LUH bookkeeping with potential vegetation only (no
+    #     LUH2 file is read)
+    fates_harvest_mode::AbstractString = "no_harvest",
+    use_fates_luh::Bool = false,
+    use_fates_lupft::Bool = false,
+    use_fates_potentialveg::Bool = false,
+    fluh_timeseries::AbstractString = "",
+    flandusepftdat::AbstractString = "",
+    # FATES parameter file (.cdl); default data/fates/fates_params_default.cdl.
+    fates_paramfile::AbstractString = FATES_PARAMS_DEFAULT_CDL,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
     # CTSM use_fates_planthydro (clm_varctl): FATES plant hydraulics, default 1-D
@@ -262,6 +280,17 @@ function clm_initialize!(;
     # (disturbance) patches are dropped from the HLM coupling.
     varctl.use_fates = use_fates
     if use_fates
+        # namelist_defaults_ctsm.xml: use_fates_lupft turns on use_fates_luh,
+        # use_fates_nocomp and use_fates_fixed_biogeog; the LUH harvest modes and
+        # potential vegetation turn on use_fates_luh.
+        use_fates_lupft && (use_fates_luh = use_fates_nocomp = use_fates_fixed_biogeog = true)
+        (fates_harvest_mode in ("luhdata_area", "luhdata_mass") || use_fates_potentialveg) &&
+            (use_fates_luh = true)
+        use_fates_lupft && isempty(flandusepftdat) &&
+            error("clm_initialize!: flandusepftdat is required when use_fates_lupft is true")
+        use_fates_potentialveg && !isempty(fluh_timeseries) &&
+            error("clm_initialize!: fluh_timeseries can not be defined when " *
+                  "use_fates_potentialveg is true")
         use_fates_sp && !(use_fates_nocomp && use_fates_fixed_biogeog) &&
             error("clm_initialize!: use_fates_sp requires use_fates_nocomp=true and " *
                   "use_fates_fixed_biogeog=true (FATES: 'SP cannot be on if nocomp " *
@@ -276,7 +305,16 @@ function clm_initialize!(;
     else
         (use_fates_sp || use_fates_nocomp || use_fates_fixed_biogeog) &&
             error("clm_initialize!: use_fates_sp/nocomp/fixed_biogeog require use_fates=true")
+        (use_fates_luh || use_fates_lupft || use_fates_potentialveg ||
+         fates_harvest_mode != "no_harvest") &&
+            error("clm_initialize!: the FATES land-use options require use_fates=true")
     end
+    varctl.use_fates_luh = use_fates && use_fates_luh
+    varctl.use_fates_lupft = use_fates && use_fates_lupft
+    varctl.use_fates_potentialveg = use_fates && use_fates_potentialveg
+    varctl.fates_harvest_mode = String(fates_harvest_mode)
+    varctl.fluh_timeseries = String(fluh_timeseries)
+    varctl.flandusepftdat = String(flandusepftdat)
     varctl.use_fates_sp = use_fates && use_fates_sp
     varctl.use_fates_nocomp = use_fates && use_fates_nocomp
     varctl.use_fates_fixed_biogeog = use_fates && use_fates_fixed_biogeog
@@ -300,7 +338,8 @@ function clm_initialize!(;
     # surface PFT+CFT (numpft here is the max natpft index, so the count is numpft+1).
     varctl.fates_maxpatch = use_fates ?
         fates_max_patches_per_site(; use_sp = use_fates_sp, use_nocomp = use_fates_nocomp,
-                                   surf_numpft = numpft + 1, surf_numcft = numcft) - 1 : 0
+                                   surf_numpft = numpft + 1, surf_numcft = numcft,
+                                   cdl_path = fates_paramfile) - 1 : 0
 
     # ---- Step 3: Initialize varpar dimensions ----
     varpar_init!(varpar, 1, numpft, numcft, nlevurb)
@@ -897,6 +936,12 @@ function clm_initialize!(;
                         fates_biogeog_screen = fates_biogeog_screen,
                         use_vertsoilc = _fates_bgc,
                         decomp_method = _fates_bgc ? "CENTURY" : "CTC",
+                        params_path = fates_paramfile,
+                        harvest_mode = fates_harvest_mode,
+                        use_luh = use_fates_luh,
+                        use_potentialveg = use_fates_potentialveg,
+                        fluh_timeseries = fluh_timeseries,
+                        flandusepftdat = flandusepftdat,
                         use_planthydro = use_fates_planthydro,
                         dtime = dtime,
                         _fates_parteh_kwargs(fates_parteh_mode, _fates_bgc)...)

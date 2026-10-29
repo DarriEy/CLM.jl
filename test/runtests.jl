@@ -436,6 +436,9 @@ using CLM
     # plant water in the column budget, hydraulic-failure mortality, RestartHydrStates,
     # and woody leaf water potential vs the Fortran fates_parity_1pt run (data-gated).
     include("test_fates_planthydro_coupling.jl")
+    # FATES land use: fates_harvest_mode switches, the host LUH2 reader / landuse x
+    # PFT data, and data-gated logging + LUH2 runs scored against Fortran CTSM.
+    include("test_fates_landuse.jl")
 
     # These tests each pass STANDALONE but flake when run in-process after the
     # full suite — a cumulative global-state effect (precompile / method-

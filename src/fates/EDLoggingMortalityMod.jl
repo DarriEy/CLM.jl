@@ -218,12 +218,15 @@ function LoggingMortality_frac(currentSite::ed_site_type, bc_in::bc_in_type,
                 # 0 = use fates logging parameters directly: harvest the whole
                 # cohort area.
                 harvest_rate = 1.0
-                # UPSTREAM-FORTRAN QUIRK: on this path the Fortran never assigns
-                # cur_harvest_tag (it is an uninitialized local), yet the direct-
-                # logging block below gates on `cur_harvest_tag == 0`. The fates-
-                # parameter path is intended to directly log, so we make the
-                # "successful harvest" tag (0) explicit here.
-                cur_harvest_tag = 0
+                # UPSTREAM-FORTRAN QUIRK: on this path the FATES of ctsm5.3.012 never
+                # assigns cur_harvest_tag (an uninitialized local), yet the direct-
+                # logging block below gates on `cur_harvest_tag == 0`. The reference
+                # cesm.exe does NOT directly log here (validated: logging-day litter
+                # and biomass loss match only with the direct term off), i.e. the tag
+                # behaves as "not applicable" (2), the value every other non-carbon
+                # path assigns. (Later FATES sets fates_bypass_harvest_debt here and
+                # lets the bypass tag log directly.)
+                cur_harvest_tag = 2
 
             elseif hlm_use_lu_harvest[] == itrue &&
                    hlm_harvest_units == hlm_harvest_area_fraction

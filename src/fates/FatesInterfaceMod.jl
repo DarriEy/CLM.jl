@@ -92,6 +92,9 @@ Base.@kwdef mutable struct fates_interface_type <: AbstractFatesInterface
     # (update_history_dyn1!) and per-timestep (update_history_hifrq1!) fills write
     # into its buffers. Write-only diagnostics — never read back into the sim.
     hist::Union{fates_history_interface_type,Nothing} = nothing
+    # Host LUH2 land-use data (dynFATESLandUseChangeMod module state; the CTSM
+    # side, not FATES). `nothing` unless use_fates_luh (fates_driver_landuse.jl).
+    luh::Union{DynFatesLandUse,Nothing} = nothing
 end
 
 # ===========================================================================
