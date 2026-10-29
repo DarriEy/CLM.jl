@@ -5,6 +5,8 @@
 #   CLM_REVERSE_SURFACE=0|1  include surface-hydrology phases (default 1)
 #   CLM_REVERSE_NCANOPY=N    fixed differentiated Newton iterations (default 2)
 #   CLM_REVERSE_CPU=0|1       also run the expensive CPU reverse parity leg (default 0)
+#   CLM_REVERSE_FD=0|1        central finite-difference check of dL/d(t_grnd) on the
+#                             CUDA forward chain (default 1; forward-only, cheap)
 #   CLM_REVERSE_PHASES=N       reverse only the first N assembled phases (diagnostic)
 #   CLM_REVERSE_PHASE_START=N  start at phase N for isolated compilation (default 1)
 #   CLM_REVERSE_DRIVER_PHASE=S isolate a named top-level driver phase (diagnostic)
@@ -69,12 +71,43 @@ function warmed_state()
     inst, bounds, filt, config
 end
 
+# Forward-only loss of the exact chain clm_drv_reverse! differentiates, with the
+# step-entry t_grnd[c0] shifted by δ. Runs on whatever backend `inst` lives on.
+# Returns the soil-layer t_soisno profile; L = sum(abs2, ·) over finite entries.
+function forward_profile(inst, bounds, filt, config, c0, δ;
+                         include_canopy, include_surface, ncanopy)
+    i = deepcopy(inst)
+    tg = Array(i.temperature.t_grnd_col); tg[c0] += δ
+    copyto!(i.temperature.t_grnd_col, tg)
+    b = CLM.driver_rev_bundle(i)
+    caux = include_canopy ? CLM.canopy_rev_aux(i, bounds, filt) : nothing
+    phases = CLM.driver_rev_phases(bounds, filt, config; canopy_aux = caux, inst = i,
+        n_canopy = max(ncanopy, 1), dtime = 1800.0, include_surface = include_surface)
+    for entry in phases
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(b), cargs...)
+    end
+    j0 = CLM.varpar.nlevsno + 1
+    return Array(b.inst.temperature.t_soisno_col)[:, j0:end]
+end
+
+# Central difference of L = sum(abs2, soil t_soisno). Columns the perturbation cannot
+# reach cancel exactly; non-finite (inactive/spval) entries are excluded.
+function fd_gradient(inst, bounds, filt, config, c0, h; kw...)
+    tp = forward_profile(inst, bounds, filt, config, c0, h; kw...)
+    tm = forward_profile(inst, bounds, filt, config, c0, -h; kw...)
+    d = abs2.(tp) .- abs2.(tm)
+    return sum(filter(isfinite, vec(d))) / (2h)
+end
+
 function main()
     CUDA.functional() || error("CUDA is not functional")
     include_canopy = get(ENV, "CLM_REVERSE_CANOPY", "1") == "1"
     include_surface = get(ENV, "CLM_REVERSE_SURFACE", "1") == "1"
     ncanopy = parse(Int, get(ENV, "CLM_REVERSE_NCANOPY", "2"))
     run_cpu = get(ENV, "CLM_REVERSE_CPU", "0") == "1"
+    run_fd = get(ENV, "CLM_REVERSE_FD", "1") == "1"
 
     inst64, bounds, filt, config = warmed_state()
     # CUDA supports CLM's native Float64 state. Only unpack packed Bool masks
@@ -85,6 +118,9 @@ function main()
                                CLM.Adapt.adapt(_CUDAHost(), deepcopy(inst64)))
     filt_gpu = CLM.Adapt.adapt(CUDA.CuArray,
                                CLM.Adapt.adapt(_CUDAHost(), deepcopy(filt)))
+    # clm_drv_reverse! leaves its inst at the step's final state; keep an entry copy
+    # for the finite-difference leg.
+    inst_gpu_entry = run_fd ? deepcopy(inst_gpu) : nothing
 
     kwargs = (; include_canopy, include_surface,
                n_canopy = include_canopy ? ncanopy : nothing)
@@ -113,19 +149,7 @@ function main()
     elseif maxphases > 0
         b_gpu = CLM.soiltemp_rev_bundle(inst_gpu)
         caux = include_canopy ? CLM.canopy_rev_aux(inst_gpu, bounds, filt_gpu) : nothing
-        staux = CLM.soiltemp_rev_aux(bounds, filt_gpu)
-        phases = Any[(CLM.soiltemp_tk_layers_array_phase!, (staux,), CLM.soiltemp_tk_layers_view),
-                     (CLM.soiltemp_tk_interface_array_phase!, (staux,), CLM.soiltemp_tk_interface_view),
-                     (CLM.soiltemp_cv_array_phase!, (staux,), CLM.soiltemp_cv_view),
-                     (CLM.soiltemp_lwrad_array_phase!, (staux,), CLM.soiltemp_lwrad_view),
-                     (CLM.soiltemp_gnet_patch_rural_array_phase!, (staux,), CLM.soiltemp_gnet_patch_rural_view),
-                     (CLM.soiltemp_gnet_patch_rural_contrib_array_phase!, (staux,), CLM.soiltemp_gnet_patch_rural_contrib_view),
-                     (CLM.soiltemp_gnet_patch_urban_array_phase!, (staux,), CLM.soiltemp_gnet_patch_view),
-                     (CLM.soiltemp_gnet_patch_reduce_array_phase!, (staux,), CLM.soiltemp_gnet_patch_view),
-                     (CLM.soiltemp_gnet_snicar_rev_phase!, (staux,)),
-                     (CLM.soiltemp_heatdiff_rev_phase!, (staux,)),
-                     (CLM.soiltemp_solve_rev_phase!, (staux,)),
-                     (CLM.soiltemp_post_rev_phase!, (staux,))]
+        phases = CLM.soiltemp_driver_rev_phases(bounds, filt_gpu)
         phase_start = parse(Int, get(ENV, "CLM_REVERSE_PHASE_START", "1"))
         phase_stop = min(phase_start + maxphases - 1, length(phases))
         phases = phases[phase_start:phase_stop]
@@ -173,6 +197,22 @@ function main()
     else
         @printf("  dL/d(t_grnd[%d]): CUDA=% .8e; max|dL/d(t_soisno)|=%.3e (CPU parity skipped)\n",
                 c0, ggpu, gmax)
+    end
+    if run_fd && maxphases == 0 && isempty(driver_phase)
+        println("starting CUDA finite-difference check ..."); flush(stdout)
+        fkw = (; include_canopy, include_surface, ncanopy)
+        hs = (1e-2, 5e-3, 2.5e-3)
+        fds = [fd_gradient(inst_gpu_entry, bounds, filt_gpu, config, c0, h; fkw...) for h in hs]
+        for (h, f) in zip(hs, fds)
+            @printf("  FD(h=%.2e) = % .8e\n", h, f)
+        end
+        g_rich = (4 * fds[end] - fds[end-1]) / 3
+        lo, hi = extrema(fds)
+        bracketed = (lo - abs(lo) * 1e-9) <= ggpu <= (hi + abs(hi) * 1e-9)
+        rel = abs(ggpu - g_rich) / max(abs(g_rich), 1e-12)
+        @printf("  dL/d(t_grnd[%d]): CUDA reverse=% .8e Richardson FD=% .8e rel=%.3e bracketed=%s\n",
+                c0, ggpu, g_rich, rel, string(bracketed))
+        pass &= rel < 5e-5 || bracketed
     end
     println(pass ? "  PASS ✓" : "  FAIL ✗")
     return pass ? 0 : 1

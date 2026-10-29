@@ -43,15 +43,30 @@ include(joinpath(@__DIR__, "testdata.jl"))
     c0 = first(c for c in bounds.begc:bounds.endc if hc[c])
     j1 = CLM.varpar.nlevsno + 1
 
-    # assembler (forward order): 12 allocation-free soil-temperature phases + the
-    # 10-phase surface-hydrology block + soil_water + water_table +
-    # hydrology_no_drainage = 25. Canopy is flattened too: with one energy-only
-    # iteration it adds init + friction + resistance + energy = 4. Without surface: 15.
+    # assembler (forward order): 13 allocation-free soil-temperature phases (setup +
+    # 12 physics) + the 10-phase surface-hydrology block + soil_water + water_table +
+    # hydrology_no_drainage = 26. Canopy is flattened too: with one energy-only
+    # iteration it adds init + friction + resistance + energy = 4. Without surface: 16.
     ph = CLM.driver_rev_phases(bounds, filt, config)
-    @test length(ph) == 25
+    @test length(ph) == 26
     @test length(CLM.driver_rev_phases(bounds, filt, config;
-        canopy_aux=(; use_psn=false), n_canopy=1)) == 29
-    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 15
+        canopy_aux=(; use_psn=false), n_canopy=1)) == 30
+    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 16
+
+    # The decomposed soil-temperature phases reproduce production soil_temperature!
+    # exactly (the CUDA reverse runs the decomposition, the CPU driver the monolith).
+    let bdec = CLM.driver_rev_bundle(deepcopy(inst)), imono = deepcopy(inst)
+        for entry in CLM.soiltemp_driver_rev_phases(bounds, filt)
+            entry[1](entry[3](bdec), entry[2]...)
+        end
+        CLM.soiltemp_rev_phase!((; inst=imono), CLM.soiltemp_rev_aux(bounds, filt))
+        for f in (:t_soisno_col, :t_grnd_col, :t_h2osfc_col)
+            a = getfield(bdec.inst.temperature, f); m = getfield(imono.temperature, f)
+            @test isequal(a, m)
+        end
+        @test isequal(bdec.inst.energyflux.eflx_fgr_col, imono.energyflux.eflx_fgr_col)
+        @test isequal(bdec.inst.energyflux.eflx_gnet_patch, imono.energyflux.eflx_gnet_patch)
+    end
     @test length(CLM.surface_hydrology_rev_phases(bounds, filt)) == 10
 
     # run the full assembled chain forward on the shared-inst bundle.
@@ -98,7 +113,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # validated on Julia 1.10/Enzyme in scripts/enzyme_driver_reverse_fullstep.jl).
     caux = CLM.canopy_rev_aux(inst, bounds, filt)
     full = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4)
-    @test length(full) == 38
+    @test length(full) == 39
     bf = CLM.driver_rev_bundle(deepcopy(inst))
     for entry in full
         f, cargs = entry[1], entry[2]

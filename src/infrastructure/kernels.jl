@@ -81,6 +81,10 @@ const _DEFER_GPU_SYNC = Ref(false)
 @inline _to_backend_like(::Array, ::Type, v::AbstractArray{<:Integer}) = v
 @inline _to_backend_like(proto, ::Type{FT}, v::AbstractArray{<:Integer}) where {FT} =
     typeof(proto).name.wrapper(v)
+# A host BitArray mask (the CPU filter type) is a host prototype too: returning `v`
+# avoids rebuilding the constants as a BitArray (`BitArray(FT.(v))` would truncate to Bool).
+@inline _to_backend_like(::BitArray, ::Type, v::AbstractArray) = v
+@inline _to_backend_like(::BitArray, ::Type, v::AbstractArray{<:Integer}) = v
 
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out

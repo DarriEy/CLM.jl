@@ -667,9 +667,35 @@ end
 # GPU fill! allocations, which turns the fill value into an unsupported active
 # kernel scalar. These entries expose the existing launch boundaries and narrow
 # views, while preserving the production routine's forward ordering.
+#
+# The setup phase mirrors soil_temperature!'s pre-solve bookkeeping: the band-solve
+# extents jtop/jbot (without it the solve indexes the -9999 scratch sentinel — an
+# illegal device address on CUDA) and, under the simple building-temperature
+# option, building_hac!'s cool_on/heat_on flags. Both are integer/Bool outputs.
+soiltemp_setup_view(b) = let i=b.inst, s=b.soiltemp
+    (; jtop=s.jtop, jbot=s.jbot, snl=i.column.snl, col_itype=i.column.itype,
+       landunit=i.landunit, temperature=i.temperature, urbanparams=i.urbanparams,
+       cool_on=s.cool_on, heat_on=s.heat_on)
+end
+
+function soiltemp_setup_rev_phase!(x, aux)
+    varctl.use_excess_ice &&
+        error("soiltemp_driver_rev_phases: use_excess_ice is not decomposed")
+    if is_simple_build_temp()
+        urbantv = _to_backend_like(x.temperature.t_grnd_col,
+                                   eltype(x.temperature.t_grnd_col), aux.urbantv)
+        building_hac!(x.landunit, x.temperature, x.urbanparams, urbantv,
+                      aux.urbanl, aux.bc_lun, x.cool_on, x.heat_on)
+    end
+    _launch!(_jtop_jbot_kernel!, x.jtop, x.jbot, aux.nolakec, x.snl, x.col_itype,
+             varpar.nlevurb, varpar.nlevgrnd)
+    nothing
+end
+
 function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
     a = soiltemp_rev_aux(bounds, filt; dtime)
     return Any[
+        (soiltemp_setup_rev_phase!, (a,), soiltemp_setup_view),
         (soiltemp_tk_layers_array_phase!, (a,), soiltemp_tk_layers_view),
         (soiltemp_tk_interface_array_phase!, (a,), soiltemp_tk_interface_view),
         (soiltemp_cv_array_phase!, (a,), soiltemp_cv_view),
