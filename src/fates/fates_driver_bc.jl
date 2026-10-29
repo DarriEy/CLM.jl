@@ -267,19 +267,6 @@ function fates_apply_deferred_activation!(inst::CLMInstances)
 end
 
 """
-    _fates_first_fates_column(col) -> Int
-
-Return the index of the first `col.is_fates` column, or 0 if there is none.
-Convenience for the single-site MVP host glue (driver fire-weather derivation).
-"""
-function _fates_first_fates_column(col)
-    for c in 1:length(col.is_fates)
-        col.is_fates[c] && return c
-    end
-    return 0
-end
-
-"""
     fates_in_vegsol_filter(inst, p, coszen) -> Bool
 
 Is HLM patch `p` in CLM's SOLAR-VEGETATED filter (`filter_vegsol`)?
@@ -577,8 +564,12 @@ Fill the FATES *daily* demographic `bc_in` soil state for site `s` from CLM colu
     flux being live); otherwise zeroed, matching the Fortran else-branch.
   * `max_rooting_depth_index_col` — left as set by `clm_fates_init!`.
 
-Fire drivers (lightning/pop/RH24/wind24/precip24), SP-LAI streams, harvest/LUH
-arrays are intentionally NOT packed — those configs are off on this MVP path.
+  * `precip24_pa` / `relhumid24_pa` / `wind24_pa` — SPITFIRE fire weather, the
+    HLM's per-patch 24-hour running means (`prec24_patch` / `rh24_patch` /
+    `wind24_patch`) for each vegetated FATES patch, as Fortran `dynamics_driv`.
+
+Lightning / population-density streams (SPITFIRE modes 2-5), SP-LAI streams and
+harvest/LUH arrays are NOT packed — those configs are off on this path.
 
 This reuses the same soil-state slice as `fates_pack_bcin_btran!`; calling both in
 one step is harmless (idempotent on the soil fields). The decomposition scalars
@@ -659,22 +650,55 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         end
     end
 
-    # SPITFIRE fire-weather drivers (per-patch 24-hour running means the fire model
-    # reads in `update_fire_weather!` / `area_burnt_intensity!`). Packed only when
-    # SPITFIRE is on (`fire_weather` supplied); the carbon-only default leaves these
-    # zero (allocate_bcin already zeroed them), matching the no_fire path which never
-    # reads them. The fire model indexes these by patchno (1-based vegetated patch),
-    # so fill the whole allocated span with the representative site values; the
-    # bareground patch (patchno 0) is skipped inside the fire model.
+    # Fire-weather drivers: the per-patch 24-hour running means SPITFIRE reads in
+    # `update_fire_weather!` / `area_burnt_intensity!`. Fortran `dynamics_driv`
+    # (clmfates_interfaceMod.F90) fills them for every vegetated FATES patch from the
+    # HLM accumulators, unconditionally under use_fates:
+    #     do ifp = 1, sites(s)%youngest_patch%patchno
+    #        p = ifp + col%patchi(c)
+    #        bc_in(s)%precip24_pa(ifp)   = wateratm2lndbulk_inst%prec24_patch(p)
+    #        bc_in(s)%relhumid24_pa(ifp) = wateratm2lndbulk_inst%rh24_patch(p)
+    #        bc_in(s)%wind24_pa(ifp)     = atm2lnd_inst%wind24_patch(p)
+    # Only the fire model reads these, so the no-fire path is unaffected.
+    # `fire_weather` (a NamedTuple of site scalars) overrides the accumulators — a
+    # test hook for driving the fire chain without stepping the host.
+    a2l = inst.atm2lnd
+    ysite = fates.sites[s].youngest_patch
+    npatch_fates = ysite === nothing ? 0 : ysite.patchno
+    npa = min(npatch_fates, length(bc.precip24_pa))
     if fire_weather !== nothing
         fw = fire_weather
-        np_fire = length(bc.precip24_pa)
-        @inbounds for ip in 1:np_fire
+        @inbounds for ip in 1:npa
             bc.precip24_pa[ip]   = fw.precip24      # [mm/s]
             bc.relhumid24_pa[ip] = fw.relhumid24    # [%]
             bc.wind24_pa[ip]     = fw.wind24        # [m/s]
             bc.lightning24[ip]   = get(fw, :lightning24, 0.0)  # [#/km2/day]
             bc.pop_density[ip]   = get(fw, :pop_density, 0.0)  # [#/km2]
+        end
+    else
+        # Ignition drivers, modes > scalar_lightning (dynamics_driv):
+        #     bc_in(s)%lightning24(ifp) = lnfm24(g) * 24._r8   ! #/km2/hr -> #/km2/day
+        #     if (fates_spitfire_mode >= anthro_ignitions) &
+        #        bc_in(s)%pop_density(ifp) = fates_fire_data_method%forc_hdm(g)
+        ffd = inst.fates_fire_data
+        if hlm_spitfire_mode[] > hlm_sf_scalar_lightning_def[] && fates_fire_data_active(ffd)
+            g = inst.column.gridcell[c]
+            @inbounds for ip in 1:min(npatch_fates, length(bc.lightning24))
+                bc.lightning24[ip] = ffd.lnfm24[g] * 24.0
+                if hlm_spitfire_mode[] >= hlm_sf_anthro_ignitions_def[]
+                    bc.pop_density[ip] = ffd.forc_hdm[g]
+                end
+            end
+        end
+    end
+    if fire_weather === nothing && length(a2l.prec24_patch) > 0 && length(a2l.wind24_patch) > 0
+        pi0 = inst.column.patchi[c]
+        @inbounds for ip in 1:npa
+            p = ip + pi0
+            p <= length(a2l.prec24_patch) || break
+            bc.precip24_pa[ip]   = a2l.prec24_patch[p]
+            bc.relhumid24_pa[ip] = a2l.rh24_patch[p]
+            bc.wind24_pa[ip]     = a2l.wind24_patch[p]
         end
     end
 
@@ -744,10 +768,11 @@ The site<->column map mirrors the W3/W4 hooks: FATES site `s` maps onto the `s`-
 `col.is_fates` column; each vegetated patch maps to HLM patch
 `p = ifp + col.patchi[c]` (bare-ground at `+0`).
 
-When SPITFIRE is active (`hlm_spitfire_mode > hlm_sf_nofire_def`), pass `fire_weather`
-(a `NamedTuple` with `precip24` [mm/s], `relhumid24` [%], `wind24` [m/s], optionally
-`lightning24`/`pop_density`) — the daily pack fills the per-patch fire-weather bc_in
-the fire model reads. Omit it on the carbon-only / no_fire path (the fields stay zero).
+The SPITFIRE fire-weather bc_in (`precip24_pa` / `relhumid24_pa` / `wind24_pa`) is
+packed from the host's per-patch 24-hour running means (`inst.atm2lnd`), as Fortran
+does. `fire_weather` (a `NamedTuple` with `precip24` [mm/s], `relhumid24` [%],
+`wind24` [m/s], optionally `lightning24`/`pop_density`) overrides them with site
+scalars — a test hook for driving the fire chain without stepping the host.
 
 Returns `inst`. Gated by the caller behind `config.use_fates`.
 """

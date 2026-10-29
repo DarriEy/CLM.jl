@@ -336,14 +336,18 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     set_fates_ctrlparms("phosphorus_spec"; ival = phosphorus_spec)
 
     # SPITFIRE / fire.  spitfire_mode selects the mode (0 = no_fire); the four
-    # definition Refs select the mode enumerations (no_fire=0, scalar_lightning=1,
-    # successful_ignitions=2, anthro_ignitions=3). spitfire_mode > sf_nofire_def
-    # enables the fire chain inside fire_model!.
+    # definition Refs carry the HLM's mode enumeration, which CTSM takes from
+    # FATESFireFactoryMod.F90:24-30 (clmfates_interfaceMod.F90:464-467):
+    #   no_fire=0, scalar_lightning=1, lightning_from_data=2,
+    #   successful_ignitions=3, anthro_ignitions=4, anthro_suppression=5.
+    # (The port used to pass successful_ignitions=2 / anthro_ignitions=3, which made
+    # mode 2 behave as successful ignitions (FDI forced to 1) and mode 3 as
+    # anthropogenic ignitions.) spitfire_mode > sf_nofire_def enables the fire chain.
     set_fates_ctrlparms("spitfire_mode"; ival = spitfire_mode)
     set_fates_ctrlparms("sf_nofire_def"; ival = 0)
     set_fates_ctrlparms("sf_scalar_lightning_def";    ival = 1)
-    set_fates_ctrlparms("sf_successful_ignitions_def"; ival = 2)
-    set_fates_ctrlparms("sf_anthro_ignitions_def";    ival = 3)
+    set_fates_ctrlparms("sf_successful_ignitions_def"; ival = 3)
+    set_fates_ctrlparms("sf_anthro_ignitions_def";    ival = 4)
 
     set_fates_ctrlparms("is_restart"; ival = ifalse)
     set_fates_ctrlparms("use_ch4";        ival = ifalse)

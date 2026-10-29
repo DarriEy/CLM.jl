@@ -158,6 +158,9 @@ function clm_initialize!(;
     # Taylor solver (fates_hydro_solver=1). Requires use_fates (+ the FATES soil BGC
     # layering). Off by default.
     use_fates_planthydro::Bool = false,
+    # FATES SPITFIRE mode (namelist fates_spitfire_mode): 0 no fire, 1 scalar
+    # lightning (constant ignitions, no streams), 2-5 need lightning/popdens streams.
+    fates_spitfire_mode::Int = 0,
     # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
     # 178-181): .false. under use_fates / vichydro / phys=clm4_5, .true. otherwise (CLM5).
     # `nothing` reproduces that conditional; pass an explicit Bool to override it. Getting
@@ -936,6 +939,7 @@ function clm_initialize!(;
                         fates_biogeog_screen = fates_biogeog_screen,
                         use_vertsoilc = _fates_bgc,
                         decomp_method = _fates_bgc ? "CENTURY" : "CTC",
+                        spitfire_mode = fates_spitfire_mode,
                         params_path = fates_paramfile,
                         harvest_mode = fates_harvest_mode,
                         use_luh = use_fates_luh,
@@ -945,6 +949,14 @@ function clm_initialize!(;
                         use_planthydro = use_fates_planthydro,
                         dtime = dtime,
                         _fates_parteh_kwargs(fates_parteh_mode, _fates_bgc)...)
+        # SPITFIRE modes 2-5 read lightning (and, modes >= 3, population density)
+        # through FATESFireDataMod (CNFireFactory selects it whenever
+        # fates_spitfire_mode > scalar_lightning). Same flnfm/fhdm kwargs as the Li
+        # CN fire schemes. Without files the arrays stay inactive and bc_in
+        # lightning24/pop_density stay 0 (no ignitions), as before.
+        if fates_spitfire_mode > 1 && !(isempty(flnfm) && isempty(fhdm))
+            fates_fire_data_init!(inst.fates_fire_data, ng; flnfm = flnfm, fhdm = fhdm)
+        end
     end
 
     # ------------------------------------------------------------------------

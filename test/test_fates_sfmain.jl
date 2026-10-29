@@ -87,8 +87,8 @@
         CLM.hlm_masterproc[]                  = CLM.ifalse
         CLM.hlm_sf_nofire_def[]               = 0
         CLM.hlm_sf_scalar_lightning_def[]     = 1
-        CLM.hlm_sf_successful_ignitions_def[] = 2
-        CLM.hlm_sf_anthro_ignitions_def[]     = 3
+        CLM.hlm_sf_successful_ignitions_def[] = 3   # CTSM FATESFireFactoryMod
+        CLM.hlm_sf_anthro_ignitions_def[]     = 4
         CLM.hlm_spitfire_mode[]               = 1   # scalar lightning
 
         # --- prt_global: carbon-only with leaf/sapw/struct organs ----------

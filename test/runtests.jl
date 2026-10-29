@@ -304,6 +304,7 @@ using CLM
     include("test_fates_planthydraulics_tierB.jl")
     # FATES (Tier F) Batch 11 — SPITFIRE main fire driver (SFMainMod).
     include("test_fates_sfmain.jl")
+    include("test_fates_fire_weather_host.jl")
     # FATES (Tier F) Batch 11 — two-stream radiation glue (FatesTwoStreamUtilsMod)
     # + land-use-change transitions (FatesLandUseChangeMod).
     include("test_fates_twostreamutils_landuse.jl")

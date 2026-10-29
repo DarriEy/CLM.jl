@@ -176,6 +176,13 @@ Base.@kwdef mutable struct Atm2LndData{FT<:Real,
     prec365_col                   ::V = Float64[]   # 365-day running mean of total precip (mm H2O/s) [use_cndv]
     prec24_patch                  ::V = Float64[]   # 24-hr running mean of total precip (mm H2O/s)  [use_fates]
     rh24_patch                    ::V = Float64[]   # 24-hr running mean of relative humidity (%)    [use_fates]
+    # Per-patch accumulMod `nsteps` counter shared by WIND24 / PREC24 / RH24. Unlike
+    # the always-on accumulators above (whose counter is `min(nstep, win)` of the
+    # global step), these three are FATES fields on patches that switch on and off as
+    # FATES patches are created and fused: accumulMod only updates ACTIVE points and
+    # counts steps per point, so a patch that becomes active mid-run starts its mean
+    # from scratch. Kept as Float (not Int) so the array adapts to a GPU backend.
+    fates24_nsteps_patch          ::V = Float64[]   # steps accumulated into the 24-hr FATES means [use_fates]
 end
 
 Atm2LndData{FT}(; kwargs...) where {FT<:Real} =
@@ -374,7 +381,9 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
     a2l.fsi24_patch                   = fill(FT(NaN), np)
     a2l.fsi240_patch                  = fill(FT(NaN), np)
     if varctl.use_fates
-        a2l.wind24_patch              = fill(FT(NaN), np)
+        # init_value=0 (atm2lndType.F90::InitAccBuffer 'WIND24'); InitAccVars copies
+        # it into the patch field before the first step.
+        a2l.wind24_patch              = fill(FT(0), np)
     end
     a2l.t_mo_patch                    = fill(FT(NaN), np)
     a2l.t_mo_min_patch                = fill(FT(SPVAL), np)
@@ -403,8 +412,12 @@ function atm2lnd_init!(a2l::Atm2LndData{FT}, ng::Int, nc::Int, np::Int) where {F
         a2l.prec365_col               = fill(FT(NaN), nc)
     end
     if varctl.use_fates
-        a2l.prec24_patch              = fill(FT(NaN), np)
-        a2l.rh24_patch                = fill(FT(NaN), np)
+        # Wateratm2lndBulkType.F90::InitAccBuffer: PREC24 init_value=0, RH24
+        # init_value=100 ("Fudge"); InitAccVars extracts them before the first step,
+        # and a FATES patch that is inactive keeps them until it switches on.
+        a2l.prec24_patch              = fill(FT(0), np)
+        a2l.rh24_patch                = fill(FT(100), np)
+        a2l.fates24_nsteps_patch      = fill(FT(0), np)
     end
 
     nothing
@@ -591,7 +604,8 @@ function atm2lnd_update_acc_vars!(a2l::Atm2LndData,
         patch_column::AbstractVector{Int};
         bounds_c::UnitRange{Int} = 1:0,
         nstep::Int = 0,
-        dtime::Int = 1800)
+        dtime::Int = 1800,
+        patch_active::Union{AbstractVector{Bool},Nothing} = nothing)
 
     isempty(bounds_p) && return nothing
     pmin = first(bounds_p)
@@ -641,12 +655,22 @@ function atm2lnd_update_acc_vars!(a2l::Atm2LndData,
         end
     end
 
-    # FATES: WIND24 / PREC24 / RH24 (all -1 day).
-    if varctl.use_fates
+    # FATES: WIND24 / PREC24 / RH24 (all -1 day) — the SPITFIRE fire-weather means
+    # (atm2lndType.F90 / Wateratm2lndBulkType.F90 UpdateAccVars, use_fates). These
+    # follow accumulMod exactly: only ACTIVE patches update, each with its own step
+    # counter, so a FATES patch that switches on mid-run starts a fresh mean.
+    # `patch_active` = patch%active; omitted => every patch is treated as active.
+    if varctl.use_fates && length(a2l.wind24_patch) >= pmax
+        if length(a2l.fates24_nsteps_patch) < length(a2l.wind24_patch)
+            a2l.fates24_nsteps_patch = fill!(similar(a2l.wind24_patch), 0)
+        end
+        act = patch_active === nothing ?
+              fill!(similar(patch_gridcell, Bool), true) : patch_active
         _launch!(_a2l_fates_kernel!, a2l.wind24_patch, a2l.prec24_patch,
-            a2l.rh24_patch, patch_gridcell, patch_column, a2l.forc_wind_grc,
+            a2l.rh24_patch, a2l.fates24_nsteps_patch, act, patch_gridcell,
+            patch_column, a2l.forc_wind_grc,
             a2l.forc_rain_downscaled_col, a2l.forc_snow_downscaled_col,
-            a2l.forc_rh_grc, nstep, w1, pmin, pmax;
+            a2l.forc_rh_grc, w1, pmin, pmax;
             ndrange = length(a2l.wind24_patch))
     end
 
@@ -764,26 +788,28 @@ end
 end
 
 # use_fates: WIND24 / PREC24 / RH24 — all 1-day running means (SPITFIRE inputs).
+# accumulMod::update_accum_field_runmean, per point:
+#     if (active(k)) then
+#        nsteps(k) = min(nsteps(k) + 1, period); accper = nsteps(k)
+#        val(k) = ((accper-1)*val(k) + field(k)) / accper
+# The three fields are registered with the same period and updated on the same
+# steps over the same active set, so one counter serves all three.
 @kernel function _a2l_fates_kernel!(wind24_patch, prec24_patch, rh24_patch,
+        nsteps_patch, @Const(patch_active),
         @Const(patch_gridcell), @Const(patch_column), @Const(forc_wind_grc),
         @Const(forc_rain_downscaled_col), @Const(forc_snow_downscaled_col),
-        @Const(forc_rh_grc), nstep::Int, w1::Int, pmin::Int, pmax::Int)
+        @Const(forc_rh_grc), w1::Int, pmin::Int, pmax::Int)
     p = @index(Global)
-    @inbounds if pmin <= p <= pmax
+    @inbounds if pmin <= p <= pmax && patch_active[p]
+        T = eltype(wind24_patch)
         g = patch_gridcell[p]
         c = patch_column[p]
-        wnd = forc_wind_grc[g]
-        if isfinite(wnd)
-            wind24_patch[p] = accum_runmean(wind24_patch[p], wnd, nstep, w1)
-        end
-        prec = forc_rain_downscaled_col[c] + forc_snow_downscaled_col[c]
-        if isfinite(prec)
-            prec24_patch[p] = accum_runmean(prec24_patch[p], prec, nstep, w1)
-        end
-        rh = forc_rh_grc[g]
-        if isfinite(rh)
-            rh24_patch[p] = accum_runmean(rh24_patch[p], rh, nstep, w1)
-        end
+        n = min(nsteps_patch[p] + one(T), T(w1))
+        nsteps_patch[p] = n
+        wind24_patch[p] = ((n - one(T)) * wind24_patch[p] + forc_wind_grc[g]) / n
+        prec24_patch[p] = ((n - one(T)) * prec24_patch[p] +
+                           (forc_rain_downscaled_col[c] + forc_snow_downscaled_col[c])) / n
+        rh24_patch[p]   = ((n - one(T)) * rh24_patch[p] + forc_rh_grc[g]) / n
     end
 end
 
@@ -906,6 +932,7 @@ function atm2lnd_clean!(a2l::Atm2LndData{FT}) where {FT}
         a2l.wind24_patch              = FT[]
         a2l.prec24_patch              = FT[]
         a2l.rh24_patch                = FT[]
+        a2l.fates24_nsteps_patch      = FT[]
     end
     a2l.t_mo_patch                    = FT[]
     a2l.t_mo_min_patch                = FT[]
