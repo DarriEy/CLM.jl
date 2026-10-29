@@ -1471,6 +1471,11 @@ the year-2..4 excess was this canopy. Recruitment J/F goes from 1.16/1.57/1.53/2
 from 1.8-2.4x to 0.94-1.02x, and the PFT-14 summer collapse (day 721: 0.74 vs 9.2 m-2)
 to 8.3 vs 9.2 m-2.
 
+**SPITFIRE fuel** (412 days, mode 1, `fates_spitfire_parity.jl`): the fuel-load residual of
+the section "Fuel-load residual localized" is gone. Days 380-412 live grass (FC6)
+0.0490 vs 0.0488 (was 0.0709 vs 0.0488), fuel amount mean rel. error 1.1e-3, peak fire
+intensity 24.6 vs 24.3 kW/m (was 32.4), no burn days in either model.
+
 Reproduce (scratch tooling, not committed): stage the fates_fire_1pt namelists with an
 hourly `hist_fincl2` / `hist_dov2xy = .false.` tape and run the stock `cesm.exe`; dump
 the port from `fates_spitfire_parity.jl`'s `build()` with the same per-patch fields.
