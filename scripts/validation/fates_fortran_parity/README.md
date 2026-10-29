@@ -1178,3 +1178,67 @@ Not scored: `SMIN_NH4` / `SMIN_NO3`. The port's soil-N summary never fills the c
 NH4/NO3 totals (`use_nitrif_denitrif` is not passed to `soil_bgc_nitrogen_state_summary!`,
 which is a host diagnostic gap outside CNP). The vertically resolved pools and `SMINN` are
 fine.
+
+---
+
+# REDUCED-COMPLEXITY MODES (2026-10-28): SP, nocomp, fixed biogeography
+
+`clm_initialize!(; use_fates=true, use_fates_sp, use_fates_nocomp,
+use_fates_fixed_biogeog)` now switches on the three CTSM `&clm_inparm` FATES modes
+(previously pinned off in `_fates_spike_set_ctrlparms!`). Pass the same `use_fates_sp` to
+`CLMDriverConfig`; `clm_drv!` errors if the two disagree.
+
+## What is connected (Fortran -> port)
+
+| CTSM / FATES | port |
+|---|---|
+| controlMod: `use_fates_bgc = .not. use_fates_sp`; FATES `check_allset`: SP needs nocomp + fixed biogeog | `clm_initialize!` validation; `use_fates_bgc` default |
+| `CLMFatesGlobals1` `use_nocomp` / `use_sp` | `_fates_spike_set_ctrlparms!` |
+| `SetFatesGlobalElements1` patch sizing (nocomp: primary land >= numpft; SP: `max(surf_numpft+surf_numcft, numpft+1)`) | `clm_fates_init!`, `fates_max_patches_per_site` (HLM slot reservation) |
+| `clm_varpar_init` FATES branch: `surfpft_ub = surf_numpft+surf_numcft-1`, `maxveg = maxsoil_patches-1` | `clm_initialize!` (mode paths only) |
+| clmfates_interfaceMod init: `pft_areafrac = wt_nat_patch(g, 0:surfpft_ub)`, sum-to-1 check; `fates_hlm_pft_map` from the param file | `hlm_pft_areafrac` -> `bc_in.pft_areafrac` / `baregroundfrac` |
+| initGridCellsMod: SP builds every natpft slot with `ptype = m` | `set_landunit_veg_compete!` SP branch |
+| clm_initializeMod: `interpMonthlyVeg` + `SatellitePhenology(inactive_and_active%soilp)` before `init_coldstart`; clm_driver.F90:1052 the same every `doalb` step | `_fates_sp_host_phenology!`, driver SP block |
+| `hlm_sp_tlai/tsai/htop(ft) = tlai/tsai/htop(patchi+ft)` (htop floor 0.01) in `init_coldstart` and `dynamics_driv` | `fates_pack_bcin_sp!` |
+| `wrap_update_hlmfates_dyn` SP: FATES totals -> `tlai/tsai/htop_hist_patch` | `fates_flush_hlm_canopy!`, `fates_unpack_bcout_canopy_structure!` |
+| history `FATES_NOCOMP_PATCHAREA_PF` / `_NPATCHES_PF` / `_BURNEDAREA_PF` | `update_history_dyn2!` |
+
+Two defects surfaced on the way and are fixed here: (1) the non-methane
+`decomp_rate_constants_bgc!` call never passed `use_fates`, so under FATES soil BGC the
+CWD->litter kernel stored at cascade index -1 inside `@inbounds`, corrupting the heap (it
+showed up as intermittent GC/inference segfaults; `--check-bounds=yes` finds it); (2) the
+dyn2 history handle fetch indexed `hvars[0]` for variables the registry skips in SP mode.
+The FATES clock fix of PR #341 (`fates_get_and_set_time!`) is cherry-picked; the numbers
+below include it.
+
+## Fortran reference and result
+
+`stage_fates_modes_run.sh` (`MODE=sp|nocomp|fixedbg`) runs the archived case with the
+mode's namelist overrides (SP also needs `soil_decomp_method='None'`) and an hourly h0;
+the scored series are committed as `fates_<mode>_fortran.csv`. Score with
+`fates_modes_parity.jl <mode> [ref] [nsteps]`. 240 steps (10 days from 2002-07-01),
+relative error of the window mean (|J-F|/|F|):
+
+| field | SP | nocomp + fixed | fixed only |
+|---|---|---|---|
+| patches / cohorts | 5/4 every step, = F | 6/8 vs F 6/7 at day 10 | 2/11 every step, = F |
+| patch area by PFT | 5e-9 - 2e-8 | 5e-9 - 2e-8 | (1 patch) |
+| NPLANT by PFT | 2e-9 - 2e-8 | <= 4e-7 | <= 4e-6 |
+| FATES_VEGC | 7e-9 | 3.1e-3 | 3.4e-3 |
+| FATES_LAI | 2e-8 | 4.5e-3 | 4.5e-3 |
+| TLAI | 1.2e-3 | 8.2e-3 | 5.0e-3 |
+| FATES_GPP | +9.0 % | +3.2 % | +3.7 % |
+| FSH | +2.0 % | +3.2 % | +6.0 % |
+| EFLX_LH_TOT | +2.9 % | -0.8 % | -0.5 % |
+
+* **SP** reproduces the FATES state to round-off: with prescribed LAI there is no
+  allocation feedback, so it isolates the host. The GPP and flux gaps are the same host
+  residual the default mode shows (top-layer thaw on day 1, see the soil-BGC section).
+* **nocomp**: every patch has the right PFT and area; the one-cohort difference at day 10
+  is a recruitment threshold crossed one day apart under the ~3 % GPP offset.
+* **fixed only**: identical census for all 10 days; only the 4 surfdata PFTs that survive
+  `min_nocomp_pftfrac_perlanduse` are seeded, as in Fortran.
+
+### Still not validated
+SP/nocomp restarts, LUH-driven fixed biogeography (`use_fates_luh`), dry deposition with
+FATES-SP (CTSM disables it too), and runs longer than 10 days.

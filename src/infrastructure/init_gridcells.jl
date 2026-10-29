@@ -229,6 +229,20 @@ function set_landunit_veg_compete!(surf::SurfaceInputData, gi::Int,
         # vegetated patch slots so its disturbance patches have HLM slots to map onto
         # (up to fates_maxpatch + 1 total) instead of being dropped from the coupling.
         n_added = 0
+        if varctl.use_fates && varctl.use_fates_sp && varctl.fates_maxpatch > 0
+            # FATES-SP: CTSM builds EVERY natpft slot (natveg_patch_exists is .true. for
+            # all m under FATES) with ptype = m and weight wt_nat_patch
+            # (initGridCellsMod set_landunit_veg_compete). The host satellite phenology
+            # is computed per PATCH TYPE on these slots and FATES reads the LAI of HLM
+            # PFT ft back from patch `col%patchi(c) + ft`, so the slot order is the PFT
+            # order. natpft_size = fates_maxPatchesPerSite (= fates_maxpatch + 1) covers
+            # every surface PFT+CFT; slots past the surfdata natpft get weight 0.
+            for m in 0:varctl.fates_maxpatch
+                p_wt = m + 1 <= natpft_size ? surf.wt_nat_patch[gi, m + 1] : 0.0
+                add_patch!(pch, col, lun, pi, ci[], varpar.natpft_lb + m, p_wt)
+            end
+            continue
+        end
         for m in 1:natpft_size
             p_wt = surf.wt_nat_patch[gi, m]
             if p_wt > 0.0

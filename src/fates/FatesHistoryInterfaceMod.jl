@@ -1640,7 +1640,12 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
     hbedges  = ed_params().ED_val_history_height_bin_edges
 
     # convenience handle fetch
-    H(sym) = this.hvars[this.ih[sym]].r82d
+    # A variable the registry skipped in this mode (ih == 0; e.g. the litter /
+    # element-flux variables gated :not_st3_not_sp under SP) gets an empty buffer,
+    # like the Fortran pointer association to a never-allocated hvar: its fills
+    # below sit behind the same mode gates and are never reached.
+    _empty82 = Matrix{Float64}(undef, 0, 0)
+    H(sym) = (haskey(this.ih, sym) && this.ih[sym] > 0) ? this.hvars[this.ih[sym]].r82d : _empty82
 
     # -- by-pft --
     h_biomass_pft   = H(:ih_biomass_si_pft)
@@ -1967,10 +1972,25 @@ function update_history_dyn2!(this::fates_history_interface_type, nc::Integer,
                 h_fire_fuel_age[io_si, iage] += cpatch.fuel.non_trunk_loading * cpatch.area * AREA_INV
             end
 
+            # nocomp: PFT-labelled patch area, patch count and burned area
+            # (FatesHistoryInterfaceMod.F90 update_history_dyn2, inside the per-patch
+            # `do ft = 1,numpft` fire block; the nocomp-gated hvars are registered
+            # only when hlm_use_nocomp).
+            if hlm_use_nocomp[] == itrue
+                ft_nc = cpatch.nocomp_pft_label
+                if 1 <= ft_nc <= numpft[]
+                    H(:ih_nocomp_pftpatchfraction_si_pft)[io_si, ft_nc] += cpatch.area * AREA_INV
+                    H(:ih_nocomp_pftnpatches_si_pft)[io_si, ft_nc] += 1.0
+                    isfinite(cpatch.frac_burnt) &&
+                        (H(:ih_nocomp_pftburnedarea_si_pft)[io_si, ft_nc] +=
+                             cpatch.frac_burnt * cpatch.area * AREA_INV / sec_per_day)
+                end
+            end
+
             # TODO Batch 18-followup-W2b: landuse area (hio_area_si_landuse),
             # secondary-forest age-since-anthro / secondarylands area, and the
-            # patch-age scorch_height / nocomp_pftburnedarea diagnostics — these need
-            # the per-PFT scorch_height_si_agepft and nocomp filters not yet ported.
+            # patch-age scorch_height diagnostics — these need the per-PFT
+            # scorch_height_si_agepft filter not yet ported.
 
             # ---- cohort loop (shortest -> taller) ----
             ccohort = cpatch.shortest
