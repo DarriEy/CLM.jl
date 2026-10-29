@@ -96,6 +96,7 @@ include("infrastructure/dyn_subgrid_control.jl")
 include("infrastructure/surfrd_utils.jl")
 include("infrastructure/init_subgrid.jl")
 include("infrastructure/subgrid_weights.jl")
+include("infrastructure/lnd2glc.jl")  # land -> ice sheet (CISM) elevation-class coupling
 include("infrastructure/dyn_landunit_area.jl")
 include("infrastructure/dyn_patch_state_updater.jl")  # conservative patch-state update on weight change (dyn_subgrid)
 include("infrastructure/dyn_init_columns.jl")

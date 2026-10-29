@@ -121,6 +121,60 @@ end
     (Atomix.@atomic arr[i, j, k] += x; nothing)
 @inline _scatter_add!(arr, i, j, k, x) = (@inbounds arr[i, j, k] += x; nothing)
 
+# Launch-level 1-D scatter operation. Keeping the atomic update behind this
+# boundary lets reverse-mode AD replace the whole launch with a gather kernel;
+# Enzyme never has to differentiate Atomix's device CAS loop.
+#
+# The destination is VALIDATED, and that is load-bearing, not defensive noise.
+# The launch covers the whole `values` array (`ndrange = length(values)`), but
+# subgrid index arrays are allocated ISPVAL (-9999) and only filled in for the
+# patches/columns a run actually uses — `patch_init!` does exactly this, and any
+# hand-built fixture leaves its tail unset. Scattering into `dest[p] = -9999`
+# then writes outside `out`: `Atomix.@atomic` does its own `checkbounds`, which
+# `@inbounds` at this call site does NOT elide, so it throws under
+# `--check-bounds=yes` (CI) — but with bounds checking off it is a silent
+# out-of-bounds write into whatever follows `out` in memory. A patch that
+# belongs to no column contributes nothing, so skipping is also the physically
+# correct answer.
+@kernel function _scatter_add_1d_kernel!(out, @Const(values), @Const(dest))
+    p = @index(Global)
+    @inbounds begin
+        d = dest[p]
+        if 1 <= d <= length(out)
+            _scatter_add!(out, d, values[p])
+        end
+    end
+end
+
+@kernel function _scatter_add_1d_pullback_kernel!(dvalues, @Const(dout), @Const(dest))
+    p = @index(Global)
+    @inbounds begin
+        d = dest[p]
+        if 1 <= d <= length(dout)
+            dvalues[p] += dout[d]
+        end
+    end
+end
+
+"""
+    scatter_add_1d!(out, values, dest)
+
+Reset `out` and compute `out[dest[p]] += values[p]`. The primal is portable
+across KA backends (including Metal via Atomix); reverse-mode AD uses a
+launch-level gather rule defined in `enzyme_rules.jl`.
+"""
+function scatter_add_1d!(out, values, dest)
+    fill!(out, zero(eltype(out)))
+    _launch!(_scatter_add_1d_kernel!, out, values, dest; ndrange=length(values))
+    return nothing
+end
+
+function _scatter_add_1d_pullback!(dvalues, dout, dest)
+    _launch!(_scatter_add_1d_pullback_kernel!, dvalues, dout, dest;
+             ndrange=length(dvalues))
+    return nothing
+end
+
 # --------------------------------------------------------------------------
 # forc_q: column specific humidity from vapor pressure
 #   forc_q_col[c] = 0.622 * vp / max(pbot - 0.378*vp, 1)  (vp from the gridcell)

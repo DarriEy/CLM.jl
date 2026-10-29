@@ -398,8 +398,27 @@ end
             s.trntdr[c, snl_top_j] = c1
             s.trndif[c, snl_top_j] = c1
 
+            # Downward adding-doubling sweep. The four interface quantities are
+            # carried in LOCALS across iterations and written to the arrays only
+            # so the net-flux loop below can read them back. Do NOT re-read
+            # trndir/trntdr/rdndif/trndif at [c,i] inside this loop — that is a
+            # loop-carried read-after-write, and KA's CPU backend lets its
+            # `@simd ivdep` metadata reach this nested loop, so LLVM vectorizes
+            # it and drops the dependency (see `_tridiag_multi_kernel!` in
+            # infrastructure/tridiagonal.jl). The store-then-load form left this
+            # kernel disagreeing with the host `snicar_rt!` reference by 1.4e-4
+            # in albedo and 4.0e-4 in absorbed flux under DEFAULT bounds
+            # checking, while under CI's forced --check-bounds=yes the two were
+            # bit-identical — which is what makes the transliteration provably
+            # faithful and the optimizer provably the culprit.
+            # `rdndif` starts at 0 (zeroed above); the other three at 1.
+            trndir_i = c1
+            trntdr_i = c1
+            trndif_i = c1
+            rdndif_i = c0
+
             for i in snl_top_j:snl_btm_j
-                if s.trntdr[c, i] > trmin
+                if trntdr_i > trmin
                     ts = s.tau_star[c, i]; ws = s.omega_star[c, i]; gs = s.g_star[c, i]
                     lm = sqrt(c3 * (c1 - ws) * (c1 - ws * gs))
                     ue = c1p5 * (c1 - ws * gs) / lm
@@ -434,14 +453,25 @@ end
                     s.tdif_b[c, i] = s.tdif_a[c, i]
                 end
 
-                s.trndir[c, i+1] = s.trndir[c, i] * s.trnlay[c, i]
-                refkm1 = c1 / (c1 - s.rdndif[c, i] * s.rdif_a[c, i])
-                tdrrdir = s.trndir[c, i] * s.rdir[c, i]
-                tdndif = s.trntdr[c, i] - s.trndir[c, i]
-                s.trntdr[c, i+1] = s.trndir[c, i] * s.tdir_arr[c, i] +
-                                   (tdndif + tdrrdir * s.rdndif[c, i]) * refkm1 * s.tdif_a[c, i]
-                s.rdndif[c, i+1] = s.rdif_b[c, i] + s.tdif_b[c, i] * s.rdndif[c, i] * refkm1 * s.tdif_a[c, i]
-                s.trndif[c, i+1] = s.trndif[c, i] * refkm1 * s.tdif_a[c, i]
+                refkm1  = c1 / (c1 - rdndif_i * s.rdif_a[c, i])
+                tdrrdir = trndir_i * s.rdir[c, i]
+                tdndif  = trntdr_i - trndir_i
+
+                trndir_next = trndir_i * s.trnlay[c, i]
+                trntdr_next = trndir_i * s.tdir_arr[c, i] +
+                              (tdndif + tdrrdir * rdndif_i) * refkm1 * s.tdif_a[c, i]
+                rdndif_next = s.rdif_b[c, i] + s.tdif_b[c, i] * rdndif_i * refkm1 * s.tdif_a[c, i]
+                trndif_next = trndif_i * refkm1 * s.tdif_a[c, i]
+
+                s.trndir[c, i+1] = trndir_next
+                s.trntdr[c, i+1] = trntdr_next
+                s.rdndif[c, i+1] = rdndif_next
+                s.trndif[c, i+1] = trndif_next
+
+                trndir_i = trndir_next
+                trntdr_i = trntdr_next
+                rdndif_i = rdndif_next
+                trndif_i = trndif_next
             end
 
             # Bottom boundary: underlying ground albedo.
@@ -449,13 +479,23 @@ end
             s.rupdir[c, snl_btm_itf] = albg
             s.rupdif[c, snl_btm_itf] = albg
 
-            # Upward sweep.
+            # Upward sweep. Same register carry, same reason — `rupdir[c,i+1]` /
+            # `rupdif[c,i+1]` are what the previous iteration just wrote. Both
+            # start from the ground albedo set immediately above.
+            rupdir_next = albg
+            rupdif_next = albg
             for i in snl_btm_j:-1:snl_top_j
-                refkp1 = c1 / (c1 - s.rdif_b[c, i] * s.rupdif[c, i+1])
-                s.rupdir[c, i] = s.rdir[c, i] +
-                    (s.trnlay[c, i] * s.rupdir[c, i+1] +
-                     (s.tdir_arr[c, i] - s.trnlay[c, i]) * s.rupdif[c, i+1]) * refkp1 * s.tdif_b[c, i]
-                s.rupdif[c, i] = s.rdif_a[c, i] + s.tdif_a[c, i] * s.rupdif[c, i+1] * refkp1 * s.tdif_b[c, i]
+                refkp1 = c1 / (c1 - s.rdif_b[c, i] * rupdif_next)
+                rupdir_i = s.rdir[c, i] +
+                    (s.trnlay[c, i] * rupdir_next +
+                     (s.tdir_arr[c, i] - s.trnlay[c, i]) * rupdif_next) * refkp1 * s.tdif_b[c, i]
+                rupdif_i = s.rdif_a[c, i] + s.tdif_a[c, i] * rupdif_next * refkp1 * s.tdif_b[c, i]
+
+                s.rupdir[c, i] = rupdir_i
+                s.rupdif[c, i] = rupdif_i
+
+                rupdir_next = rupdir_i
+                rupdif_next = rupdif_i
             end
 
             # Net flux at each interface.

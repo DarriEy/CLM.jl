@@ -71,6 +71,11 @@ Base.@kwdef mutable struct CLMInstances
     atm2lnd::Atm2LndData             = Atm2LndData()
     lnd2atm::Lnd2AtmData             = Lnd2AtmData()
 
+    # --- Land / ice-sheet coupling (lnd2glcMod.F90) ---
+    # Per-gridcell, per-glacier-elevation-class surface mass balance (qice),
+    # surface temperature (tsrf) and elevation (topo) handed to CISM.
+    lnd2glc::Lnd2GlcData             = Lnd2GlcData()
+
     # --- Atmospheric N-deposition stream (fills atm2lnd.forc_ndep_grc) ---
     # Inactive by default: `ndep_stream_init!` is called from clm_initialize! only
     # when an `fndep` file is supplied, so the non-CN path is untouched.
@@ -328,6 +333,9 @@ function clm_instInit!(inst::CLMInstances;
     # --- Atmosphere / land coupling ---
     atm2lnd_init!(inst.atm2lnd, ng, nc, np)
     lnd2atm_init!(inst.lnd2atm, ng, nc)
+
+    # --- Land / ice-sheet coupling ---
+    lnd2glc_init!(inst.lnd2glc, ng)
 
     # --- Crop ---
     crop_init!(inst.crop, np)

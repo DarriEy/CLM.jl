@@ -716,6 +716,21 @@ function clm_initialize!(;
                         dtime = dtime)
     end
 
+    # ------------------------------------------------------------------------
+    # Land -> ice sheet, initialization pass (lnd2glcMod.F90, `init = .true.`).
+    # CTSM calls update_lnd2glc once at the end of initialization so the ice sheet
+    # has valid surface temperature and elevation per glacier elevation class
+    # BEFORE the first timestep. qflx_glcice is not valid yet, so qice stays 0 —
+    # that is exactly what `init = true` enforces.
+    # ------------------------------------------------------------------------
+    if !isempty(inst.lnd2glc.qice_grc)
+        update_lnd2glc!(inst.lnd2glc, inst.temperature,
+                        inst.water.waterfluxbulk_inst, inst.topo,
+                        inst.column, inst.landunit, inst.gridcell,
+                        filt.do_smb_c, bounds.begc:bounds.endc,
+                        bounds.begg:bounds.endg; init = true)
+    end
+
     return (inst, bounds, filt, tm)
 end
 

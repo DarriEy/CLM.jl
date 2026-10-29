@@ -286,3 +286,163 @@
     end
 
 end
+
+# ==========================================================================
+# lnd2atm_rof! — the `! lnd -> rof` block of lnd2atmMod.F90.
+#
+# Before this port the column runoff terms were aggregated to gridcell level in a
+# throwaway local inside clm_drv!, so the fields a river model is forced with
+# (`waterlnd2atm_type`: qflx_rofliq_*_grc, qflx_rofice_grc, qirrig_grc) did not
+# exist anywhere in CLM.jl and a coupled driver had to re-derive them by calling
+# c2g_urbanf! itself.
+# ==========================================================================
+@testset "lnd2atm_rof! (lnd -> rof gridcell exports)" begin
+
+    # 2 gridcells, 3 columns: g1 = 60% natveg + 40% glacier, g2 = one natveg column.
+    function make_rof_data()
+        col = CLM.ColumnData()
+        col.gridcell = [1, 1, 2]
+        col.landunit = [1, 2, 3]
+        col.itype    = [1, 1, 1]
+        col.wtgcell  = [0.6, 0.4, 1.0]
+        col.wtlunit  = [1.0, 1.0, 1.0]
+        col.active   = [true, true, true]
+        col.is_hillslope_column = [false, false, false]
+
+        lun = CLM.LandunitData()
+        lun.itype      = [CLM.ISTSOIL, CLM.ISTICE, CLM.ISTSOIL]
+        lun.gridcell   = [1, 1, 2]
+        lun.wtgcell    = [0.6, 0.4, 1.0]
+        lun.active     = [true, true, true]
+        lun.urbpoi     = [false, false, false]
+        lun.canyon_hwr = [0.0, 0.0, 0.0]
+
+        grc = CLM.GridcellData()
+        grc.lat = [0.5, 0.6]; grc.lon = [0.1, 0.2]
+        grc.latdeg = [30.0, 35.0]; grc.londeg = [-100.0, -95.0]
+        grc.area = [100.0, 100.0]
+
+        wfb = CLM.WaterFluxBulkData()
+        CLM.waterfluxbulk_init!(wfb, 3, 3, 3, 2)
+        wf = wfb.wf
+        wf.qflx_surf_col          .= [1.0e-5, 2.0e-5, 3.0e-5]
+        wf.qflx_drain_col         .= [4.0e-6, 5.0e-6, 6.0e-6]
+        wf.qflx_drain_perched_col .= [7.0e-7, 8.0e-7, 9.0e-7]
+        wf.qflx_qrgwl_col         .= [0.0,    1.1e-5, 0.0]
+        wf.qflx_runoff_col        .= [1.47e-5, 3.68e-5, 3.69e-5]
+        wf.qflx_sfc_irrig_col     .= [2.0e-6, 0.0,    1.0e-6]
+        wf.qflx_evap_tot_col      .= [3.0e-5, 1.0e-5, 2.0e-5]
+
+        l2a = CLM.Lnd2AtmData()
+        CLM.lnd2atm_init!(l2a, 2, 3)
+        l2a.qflx_ice_runoff_col .= [0.0, 5.0e-6, 0.0]
+
+        return (; col, lun, grc, wfb, l2a)
+    end
+
+    # Reference: the area-weighted gridcell mean the balance check uses.
+    wmean(v, w) = sum(v .* w) / sum(w)
+
+    @testset "each runoff term reaches its own gridcell field" begin
+        d = make_rof_data()
+        CLM.lnd2atm_rof!(d.l2a, d.wfb, d.col, d.lun, d.grc, 1:3, 1:3, 1:2)
+        wf = d.wfb.wf
+        w1 = [0.6, 0.4]
+
+        @test d.l2a.qflx_rofliq_qsur_grc[1] ≈ wmean(wf.qflx_surf_col[1:2], w1)
+        @test d.l2a.qflx_rofliq_qsur_grc[2] ≈ wf.qflx_surf_col[3]
+        @test d.l2a.qflx_rofliq_qsub_grc[1] ≈ wmean(wf.qflx_drain_col[1:2], w1)
+        @test d.l2a.qflx_rofliq_drain_perched_grc[1] ≈
+              wmean(wf.qflx_drain_perched_col[1:2], w1)
+        @test d.l2a.qflx_rofliq_qgwl_grc[1] ≈ wmean(wf.qflx_qrgwl_col[1:2], w1)
+        @test d.l2a.qflx_rofliq_grc[1]      ≈ wmean(wf.qflx_runoff_col[1:2], w1)
+        @test d.l2a.qirrig_grc[1]           ≈ wmean(wf.qflx_sfc_irrig_col[1:2], w1)
+        @test d.l2a.qflx_evap_tot_grc[1]    ≈ wmean(wf.qflx_evap_tot_col[1:2], w1)
+        # Ice runoff comes from l2a (handle_ice_runoff!'s output), not from wf.
+        @test d.l2a.qflx_rofice_grc[1] ≈ wmean(d.l2a.qflx_ice_runoff_col[1:2], w1)
+        @test d.l2a.qflx_rofice_grc[2] == 0.0
+        # No hillslope routing => no stream component.
+        @test all(iszero, d.l2a.qflx_rofliq_stream_grc)
+    end
+
+    @testset "qflx_rofliq_grc is the total, and the components sum into it" begin
+        d = make_rof_data()
+        # Make qflx_runoff_col exactly the sum of its components, as the hydrology
+        # does, so the gridcell total must equal the sum of the gridcell parts.
+        wf = d.wfb.wf
+        wf.qflx_runoff_col .= wf.qflx_surf_col .+ wf.qflx_drain_col .+
+                              wf.qflx_drain_perched_col .+ wf.qflx_qrgwl_col
+        CLM.lnd2atm_rof!(d.l2a, d.wfb, d.col, d.lun, d.grc, 1:3, 1:3, 1:2)
+        for g in 1:2
+            @test d.l2a.qflx_rofliq_grc[g] ≈ d.l2a.qflx_rofliq_qsur_grc[g] +
+                d.l2a.qflx_rofliq_qsub_grc[g] +
+                d.l2a.qflx_rofliq_drain_perched_grc[g] +
+                d.l2a.qflx_rofliq_qgwl_grc[g]
+        end
+    end
+
+    @testset "dynbal correction is subtracted from qgwl / rofliq / rofice" begin
+        d = make_rof_data()
+        d.wfb.wf.qflx_liq_dynbal_grc .= [1.0e-6, 2.0e-6]
+        d.wfb.wf.qflx_ice_dynbal_grc .= [3.0e-7, 0.0]
+
+        d0 = make_rof_data()   # same state, dynbal left at zero
+        CLM.lnd2atm_rof!(d0.l2a, d0.wfb, d0.col, d0.lun, d0.grc, 1:3, 1:3, 1:2)
+        CLM.lnd2atm_rof!(d.l2a,  d.wfb,  d.col,  d.lun,  d.grc,  1:3, 1:3, 1:2)
+
+        for g in 1:2
+            @test d.l2a.qflx_rofliq_qgwl_grc[g] ≈
+                  d0.l2a.qflx_rofliq_qgwl_grc[g] - d.wfb.wf.qflx_liq_dynbal_grc[g]
+            @test d.l2a.qflx_rofliq_grc[g] ≈
+                  d0.l2a.qflx_rofliq_grc[g] - d.wfb.wf.qflx_liq_dynbal_grc[g]
+            @test d.l2a.qflx_rofice_grc[g] ≈
+                  d0.l2a.qflx_rofice_grc[g] - d.wfb.wf.qflx_ice_dynbal_grc[g]
+        end
+        # Terms Fortran does NOT correct are untouched.
+        @test d.l2a.qflx_rofliq_qsur_grc ≈ d0.l2a.qflx_rofliq_qsur_grc
+        @test d.l2a.qirrig_grc ≈ d0.l2a.qirrig_grc
+    end
+
+    @testset "hillslope routing excludes hillslope columns and fills the stream term" begin
+        d = make_rof_data()
+        d.col.is_hillslope_column = [true, false, false]
+        d.wfb.wf.volumetric_streamflow_lun .= [0.5, 0.0, 0.25]   # m3/s per landunit
+
+        CLM.lnd2atm_rof!(d.l2a, d.wfb, d.col, d.lun, d.grc, 1:3, 1:3, 1:2;
+                         use_hillslope_routing = true)
+
+        # Column 1 is a hillslope column: its surface/drain/perched runoff goes to
+        # the stream, so only column 2's contribution survives the gridcell average
+        # (c2g still divides by the FULL summed weight, as Fortran does).
+        w1 = [0.6, 0.4]
+        @test d.l2a.qflx_rofliq_qsur_grc[1] ≈ wmean([0.0, d.wfb.wf.qflx_surf_col[2]], w1)
+        # ...while g2 (no hillslope column) is unaffected.
+        @test d.l2a.qflx_rofliq_qsur_grc[2] ≈ d.wfb.wf.qflx_surf_col[3]
+
+        # Streamflow is a VOLUME/time: summed (not weighted) over the gridcell's
+        # active landunits, converted to mm/s by 1e3/(area_km2 * 1e6).
+        @test d.l2a.qflx_rofliq_stream_grc[1] ≈ 0.5 * 1.0e3 / (100.0 * 1.0e6)
+        @test d.l2a.qflx_rofliq_stream_grc[2] ≈ 0.25 * 1.0e3 / (100.0 * 1.0e6)
+
+        # qgwl / rofice are NOT hillslope-masked in Fortran.
+        @test d.l2a.qflx_rofliq_qgwl_grc[1] ≈ wmean(d.wfb.wf.qflx_qrgwl_col[1:2], w1)
+    end
+end
+
+@testset "lnd2atm_init! allocates the waterlnd2atm rof exports" begin
+    ng, nc = 4, 8
+    l = CLM.Lnd2AtmData()
+    @test length(l.qflx_rofliq_grc) == 0        # default construction: empty
+    CLM.lnd2atm_init!(l, ng, nc)
+    for f in (:qflx_rofliq_grc, :qflx_rofliq_qsur_grc, :qflx_rofliq_qsub_grc,
+              :qflx_rofliq_qgwl_grc, :qflx_rofliq_drain_perched_grc,
+              :qflx_rofliq_stream_grc, :qflx_rofice_grc, :qirrig_grc,
+              :qflx_evap_tot_grc)
+        v = getfield(l, f)
+        @test length(v) == ng
+        @test all(iszero, v)
+    end
+    CLM.lnd2atm_clean!(l)
+    @test length(l.qflx_rofliq_grc) == 0
+    @test length(l.qflx_rofice_grc) == 0
+end

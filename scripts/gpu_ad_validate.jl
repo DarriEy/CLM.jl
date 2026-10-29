@@ -233,7 +233,8 @@ adtest_mat_h2osfc_corr(to, ::Type{FT}) where {FT} = (B = _stbuild(FT);
 # Every WRITABLE float array receives Dual-derived values, so all floats are lifted to Dual
 # (L = _todual / identity); only t_h2osfc is seeded (SF). dm moves to device (or identity on CPU).
 function adtest_pc_h2osfc(to, ::Type{FT}) where {FT}
-    B = _stbuild(FT); nc = B.nc; dt = FT(1800); pck = FT(CLM.PHASE_CHANGE_MASS_K[])
+    B = _stbuild(FT); nc = B.nc; dt = FT(1800)
+    pck = FT(CLM.PHASE_CHANGE_MASS_K[])
     function go(L, SF, dm)
         th = dm(SF(B.t_h2osfc)); ts = dm(L(B.t_soisno))
         CLM._launch!(CLM._phase_change_h2osfc_kernel!, th, ts, dm(L(B.h2osfc)),
@@ -262,7 +263,9 @@ end
 # All struct float fields share one element type, so every float is lifted to Dual (L); only
 # t_soisno is seeded (SF). dm moves each array to device (or identity on CPU).
 function adtest_pc_beta(to, ::Type{FT}) where {FT}
-    B = _stbuild(FT); nc = B.nc; dt = FT(1800); pck = FT(CLM.PHASE_CHANGE_MASS_K[])
+    B = _stbuild(FT); nc = B.nc; dt = FT(1800)
+    pck = FT(CLM.PHASE_CHANGE_MASS_K[])
+    ptk = FT(CLM.PHASE_CHANGE_TEMP_K[])
     Z(d2) = zeros(FT, nc, d2)
     function go(L, SF, dm)
         Lyr = CLM.PcbLyr(; t_soisno = dm(SF(B.t_soisno)), h2osoi_ice = dm(L(B.h2osoi_ice)),
@@ -283,7 +286,7 @@ function adtest_pc_beta(to, ::Type{FT}) where {FT}
         be = CLM._kernel_backend(Lyr.t_soisno)
         CLM._phase_change_beta_kernel!(be)(Lyr, Col, Pin, Tmp, dm(zeros(Int, nc, STNLEV)),
             dm(B.mask), dm(B.urbpoi), dm(B.snl), dm(B.landunit), dm(B.itype), dm(B.lun_itype),
-            dt, STNLEVSNO, STNLEVGRND, STNLEVURB, STNLEVMAX, pck; ndrange = nc)
+            dt, STNLEVSNO, STNLEVGRND, STNLEVURB, STNLEVMAX, pck, ptk; ndrange = nc)
         KernelAbstractions.synchronize(be)
         return Lyr
     end

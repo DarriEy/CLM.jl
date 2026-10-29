@@ -85,25 +85,65 @@ end
     end
 end
 
-# Step 2b: rescale CO2/O2 partial pressures from the not-downscaled surface
-# pbot to the elevation-corrected column pbot (see note below). gridcell write
-# from a column → assumes 1:1 col↔grc (parity domains are single-column).
-@kernel function _downscale_pco2_kernel!(pco2_grc, po2_grc, pc13o2_grc, @Const(col_gridcell),
-        @Const(pbot_nd), @Const(pbot_ds), lo::Int)
-    i = @index(Global)
-    @inbounds begin
-        T = eltype(pco2_grc)
-        c = lo + i - 1
+# Step 2b, pass 1: accumulate the gridcell mean of the downscaled column pbot.
+#
+# The weight is the column's area fraction. Two cases need care, and they are
+# NOT the same case:
+#
+#   * NON-FINITE weight -> weight 1. `column_init!` allocates `wtgcell` as NaN
+#     and CLM.jl's hand-built driver fixtures routinely leave it unset; falling
+#     back to an unweighted mean keeps them working, and for their
+#     single-column-per-gridcell domains the mean IS that column's pbot, so the
+#     per-column rescale this replaced is reproduced exactly.
+#
+#   * ZERO weight -> weight 0, i.e. it contributes NOTHING. A zero-area column
+#     is CTSM's "virtual" column: a glacier elevation-class column that exists
+#     only so a surface mass balance can be computed at that class elevation.
+#     Lumping those in (an earlier version of this kernel treated zero like
+#     unset and gave them weight 1) drags the gridcell mean down to the mean
+#     CLASS elevation of the whole ladder — several km up — and drove the
+#     implied pco2 pressure ~10 kPa below the surface pressure in a gridcell
+#     that is not glaciated at all.
+#
+# If every weight in a gridcell is zero, wsum is 0 and the rescale is skipped.
+@kernel function _downscale_pbot_accum_kernel!(psum_grc, wsum_grc, @Const(col_gridcell),
+        @Const(col_wtgcell), @Const(pbot_ds), cmin::Int, cmax::Int)
+    c = @index(Global)
+    @inbounds if cmin <= c <= cmax
+        T = eltype(psum_grc)
         g = col_gridcell[c]
+        w = col_wtgcell[c]
+        w = isfinite(w) ? max(T(w), zero(T)) : one(T)
+        _scatter_add!(psum_grc, g, T(pbot_ds[c]) * w)
+        _scatter_add!(wsum_grc, g, w)
+    end
+end
+
+# Step 2b, pass 2: rescale CO2/O2 partial pressures from the not-downscaled
+# surface pbot to the gridcell-mean elevation-corrected pbot (see note at the
+# call site). Indexed over GRIDCELLS — one rescale per gridcell.
+#
+# It MUST be one: this is a read-modify-write of a gridcell field, so a
+# column-indexed version applied the ratio once per column and compounded it.
+# With a glacier elevation-class subgrid (11 columns per gridcell) that drove
+# forc_pco2 to ~pbot*(pbot_ds/pbot_nd)^11 — a ~50% CO2 error, invisible in the
+# pco2/po2 molar-ratio invariant because both compound identically.
+@kernel function _downscale_pco2_kernel!(pco2_grc, po2_grc, pc13o2_grc,
+        @Const(pbot_nd), @Const(psum_grc), @Const(wsum_grc), gmin::Int, gmax::Int)
+    g = @index(Global)
+    @inbounds if gmin <= g <= gmax
+        T = eltype(pco2_grc)
         pbot_nd_g = pbot_nd[g]
-        pbot_ds_c = pbot_ds[c]
-        if pbot_nd_g > zero(T) && pbot_ds_c > zero(T)
-            pco2_grc[g] = (pco2_grc[g] / pbot_nd_g) * pbot_ds_c
-            po2_grc[g]  = (po2_grc[g]  / pbot_nd_g) * pbot_ds_c
+        wsum = wsum_grc[g]
+        pbot_ds_g = wsum > zero(T) ? psum_grc[g] / wsum : zero(T)
+        if pbot_nd_g > zero(T) && pbot_ds_g > zero(T)
+            r = pbot_ds_g / pbot_nd_g
+            pco2_grc[g] *= r
+            po2_grc[g]  *= r
             # forc_pc13o2 is C13RATIO*forc_pco2 (the reader seeds it): rescale it by
             # the same pbot ratio so rc13_canair = pc13o2/(pco2-pc13o2) stays exactly
             # C13RATIO/(1-C13RATIO) at the elevation-corrected column pbot.
-            pc13o2_grc[g] = (pc13o2_grc[g] / pbot_nd_g) * pbot_ds_c
+            pc13o2_grc[g] *= r
         end
     end
 end
@@ -222,17 +262,31 @@ function downscale_forcings!(bounds::BoundsType,
     # --- Step 2b: CO2/O2 partial pressures → downscaled surface pressure ---
     # forc_pco2/forc_po2 are molar_fraction * surface_pbot. The forcing reader
     # seeds them from the NOT-downscaled grc pbot; rescale to the elevation-
-    # corrected column pbot that the photosynthesis solve uses for `cair` and cs
+    # corrected pbot that the photosynthesis solve uses for `cair` and cs
     # (Fortran builds forc_pco2 from the same surface pbot → cair = 367e-6*pbot).
-    # Recover the molar fraction from the reader's per-step value so this is
-    # non-compounding (the reader reseeds pco2 = 367e-6*pbot_nd each step before
-    # this runs). Leaving cair on the not-downscaled pbot made it ~2.7% low at
-    # elevation-corrected columns → stomata ~3% too open → ~2% excess transp
-    # (Krycklan deep-soil drying → water table too deep → QDRAI -10%). forc_pco2
-    # is a gridcell field; parity domains are single-column so col→grc is 1:1.
-    _launch!(_downscale_pco2_kernel!, a2l.forc_pco2_grc, a2l.forc_po2_grc,
-        a2l.forc_pc13o2_grc, col.gridcell, a2l.forc_pbot_not_downscaled_grc,
-        a2l.forc_pbot_downscaled_col, lo; ndrange = n)
+    # Leaving cair on the not-downscaled pbot made it ~2.7% low at elevation-
+    # corrected columns → stomata ~3% too open → ~2% excess transp (Krycklan
+    # deep-soil drying → water table too deep → QDRAI -10%).
+    #
+    # NOTE this is a CLM.jl addition: CTSM's `downscale_forcings` does not touch
+    # forc_pco2/forc_po2 at all (they have no column-level counterpart there).
+    # Since the target IS a gridcell field, the elevation correction it can carry
+    # is the gridcell mean of the downscaled column pressure — computed here in
+    # two passes so it is applied exactly ONCE per gridcell. Doing it per column
+    # compounded the ratio; see the kernel comment.
+    bg = bounds.begg:bounds.endg
+    if !isempty(bg) && length(a2l.pbot_downscaled_grc) >= last(bg)
+        fill!(a2l.pbot_downscaled_grc, zero(FT))
+        fill!(a2l.pbot_downscale_wsum_grc, zero(FT))
+        _launch!(_downscale_pbot_accum_kernel!, a2l.pbot_downscaled_grc,
+            a2l.pbot_downscale_wsum_grc, col.gridcell, col.wtgcell,
+            a2l.forc_pbot_downscaled_col, lo, bounds.endc;
+            ndrange = length(col.gridcell))
+        _launch!(_downscale_pco2_kernel!, a2l.forc_pco2_grc, a2l.forc_po2_grc,
+            a2l.forc_pc13o2_grc, a2l.forc_pbot_not_downscaled_grc,
+            a2l.pbot_downscaled_grc, a2l.pbot_downscale_wsum_grc,
+            first(bg), last(bg); ndrange = length(a2l.forc_pco2_grc))
+    end
 
     # --- Step 3: Partition precipitation ---
     partition_precip!(bounds, a2l, col, lun)

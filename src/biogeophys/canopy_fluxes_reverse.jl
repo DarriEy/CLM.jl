@@ -415,15 +415,19 @@ function compositional_reverse!(phases, b, seed_bang!)
     _PSN_CI_AD_HOSTLOOP[] = true
     try
         checkpoints = Any[]
-        for (f, cargs) in phases
-            push!(checkpoints, deepcopy(b)); f(b, cargs...)
+        for entry in phases
+            f, cargs = entry[1], entry[2]
+            viewfn = length(entry) == 3 ? entry[3] : identity
+            push!(checkpoints, deepcopy(b)); f(viewfn(b), cargs...)
         end
         db = Enzyme.make_zero(b)
         seed_bang!(db, b)
         for k in length(phases):-1:1
-            f, cargs = phases[k]
+            entry = phases[k]; f, cargs = entry[1], entry[2]
+            viewfn = length(entry) == 3 ? entry[3] : identity
             bk = deepcopy(checkpoints[k])
-            Enzyme.autodiff(revmode, f, Enzyme.Const, Enzyme.Duplicated(bk, db),
+            Enzyme.autodiff(revmode, f, Enzyme.Const,
+                            Enzyme.Duplicated(viewfn(bk), viewfn(db)),
                             map(Enzyme.Const, cargs)...)
         end
         return db
@@ -439,13 +443,17 @@ end
 # steps). `b_start` is left holding the step's final forward state. Returns nothing.
 function _reverse_step_into!(phases, b_start, db, revmode)
     fine = Any[]
-    for (f, cargs) in phases
-        push!(fine, deepcopy(b_start)); f(b_start, cargs...)
+    for entry in phases
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        push!(fine, deepcopy(b_start)); f(viewfn(b_start), cargs...)
     end
     for k in length(phases):-1:1
-        f, cargs = phases[k]
+        entry = phases[k]; f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
         bk = deepcopy(fine[k])
-        Enzyme.autodiff(revmode, f, Enzyme.Const, Enzyme.Duplicated(bk, db),
+        Enzyme.autodiff(revmode, f, Enzyme.Const,
+                        Enzyme.Duplicated(viewfn(bk), viewfn(db)),
                         map(Enzyme.Const, cargs)...)
     end
     return nothing
@@ -484,8 +492,10 @@ function multistep_reverse!(steps, b, seed_bang!)
     step_checkpoints = Any[]
     for phases in steps
         push!(step_checkpoints, deepcopy(b))
-        for (f, cargs) in phases
-            f(b, cargs...)
+        for entry in phases
+            f, cargs = entry[1], entry[2]
+            viewfn = length(entry) == 3 ? entry[3] : identity
+            f(viewfn(b), cargs...)
         end
     end
     # Seed the adjoint from the final forward state.
