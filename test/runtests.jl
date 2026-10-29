@@ -88,6 +88,7 @@ using CLM
     # here in the fresh-global unit block — see the note at test_driver_reverse.jl.
     include("test_photosynthesis.jl")
     include("test_photosynthesis_ad_pft_params.jl")
+    include("test_phs_night_frozen.jl")
     include("test_canopy_fluxes.jl")
     include("test_canopy_reverse.jl")
     include("test_canopy_hydrology.jl")

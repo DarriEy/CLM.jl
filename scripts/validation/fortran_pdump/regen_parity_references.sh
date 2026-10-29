@@ -33,9 +33,10 @@
 # run the blocks you need. It is intentionally not a turnkey driver.
 # =============================================================================
 set -u
-SD=/Users/darri.eythorsson/compHydro/SYMFLUENCE_data
-CASE="$SD/installs/clm/cases/symfluence_build"
-EXE="$CASE/bld/cesm.exe"
+SD="${SYMFLUENCE_DATA:-/Users/darri.eythorsson/compHydro/SYMFLUENCE_data}"
+CASE="${CESM_CASE:-$SD/installs/clm/cases/symfluence_build}"
+EXE="${CESM_EXE:-$CASE/bld/cesm.exe}"
+RUNS="${CLM_REF_RUNS:-$SD/runs}"   # local, never the Drive-backed tree
 FE="$SD/domain_Bow_at_Banff_lumped/optimization/CLM/dds_run_1/final_evaluation"
 
 run_with_retry() {  # $1 = rundir ; env PDUMP_NSTEP_LO/HI already exported
@@ -86,5 +87,22 @@ cn_coldstart() {
 #     slice records for nstep 4721..4920 into
 #     clm_ref_water_summer/...h1.2202-07-16-61200.nc (record 1 = ref nstep 1757873).
 #     The before_step injection dumps already survive in bgc_ref_ndep_summer/.
+
+# --- cn_annual: daily-mean h0 for scripts/fortran_parity_cn_annual.jl
+#     (regenerated 2026-10-28 with the pristine ctsm5.3.012 cesm.exe, 1st try).
+#     Templates: clm_bgc_spinup/bgc_ref_iso/{datm_in,drv_in,drv_flds_in,
+#     nuopc.runconfig,nuopc.runseq,datm.streams.xml,fd.yaml} +
+#     clm_bgc_spinup/bgc_ref_ndep_summer/lnd_in.used, with the 2026-07 absolute
+#     paths rewritten to $SD / $CESM_INPUTDATA. Then:
+#       lnd_in:  finidat = clm_bgc_spinup/...clm2.r.2202-01-01-00000.nc (local copy);
+#                drop nrevsn; ndep file -> fndep_clm_ZERO_* (the Julia harness has
+#                no ndep stream); hist_nhtfrq=-24, hist_mfilt=365, hist_fincl1 =
+#                TOTECOSYSC TOTSOMC TOTSOMN TOTVEGC TLAI GPP NPP SMINN LEAFC TG
+#                EFLX_LH_TOT FSH (+ any extras)
+#       runconfig: start_type=startup start_ymd=22020101 stop_option=ndays stop_n=365
+#       streams: year_align 2002 -> 2201 (model 2202 reads clmforc.2003, matching
+#                the harness's FORCE_YEAR)
+#     Stage the h0 as $RUNS/clm_cn_run/Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.nc
+#     next to the restart and run the harness with CLM_CN_RUN_DIR=$RUNS/clm_cn_run.
 
 echo "Recipe reference only — call bow_sp / cn_coldstart etc. as needed."
