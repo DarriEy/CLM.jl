@@ -1185,3 +1185,49 @@ post-fire mortality), SFNesterovMod and SFFireWeatherMod were re-read line by li
 against the Fortran; no discrepancy was found. FatesFuelMod was not re-read, but its
 per-class fuel moisture output matches to < 0.5 %. The difference in the burn decision
 comes from the fuel load.
+
+## Burning chain (mode 1, `fates_fire_threshold` = 5 kW/m, 450 days)
+With the lowered threshold both models burn during the 2003 dry spell:
+
+| | Fortran | Julia |
+|---|---|---|
+| burn days | 11 (402-412) | 12 (401-412) |
+| total burned fraction (days 400-413) | 1.29e-4 | 3.42e-4 (2.65x) |
+| fire C loss to atmosphere | 4.6e-6 kgC/m2 | 1.8e-5 kgC/m2 (3.8x) |
+| fuel consumed (sum of daily) | 1.089 | 1.376 (1.26x) |
+| fire mortality, FATES_MORTALITY_FIRE_SZ summed | 0.0129 | 0.0495 m-2 yr-1 |
+
+The ratios follow from the fuel load. Julia carries 27 % more ground fuel, which gives
+1.6-2x the ROS. Burned area scales as (ROS x duration)^2, hence 2.65x. Higher intensity
+raises scorch height, which drives the crown and cambial kill. The fire chain switches on
+and off on the same days in both models.
+(`FATES_MORTALITY_FIRE_SZ` is a level-2 history field. The level-1 harness never reaches
+the dyn2 reset of the site `fmort_rate_*` accumulators, so the script reports the daily
+increment.)
+
+## Mode 2 (lightning from data), threshold 5 kW/m, 450 days
+Run with the synthetic uniform lightning stream (0.000457 strikes/km2/hr, so
+`lightning24` = 0.01097/km2/day).
+
+**Bug found and fixed.** The port passed the SPITFIRE mode enumeration shifted by one:
+`sf_successful_ignitions_def=2`, `sf_anthro_ignitions_def=3`. CTSM uses
+FATESFireFactoryMod: 2 = lightning_from_data, 3 = successful_ignitions,
+4 = anthro_ignitions. As a result, `fates_spitfire_mode=2` ran as "successful
+ignitions" (FDI forced to 1, cloud-to-ground fraction 1), and mode 3 ran as
+anthropogenic ignitions. With the fix, FDI matches Fortran (day 405: 0.8292 / 0.8304),
+and the mode-2 to mode-1 burned-area ratio is the same in both models:
+
+| | Fortran | Julia |
+|---|---|---|
+| burn days | 11 (402-412) | 12 (401-412) |
+| total burned fraction | 3.43e-5 | 9.10e-5 |
+| burned fraction, mode 2 / mode 1 | 0.267 | 0.266 |
+
+The absolute burned area again carries the 2.65x fuel-driven factor. The ratio isolates
+the ignition path, which is the host lightning stream -> `lnfm24` -> `lightning24` ->
+`NF`, and it agrees to 0.4 %.
+
+Not compared against Fortran: modes 3-5 (population density, anthropogenic ignitions).
+The host path is ported and unit-tested, and the enumeration fix makes the mode numbers
+correct. The real `clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc` climatology
+is not staged on this box; only the synthetic uniform stream is.

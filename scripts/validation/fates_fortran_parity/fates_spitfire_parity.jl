@@ -118,6 +118,7 @@ function run_julia(ndays::Int)
     CLM.forcing_reader_init!(fr, joinpath(FORCDIR, "clmforc.$(fyear).nc"))
     spd = round(Int, 86400 / DTIME)
     recs = Vector{Dict{String,Float64}}()
+    fmort_prev = Ref(0.0)
     nstep = 0; t0 = time()
     for d in 0:ndays-1
         dstart = noleap_day(d)
@@ -160,7 +161,11 @@ function run_julia(ndays::Int)
         # port's level-1 harness does not fill; sum the site rates it is built from
         # (update_history_dyn2: (fmort_rate_canopy + fmort_rate_ustory) / m2_per_ha).
         let st = inst.fates.sites[1]
-            r["FATES_MORTALITY_FIRE_SZ"] = (sum(st.fmort_rate_canopy) + sum(st.fmort_rate_ustory)) / 1.0e4
+            # dyn2 also ZEROES these site rates after writing them; the level-1 harness
+            # never does, so they accumulate: report the day's increment.
+            cum = (sum(st.fmort_rate_canopy) + sum(st.fmort_rate_ustory)) / 1.0e4
+            r["FATES_MORTALITY_FIRE_SZ"] = cum - fmort_prev[]
+            fmort_prev[] = cum
             fc = zeros(NFC); mc = zeros(NFC)
             cp = st.oldest_patch
             while cp !== nothing

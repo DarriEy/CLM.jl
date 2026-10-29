@@ -326,6 +326,11 @@ end
             @test !r.balance_threw
             @test isempty(r.nan_steps)
             @test r.daily_fires >= 1   # the daily demographic + fire step fired
+            # CTSM's mode enumeration (FATESFireFactoryMod): 2 = lightning from data,
+            # 3 = successful ignitions, 4 = anthropogenic ignitions.
+            @test _C.hlm_sf_scalar_lightning_def[] == 1
+            @test _C.hlm_sf_successful_ignitions_def[] == 3
+            @test _C.hlm_sf_anthro_ignitions_def[] == 4
 
             # the SPITFIRE chain RAN live (the no_fire path leaves these at 0):
             # site fire-weather index, number of ignitions, fire-danger index.
