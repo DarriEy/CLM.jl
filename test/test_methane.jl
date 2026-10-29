@@ -732,4 +732,47 @@ include(joinpath(@__DIR__, "testdata.jl"))
         end
     end
 
+    # ch4Mod.F90 readParams: CLM.jl never read the CH4 paramfile entries, so every
+    # CH4 run used struct defaults (q10ch4=1.5 vs the clm5 paramfile's 1.33, which
+    # scales every layer's CH4 production). The hardcoded oxidation constants must
+    # NOT be overwritten from the file, since Fortran comments out those reads.
+    @testset "read_ch4_params! (ch4Mod readParams)" begin
+        file = Dict{String,Any}(
+            "q10ch4" => fill(1.33), "oxinhib" => fill(400.0),
+            "lake_decomp_fact" => fill(9e-11), "redoxlag_vertical" => fill(0.0),
+            "f_ch4" => fill(0.2), "aereoxid" => fill(0.0),
+            # file values the Fortran IGNORES (hardcoded in readParams):
+            "vmax_ch4_oxid" => fill(99.0), "k_m" => fill(99.0), "k_m_o2" => fill(99.0),
+            "k_m_unsat" => fill(99.0), "vmax_oxid_unsat" => fill(99.0),
+            "unsat_aere_ratio" => fill(99.0))
+        p = CLM.CH4Params()
+        CLM.read_ch4_params!(p, file; use_aereoxid_prog=true)
+        @test p.q10ch4 == 1.33
+        @test p.oxinhib == 400.0
+        @test p.lake_decomp_fact == 9e-11
+        @test p.redoxlag_vertical == 0.0
+        @test p.vmax_ch4_oxid   == 45.0e-6 * 1000.0 / 3600.0
+        @test p.k_m             == 5.0e-6 * 1000.0
+        @test p.k_m_o2          == 20.0e-6 * 1000.0
+        @test p.k_m_unsat       == 5.0e-6 * 1000.0 / 10.0
+        @test p.vmax_oxid_unsat == 45.0e-6 * 1000.0 / 3600.0 / 10.0
+        @test p.unsat_aere_ratio == 0.167
+        @test p.aereoxid == CLM.CH4Params().aereoxid      # prognostic aereoxid: not read
+        @test p.rob == CLM.CH4Params().rob                # absent from file: kept
+        p2 = CLM.CH4Params()
+        CLM.read_ch4_params!(p2, file; use_aereoxid_prog=false)
+        @test p2.aereoxid == 0.0
+
+        # The real clm5 paramfile (gated): the q10ch4 Fortran actually uses.
+        _, _pf = bow_params()
+        if isfile(_pf)
+            p3 = CLM.CH4Params()
+            CLM.NCDatasets.NCDataset(_pf, "r") do ds
+                CLM.read_ch4_params!(p3, ds)
+            end
+            @test p3.q10ch4 == 1.33
+            @test p3.oxinhib == 400.0
+        end
+    end
+
 end

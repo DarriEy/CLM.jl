@@ -236,6 +236,50 @@ Base.@kwdef mutable struct CH4Params
     om_frac_sf          ::Float64 = 1.0      # scale factor for organic matter fraction
 end
 
+# Parameters `ch4Mod.F90 readParams` reads from the CTSM paramfile (`tString`/
+# `ncd_io` pairs). The five oxidation constants (vmax_ch4_oxid, k_m, k_m_o2,
+# k_m_unsat, vmax_oxid_unsat) and unsat_aere_ratio are HARDCODED there (their file
+# read is commented out), so they are deliberately NOT in this list.
+const _CH4_PARAMFILE_FIELDS = (
+    :q10ch4, :q10ch4base, :f_ch4, :rootlitfrac, :cnscalefactor, :redoxlag,
+    :lake_decomp_fact, :redoxlag_vertical, :pHmax, :pHmin, :oxinhib,
+    :q10_ch4oxid, :smp_crit, :scale_factor_aere, :nongrassporosratio, :porosmin,
+    :vgc_max, :satpow, :scale_factor_gasdiff, :scale_factor_liqdiff, :f_sat,
+    :qflxlagd, :highlatfact, :q10lakebase, :atmch4, :rob, :capthick, :om_frac_sf)
+
+"""
+    read_ch4_params!(params::CH4Params, ds; use_aereoxid_prog=true)
+
+Port of `ch4Mod.F90 readParams`: fill `params` from an open CTSM paramfile
+dataset `ds` (anything supporting `haskey(ds, name)` / `ds[name]`).
+
+Before this existed CLM.jl never read the methane parameters, so every CH4 run used
+the struct defaults. Four of those differ from the clm5 paramfile:
+`q10ch4` 1.5 vs **1.33** (the extra methanogen Q10 — it scales every layer's
+CH4 production), `oxinhib` 10 vs 400, `lake_decomp_fact` 2e-8 vs 9e-11, and
+`redoxlag_vertical` 30 vs 0 days.
+
+`aereoxid` is read only when `!use_aereoxid_prog`, as in Fortran. A field missing
+from the file keeps its current value. Fortran would `endrun` instead; tolerating it
+keeps reduced test paramfiles usable.
+"""
+function read_ch4_params!(params::CH4Params, ds; use_aereoxid_prog::Bool=true)
+    _rd(name) = begin
+        haskey(ds, name) || return nothing
+        v = ds[name][]
+        (v === missing) ? nothing : Float64(v)
+    end
+    for f in _CH4_PARAMFILE_FIELDS
+        v = _rd(String(f))
+        v === nothing || setfield!(params, f, v)
+    end
+    if !use_aereoxid_prog
+        v = _rd("aereoxid")
+        v === nothing || (params.aereoxid = v)
+    end
+    return params
+end
+
 # ---------------------------------------------------------------------------
 # CH4Data — Methane state and flux data (from ch4_type)
 # ---------------------------------------------------------------------------

@@ -372,7 +372,13 @@ function init_soil_properties!(inst::CLMInstances, bounds::BoundsType,
             # Soil water retention (Clapp-Hornberger watdry, watopt, watfc)
             ss.watdry_col[c, j] = watsat_val * (316230.0 / sucsat_val)^(-1.0 / bsw_val)
             ss.watopt_col[c, j] = watsat_val * (158490.0 / sucsat_val)^(-1.0 / bsw_val)
-            ss.watfc_col[c, j]  = watsat_val * (0.01 / hksat_val)^(1.0 / (2.0 * bsw_val + 3.0))
+            # Field capacity, defined as hk = 0.1 mm/day (SoilStateInitTimeConstMod.F90:
+            # watsat*(0.1/(hksat*secspday))**(1/(2*bsw+3))). The port had 0.01/hksat,
+            # which treats the 0.1 mm/day threshold as 0.01 mm/s (~8640x too large),
+            # so watfc > watsat in every Bow layer. Its only readers are the Lee-Pielke
+            # soil beta (non-default; CLM5 uses sl_14) and nitrif_denitrif's use_lch4
+            # diffusivity branch, where it raised a negative base to a fractional power.
+            ss.watfc_col[c, j]  = watsat_val * (0.1 / (hksat_val * SECSPDAY))^(1.0 / (2.0 * bsw_val + 3.0))
         end
 
         # Threshold soil moisture and clay mass fraction for dust emission, set

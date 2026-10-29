@@ -1156,3 +1156,106 @@ julia +1.12 --project=. scripts/make_firedefo_inputs.jl      # synthetic surfdat
 bash /Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firedefo/run_bow_firedefo.sh
 julia +1.12 --project=. scripts/fortran_parity_firedefo.jl 6 # dtrotr scorecard
 ```
+
+---
+
+## 16. CH4-AS-A-SOURCE, CLOSED: the "CN confound" was a methane parameter bug (2026-10-28)
+
+HANDOFF §6 item 3 recorded methane-as-source as *confounded by warm-start CN state*. Every
+scorecard from §10 to §11 carried the same `CH4_PROD_SAT ≈ 7.9%` residual. It was attributed to
+production reading this step's `somhr`/`lithr`/`hr_vr`, which the dumps do not carry. **Once the
+CN state was locked to Fortran and HR was recovered from the reference, the residual turned out
+to have nothing to do with CN.** CLM.jl never read the methane paramfile entries.
+
+### Removing the confound — `scripts/fortran_parity_ch4_source.jl`
+* **CN locked to Fortran every step.** Before each step the full Fortran restart
+  (`pdump_before_step_n<N>`: decomp C/N pools, veg C/N, soil T/water) is injected through
+  `CLM.read_fortran_restart!`, the restart-injection route the CN/crop harnesses use. Both codes
+  decompose the identical CN state.
+* **CH4 free-running.** The CH4 prognostics are injected once, at n4721, and then carried by
+  Julia for the whole 168-step window (2202-07-16 → +7 days), so a wrong source term compounds.
+  `finundated` is forced (TWS back-derived from `FINUNDATED`, as in §11).
+* **HR attributed, not assumed.** In the saturated column (jwt = 0) `ch4_prod` reduces to
+  `CH4_PROD_SAT(j) = f_ch4_adj(j)·hr_vr(j)/catomw`. With Fortran's own `T_SOISNO` and
+  `FINUNDATED[_LAG]`, this recovers Fortran's `hr_vr` per layer, which is then diffed against
+  Julia's. The only assumed input is `q10ch4 = 1.33`, the paramfile value. The harness also diffs
+  the non-HR O₂ demand (`O2_DECOMP − hr/catomw`: root respiration plus nitrification).
+
+### Bugs found and FIXED (all `use_lch4`-gated except watfc; see "default path" below)
+| # | bug | Fortran reference | effect at Bow |
+|---|---|---|---|
+| 1 | **Methane paramfile never read.** `CH4Params` ran on struct defaults: `q10ch4` 1.5 vs **1.33**, `oxinhib` 10 vs 400, `lake_decomp_fact` 2e-8 vs 9e-11, `redoxlag_vertical` 30 vs 0. New `read_ch4_params!` is called from `clm_initialize!` under `use_lch4`; the five hardcoded oxidation constants and `unsat_aere_ratio` are deliberately not read. | `ch4Mod.F90 readParams` | **The whole 7.9% `CH4_PROD_SAT` residual** (q10ch4^((T−295)/10) at T ≈ 280–288 K) |
+| 2 | `ch4!` was called with `use_nitrif_denitrif=false, anoxia=false` hardcoded. CTSM sets `anoxia = use_lch4`, and the reference runs `use_nitrif_denitrif=.true.`. As a result the nitrification O₂ demand (`pot_f_nit_vr·2/14`) was missing from `o2_decomp_depth`, and the anoxia branch (no `sif` scaling, `/o_scalar`) never ran. | `controlMod.F90:465`, `ch4Mod.F90 ch4_prod` | O₂ demand → oxidation / O₂ stress |
+| 3 | The CN→CH4 coupling was open-loop. The CENTURY `decomp_rate_constants_bgc!` was called without `use_lch4/anoxia/o2stress_unsat`, so `o_scalar ≡ 1`. `nitrif_denitrif!` had `use_lch4=false`, so `anaerobic_frac` and `diffus` were zeroed. `soil_biogeochem_decomp!` had `use_lch4=false`, so `fphr` was never computed. The MIMICS call referenced a non-existent `config.use_lch4`. All four now take the previous step's `CH4Data` via a new `ch4` kwarg (driver → facade → `cn_driver_no_leaching!`). | `SoilBiogeochemDecompCascadeBGCMod.F90:765/843`, `SoilBiogeochemNitrifDenitrifMod.F90:278`, `SoilBiogeochemDecompMod.F90:229` | anoxia limits decomposition; denitrification sees O₂ |
+| 4 | **`watfc` (field capacity) was ~8640× wrong.** Cold start used `watsat·(0.01/hksat)^(1/(2b+3))` instead of `watsat·(0.1/(hksat·secspday))^(…)`, so `watfc > watsat` in every Bow layer. Wiring #3 surfaced it as a `DomainError`: the use_lch4 nitrif diffusivity raised a negative `1 − watfc/watsat` to a fractional power. | `SoilStateInitTimeConstMod.F90:599/701` | nitrif diffusivity / anaerobic fraction |
+| 5 | `ch4!` received `col.zi[:, nlevsno+1 : …]`, i.e. `zi(0:nlevsoi)`, but every methane kernel reads `zi[c,k]` as Fortran `zi(c,k)`. `zwt_ch4_unsat = zi(jwt)`, the ebullition head `z(j) − zi(jwt)`, and `ch4_prod`'s `zi(nlev_soildecomp_standard)` were all one interface too shallow. Now `zi(1:nlevsoi)`. | `ch4Mod.F90:2035`, `ch4_ebul` | `ZWT_CH4_UNSAT` 0.133 → **exact** (1.1 m at Bow) |
+| — | Harness: `fortran_parity_ch4_tws.jl` injected `O2_DECOMP_SAT/UNSAT` (bgcdump names), which do not exist in the restart, so nothing was injected. The restart names are `O2_DECOMP_DEPTH_*`. | — | nitrif now reads the injected value |
+
+**Default path.** #1–#3 and #5 run only under `use_lch4` (the `ch4` kwarg is `nothing`
+otherwise). `watfc` (#4) has exactly two readers: the Lee–Pielke soil beta, which is not the
+default (CLM5 uses `sl_14`), and the use_lch4 nitrif branch. The default non-CH4 path is
+therefore byte-identical.
+
+### Single-step scorecard — `fortran_parity_ch4_tws.jl 3` (CH4 re-injected each step)
+| field | before (§11) | after |
+|---|---|---|
+| `CH4_PROD_SAT`      | 7.85e-2 | **6.8e-4** |
+| `CH4_OXID_SAT`      | 4.09e-2 | **3.6e-4** |
+| `O2STRESS_SAT`      | 1.56e-2 | **3.0e-3** |
+| `CH4STRESS_SAT`     | 2.81e-2 | **2.4e-4** |
+| `CH4_SURF_DIFF_SAT` | 5.53e-2 | **4.7e-4** |
+| `CH4_SURF_FLUX_TOT` | 2.11e-3 | **6.6e-5** |
+| `CONC_CH4_SAT`      | 3.7e-4  | **2.5e-5** |
+| `CONC_O2_SAT`       | 2.5e-4  | **7.3e-6** |
+| `CH4_AERE_SAT`      | 4.7e-3  | **4.2e-5** |
+| `TOTCOLCH4`         | 4.4e-4  | **4.1e-6** |
+| `ZWT_CH4_UNSAT`     | 1.33e-1 | **0 (exact)** (after #5) |
+
+### Multi-step source scorecard — `fortran_parity_ch4_source.jl 168 locked`
+CN locked, CH4 free-running for **168 h**. Worst profile-scaled rel.err over the whole window:
+
+| field | worst rel.err | \|F\| scale |
+|---|---|---|
+| `hr_vr` (Julia vs Fortran-recovered) | **6.6e-4** (constant every step) | — |
+| `CH4_PROD_SAT`      | **6.6e-4** (= the HR residual, to 3 digits) | 6.5e-8 |
+| `CONC_CH4_SAT`      | 3.1e-4 (grows ~linearly from 2.9e-6) | 3.0e-2 |
+| `TOTCOLCH4`         | 2.6e-4 | 4.7e-3 |
+| `CH4_AERE_SAT` / `CH4_SURF_AERE_SAT` | 3.1e-4 / 3.1e-4 | 3.6e-8 / 9.6e-9 |
+| `O2_DECOMP_SAT/UNSAT` | 2.5e-3 | 1.1e-6 |
+| `CH4_OXID_UNSAT` / `CH4_SURF_DIFF_UNSAT` | 8.3e-4 / 7.9e-4 | 7.3e-10 / 2.6e-10 |
+| `CH4_SURF_FLUX_TOT` | 8.6e-3 | 2.7e-12 |
+| `CH4_SURF_DIFF_SAT` | 1.0e-2 | 2.7e-12 |
+| `O2STRESS_SAT` / `CH4STRESS_SAT` | 4.6e-3 / 1.4e-2 | 1 |
+| `CH4_OXID_SAT` / `CH4_TRAN_SAT` | 3.3e-2 / 3.6e-2 | 1.2e-7 / 5.6e-11 |
+| `CONC_O2_SAT`       | 5.8e-2 | 1.8e-1 |
+| `ZWT_CH4_UNSAT`     | **0** | 8.6 |
+| `CH4_EBUL_*`        | F ≡ 0 (below threshold at Bow; §14 covers ebullition) | — |
+
+Over the first 3 steps every field is ≤ 9e-4, `CONC_*` ≤ 2e-5, and the non-HR O₂ demand
+residual is 2.9e-4.
+
+**Attribution.** Production is now exact to the CN floor: the `CH4_PROD_SAT` error equals the HR
+error to three digits at every step, so the production kernel adds nothing. The 6.6e-4 HR residual
+is the CN single-step floor, a CN decomposition residual and not a methane one. Over 7 days of
+free-running CH4, the methane column (`CONC_CH4_SAT`, `TOTCOLCH4`) stays within 3e-4. The surface
+flux stays within 1e-2 while it falls 10× through the diurnal cycle; the profile scale is set at
+its peak.
+
+### What remains (reported, not tuned)
+* **Saturated-column O₂ drifts to 5.8% after 168 h** (`CONC_O2_SAT`, and through it
+  `CH4_OXID_SAT`/`CH4_TRAN_SAT` at 3–4%). After 3 steps it is 2e-5, so this is accumulation and
+  not a per-step bug. The saturated O₂ pool is fed by a slow aerenchyma/diffusion supply against
+  a near-balancing demand, so a small demand bias integrates. The O₂ demand itself is within
+  2.5e-3. Its non-HR part (root respiration + nitrification, CN-side inputs) was 2.9e-4 at
+  3 steps and grows because nitrification now reads Julia's own free-running
+  `o2_decomp_depth_unsat` / `conc_o2_unsat`. Closing it further means diffing `rr` and
+  `pot_f_nit_vr` directly, and neither is in the dumps (this needs a bgcdump rebuild).
+* Ebullition is still physically zero at Bow. §14's perturbed-concentration reference covers it.
+
+### Reproducing
+```bash
+export SYMFLUENCE_DATA=... CESM_INPUTDATA=...
+julia --project=. scripts/fortran_parity_ch4_tws.jl 3              # single-step, CH4 re-injected
+julia --project=. scripts/fortran_parity_ch4_source.jl 168 locked  # CN locked, CH4 free, 7 days
+julia --project=. -e 'using Test, CLM; include("test/test_fortran_parity_ch4_source.jl")'  # gated, 12 steps
+```

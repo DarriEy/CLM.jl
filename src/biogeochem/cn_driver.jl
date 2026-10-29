@@ -283,6 +283,17 @@ function cn_driver_no_leaching!(
         # Soil-water state (soil-layer slices) for nitrif/denitrif anoxia.
         h2osoi_vol::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
         h2osoi_liq::Union{AbstractMatrix{<:Real}, Nothing} = nothing,
+        # ---- Methane (use_lch4) coupling ----------------------------------
+        # CTSM sets `anoxia = use_lch4` (controlMod.F90) and, under use_lch4, three CN
+        # routines read the PREVIOUS step's ch4 state:
+        #   * SoilBiogeochemDecompCascadeBGC/MIMICS decomp rates: o_scalar =
+        #     max(o2stress_unsat, mino2lim)  (anoxia limitation of decomposition);
+        #   * SoilBiogeochemNitrifDenitrif: anaerobic_frac + gas diffusivity from
+        #     o2_decomp_depth_unsat / conc_o2_unsat (else both are zeroed);
+        #   * SoilBiogeochemDecomp: fphr (fraction of potential HR) for ch4_prod.
+        # The CH4Data instance is supplied by the driver only when use_lch4; nothing
+        # (the default) keeps every one of these on its non-CH4 branch, byte-identical.
+        ch4 = nothing,
         # ---- CN fire inputs (Li2014-family) -------------------------------
         # The live fire path (cnfire_area! burned-area + cnfire_fluxes_dispatch!
         # C/N fluxes) runs only when config.cnfire_method !== :nofire AND this
@@ -646,6 +657,10 @@ function cn_driver_no_leaching!(
     _i_cop_mic = _use_mimics ? mimics_state.i_cop_mic : 0
     _i_oli_mic = _use_mimics ? mimics_state.i_oli_mic : 0
 
+    # Methane coupling active? (see the `ch4` kwarg). anoxia == use_lch4 in CTSM.
+    _lch4 = ch4 !== nothing && !isempty(ch4.o2stress_unsat_col)
+    _o2stress_unsat = _lch4 ? ch4.o2stress_unsat_col : Matrix{Float64}(undef, 0, 0)
+
     if _has_decomp
         # Materialize the soil-layer slice as a CONTIGUOUS array (not a @view) so it
         # is a valid device kernel arg; the empty fallback is device-resident.
@@ -671,8 +686,9 @@ function cn_driver_no_leaching!(
                 days_per_year=dayspyr,
                 dt=dt,
                 spinup_state=0,
-                use_lch4=config.use_lch4,
-                anoxia=config.use_lch4,
+                use_lch4=_lch4,
+                anoxia=_lch4,
+                o2stress_unsat=_o2stress_unsat,
                 use_fates=config.use_fates)
         else
             decomp_rate_constants_bgc!(soilbgc_cf,
@@ -685,6 +701,9 @@ function cn_driver_no_leaching!(
                 days_per_year=dayspyr,
                 dt=dt,
                 zsoi_vals=zsoi_vals,
+                use_lch4=_lch4,
+                anoxia=_lch4,
+                o2stress_unsat=_o2stress_unsat,
                 col_dz=_col_dz)
         end
 
@@ -727,7 +746,10 @@ function cn_driver_no_leaching!(
                 sucsat=soilstate.sucsat_col, soilpsi=Array(soilpsi),
                 h2osoi_vol=Array(h2osoi_vol), h2osoi_liq=Array(h2osoi_liq),
                 t_soisno=Array(t_soisno),   # _NitrifIn groups inputs as Matrix; materialize views
-                col_dz=Array(col.dz[:, (varpar.nlevsno+1):end]), use_lch4=false)
+                col_dz=Array(col.dz[:, (varpar.nlevsno+1):end]),
+                use_lch4=_lch4,
+                o2_decomp_depth_unsat=(_lch4 ? Array(ch4.o2_decomp_depth_unsat_col) : zeros(0, 0)),
+                conc_o2_unsat=(_lch4 ? Array(ch4.conc_o2_unsat_col) : zeros(0, 0)))
         end
 
         # 2c. FUN (Fixation & Uptake of Nitrogen) hook. When use_fun, the plant's
@@ -863,6 +885,7 @@ function cn_driver_no_leaching!(
                 p_decomp_npool_to_din=p_decomp_npool_to_din,
                 dzsoi_decomp=dzsoi_decomp,
                 use_nitrif_denitrif=config.use_nitrif_denitrif,
+                use_lch4=_lch4,
                 use_mimics=_use_mimics,
                 use_soil_matrixcn=config.use_soil_matrixcn, Ksoil_DM=Ksoil_mat)
         end

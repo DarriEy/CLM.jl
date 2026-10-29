@@ -2419,6 +2419,9 @@ function clm_drv_core!(config::CLMDriverConfig,
             dayspyr=get_average_days_per_year(),
             h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
             h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
+            # use_lch4 coupling (CTSM anoxia == use_lch4): o_scalar from the previous
+            # step's o2stress_unsat, nitrif anaerobic_frac, fphr. nothing => non-CH4 path.
+            ch4=((config.use_lch4 && !isempty(inst.ch4.o2stress_unsat_col)) ? inst.ch4 : nothing),
             # ---- CN fire (Li family) bundle ----
             # Supplied ONLY when config.cnfire_method !== :nofire; otherwise every
             # entry is `nothing`/empty and cn_driver's `_fire_active` gate is false,
@@ -2849,11 +2852,22 @@ function clm_drv_core!(config::CLMDriverConfig,
              Matrix(cnf_ch4.fphr_col[:, _dl]), Matrix(nnf_ch4.pot_f_nit_vr_col[:, _dl]),
              _ch4_lakeicefr, col.lakedepth,
              Matrix(col.z[:, _sl]), Matrix(col.dz[:, _sl]),
-             Matrix(col.zi[:, (nlevsno + 1):(nlevsno + nlevsoi + 1)]),
+             # zi(1:nlevsoi): every methane kernel reads zi[c, k] as Fortran zi(c,k),
+             # the BOTTOM interface of layer k (zwt_ch4_unsat = zi(c,jwt), the
+             # ebullition hydrostatic head z(j)-zi(jwt), ch4_prod's
+             # zi(c,nlev_soildecomp_standard)), and treat jwt == 0 as the surface.
+             # The old slice started at zi(0), shifting every read up one interface:
+             # zwt_ch4_unsat came out one layer too shallow (1.1 m at Bow).
+             Matrix(col.zi[:, (nlevsno + 2):(nlevsno + nlevsoi + 1)]),
              nlevsoi, nlevsno, varpar.nlevdecomp, varpar.nlevdecomp_full,
              5, 0.01, 130.0,
              bc.endg, noveg, dtime,
-             config.use_cn, false, false,
+             # use_nitrif_denitrif adds the nitrification O2 demand (pot_f_nit_vr*2/14)
+             # to o2_decomp_depth; anoxia (== use_lch4 in CTSM controlMod.F90, so
+             # always true here) skips the seasonal-inundation `sif` scaling and
+             # divides o2_decomp_depth by o_scalar (ch4Mod.F90 ch4_prod). These were
+             # hardcoded false, contradicting the Fortran the reference runs.
+             config.use_cn, inst.bgc_vegetation.driver_config.use_nitrif_denitrif, true,
              cveg_cf.agnpp_patch, cveg_cf.bgnpp_patch, 365.0 * SECSPDAY;
              finundated_stream = (inst.ch4_varcon.finundation_mtd == FINUNDATION_MTD_H2OSFC ?
                                   nothing : inst.ch4_finundated_stream),
