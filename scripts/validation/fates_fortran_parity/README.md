@@ -1106,3 +1106,97 @@ fragmentation scalars as the Fortran reference, and the oracle moves toward Fort
   on both sides and `suplnitro='ALL'` supplements immobilization.
 * MIMICS under FATES (`clm_initialize!` refuses `decomp_method=2` with FATES-BGC).
 * FATES-BGC restarts, and windows longer than 10 days for the soil pools.
+
+---
+
+# RESEARCH MODES (2026-10-29): tree damage, ST3, prescribed physiology, cohort age, seed dispersal, inventory init
+
+These six FATES modes were ported but never run. `clm_fates_init!` forced them off.
+They are now switchable from `clm_initialize!` with CTSM's namelist names
+(`use_fates_tree_damage`, `use_fates_ed_st3`, `use_fates_ed_prescribed_phys`,
+`use_fates_cohort_age_tracking`, `fates_seeddisp_cadence`, `use_fates_inventory_init` +
+`fates_inventory_ctrl_filename`, and `fates_paramfile` for a parameter variant).
+`fates_check_niche_modes` applies CTSM's host-side rules before any state is built:
+cadence must be in 0..3, the inventory control file must be set and exist, ST3 excludes
+prescribed physiology, inventory excludes cohort age, and tree damage excludes CNP. FATES's
+own `check_allset` re-checks the FATES rules. It now runs after the parameter read, as in
+`CLMFatesGlobals2`. With every mode off, the 120-step parity dump is byte-identical to the
+tree before this change.
+
+## Recipe
+
+```bash
+# Fortran: stage a mode from the fates_bgc_1pt_v2 run dir (lnd_in override + daily
+# history) and run cesm.exe in it (~3 s for 14 days)
+python3 stage_niche_mode.py runs/fates_bgc_1pt_v2 runs/fates_niche_<mode> 14 \
+    use_fates_ed_prescribed_phys=.true. [paramfile=<.nc>] [mesh=<.nc>] [fields=A,B]
+# parameter variants (seed dispersal, damage events): edit the CDL, ncgen it for Fortran
+python3 make_param_variant.py data/fates/fates_params_default.cdl out.cdl name=value ...
+# Julia: same case, one CSV row per day
+FATES_NICHE_DAYS=14 julia --project=. scripts/fates_niche_modes.jl <mode> out.csv
+# score: Julia vs Fortran, and the mode effect (mode - base) in each model
+julia --project=. fates_niche_compare.jl jl_mode.csv f_mode.h0.nc jl_base.csv f_base.h0.nc
+```
+
+The base runs differ by the known host residual (vegc 0.3 %, FSH 11 % daily mean), so each
+mode is scored on its own state and on its effect relative to the matching base run.
+
+## Results (14 days from 2002-07-01, Bow at Banff, all 14 PFTs, FATES soil BGC)
+
+| mode | Julia runs | Fortran parity | fixes |
+|---|---|---|---|
+| prescribed physiology | yes | ncoh identical every day (14 to 95); vegc/leafc/storec/structc/seed bank within 5e-8 (the float32 history precision) | none needed |
+| inventory init | yes | day 0: 9 cohorts, 2 patches, every pool within 5e-8. 14 days: ncoh identical every day (57/57), npatch 9/9, vegc 1.6e-4, structc 1.3e-4 | NaN inventory coage blocked all fusion (Julia 335 cohorts vs 57); host coordinates passed to the proximity check |
+| seed dispersal (cadence 1) | yes | seed-bank effect −4.80e-4 vs −4.64e-4 kgC/m² (3.4 %); per-PFT daily `seed_out` and its daily reset track Fortran | host wiring was missing (`WrapUpdateFatesSeedInOut`, outgoing buffer, `WrapGlobalSeedDispersal`) |
+| cohort age tracking | yes | ncoh effect +98 vs +95 by day 9; vegc effect < 2e-7 in both | none needed |
+| ST3 | yes | Fortran writes no FATES history under ST3 (`update_history_dyn` returns). Julia holds the stand bit-static (14 cohorts, cold-start carbon); host effect at day 14: FSH +2.33 vs +2.18 W/m², HR +3.13e-8 vs +2.97e-8 gC/m²/s; the TV effect is under 0.05 K and differs in sign | none needed |
+| tree damage | yes | default `fates_damage_event_code = 1` means no events: both models are identical to their base runs on every field. With events (code 2 or 3) CTSM hangs at the first daily step (>13 min CPU at nstep 1), so there is no Fortran reference | `branch_loss_frac` was scoped inside the element loop, so the first damage event threw `UndefVarError`; Julia now runs with events (code 2 moves 0.8 % of plants to damage class 2, mass conserved) |
+
+Notes:
+
+* **Seed dispersal is single-point here.** One gridcell has no neighbours
+  (`DetermineGridCellNeighbors` loops over pairs), so the incoming seed is always 0 and
+  the mode reduces to exporting `fates_seed_dispersal_fraction` of the seed rain. The
+  inter-gridcell kernel needs a multi-gridcell run, which this case cannot provide. The
+  default parameter file leaves the four `fates_seed_dispersal_*` parameters unset, so the
+  runs use `make_param_variant.py` with fraction 0.2.
+* **Inventory init cannot run unmodified in Fortran at this site.** FATES converts negative
+  inventory longitudes to [0, 360] but compares them with the host longitude as-is, so any
+  site on a [-180, 180] mesh (Bow is at -116.01) aborts at FatesInventoryInitMod.F90:247.
+  The Fortran reference uses a copy of the site mesh with longitude +360 (`mesh=`). That
+  copy is not neutral for the host (FSH up to 45 %), which is why inventory is scored
+  against `base_lon360` and mainly on the day-0 stand. The port wraps the host longitude
+  into [0, 360) instead of aborting. The synthetic pss/css pair (2 patches, 6 cohorts of
+  PFTs 2/6/12) is in `runs/fates_niche_inputs/`.
+* **Cohort age:** after day 10 the Fortran run takes a knife-edge cold-deciduous leaf-off
+  (PFTs 3/6/11 lose ~25 % vegc in one day) that its base run does not take. The unrelated
+  `base_lon360` run takes the identical event, so it is a threshold flip, not an age-tracking
+  effect. The mode is scored on days 0-10.
+* **Tree damage hang:** reproduced with `fates_damage_event_code` 2 and 3 on this case. It
+  was not traced further (debugger runs are unreliable on this machine; see setup_case.sh).
+
+## Restart round trip
+
+`write_fates_restart` packs the FATES state (`set_restart_vectors!`) to NetCDF on the
+`cohort`/`column` dimensions. `read_fates_restart!` follows the Fortran `restart(flag='read')`
+sequence. It rebuilds fresh sites with `create_patchcohort_structure!`, which now calls
+`init_site_vars!` + `zero_site!` (the open TODO, FatesRestartInterfaceMod.F90:2856) and
+`NanValues` + `ZeroValues` on each new cohort. Then it runs `get_restart_vectors!`,
+`ed_update_site(is_restarting=true)`, the `wrap_update_hlmfates_dyn` hand-off,
+`update_3dpatch_radiation!`, the dynamics history and the restart seed-dispersal call. Plant
+hydraulics restarts (`RestartHydrStates`) are not wired and refuse.
+
+Test: base case, FATES restart written after day 7 and the sites rebuilt from the file,
+compared with the continuous run. **All 97 daily diagnostics (FATES state and host
+FSH/TV/HR) are bit-identical on all 15 rows.** The first attempt failed the day-8 mass
+balance with NaN litter fragmentation. The cause was that restarted cohorts skipped
+`ZeroValues`, leaving the fields it sets (fire mortality, the daily N/P demand/uptake
+sentinels, ...) as NaN; that is now fixed. The host CLM state is carried in memory, not through a host restart file.
+
+## Found, not fixed (outside these modes)
+
+`site.lat/lon` are never set in the port (NaN), while Fortran sets them from the host
+gridcell (clmfates_interfaceMod.F90:884-885). Phenology tests `site.lat > 0`, so at Bow
+(51°N) the port takes the southern-hemisphere branch: `gddstart = 181` resets GDD on 1 July
+and `ncdstart = 120`. Fixing it changes the default output, so it is left for the default-path
+owners.
