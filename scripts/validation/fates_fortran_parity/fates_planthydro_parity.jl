@@ -16,11 +16,11 @@
 # The Fortran plant means are the FATES_*_SZPF history fields weighted by
 # FATES_NPLANT_SZPF; the Julia ones are computed from the cohorts directly
 # (Σ n·x / Σ n), the same quantity. The means are over the WOODY PFTs (1-11): for
-# grasses (allom_smode = 2) the Fortran `bsap_allom` never assigns its intent(out)
-# `sapw_area`, so UpdatePlantKmax / UpdatePlantHydrLenVol read an uninitialized
-# a_sapwood and the Fortran grass hydraulics are undefined behaviour (the reference
-# shows grass leaf water contents of 0.68 m3/m3 and positive leaf pressures). The
-# grass PFTs are still reported per PFT (PSI_LEAF_pft12..14) for transparency.
+# grasses (allom_smode = 2) ctsm5.3.012's FATES `bsap_allom` never assigns its
+# intent(out) `sapw_area`, so the reference's grass hydraulics run on uninitialized
+# stack memory (binary-layout dependent; see README §"PLANT HYDRAULICS"). The port
+# uses upstream FATES's SapwoodAreaGrass. Grass PFTs are reported per PFT
+# (PSI_LEAF_pft12..14) for transparency.
 #
 # usage:
 #   julia --project=. scripts/validation/fates_fortran_parity/fates_planthydro_parity.jl \

@@ -195,7 +195,7 @@ no `lmort_logging` (use `lmort_direct`); running means live at patch not cohort 
 > hourly Fortran run (see `scripts/validation/fates_fortran_parity/README.md`
 > §"PLANT HYDRAULICS"). Still open: the 2-D solvers (`MatSolve2D`/`PicardSolve2D`, still
 > `fates_endrun`), a host-level FATES restart driver (RestartHydrStates is called by tests
-> only), and grass hydraulics (undefined in the Fortran — see the README).
+> only), and grass parity (the reference reads an uninitialized `sapw_area`; the port uses upstream FATES `SapwoodAreaGrass` — see the README).
 
 The hard math is **already ported** (1D Taylor solver core ~1,300 lines, all plant-level helpers,
 WTF/WKF retention+conductivity, mem types). ~2,700 Fortran lines / 19 routines remain (the two

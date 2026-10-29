@@ -126,6 +126,26 @@ include("testdata.jl")
             end
             @test nchk > 0
 
+            # 4b. grasses (allom_smode 2): finite, positive conductances (upstream
+            # SapwoodAreaGrass; returning 0 made them 0/0 = NaN).
+            ngrass = 0
+            cp = site.oldest_patch
+            while cp !== nothing
+                cc = cp.tallest
+                while cc !== nothing
+                    if CLM.prt_params.allom_smode[cc.pft] == 2
+                        h = cc.co_hydr
+                        @test all(isfinite, h.kmax_stem_upper) && all(>(0), h.kmax_stem_upper)
+                        @test isfinite(h.kmax_troot_upper) && all(isfinite, h.kmax_aroot_upper)
+                        @test all(isfinite, h.psi_ag) && isfinite(h.btran)
+                        ngrass += 1
+                    end
+                    cc = cc.shorter
+                end
+                cp = cp.younger
+            end
+            @test ngrass > 0
+
             # 5. RestartHydrStates rebuilds what depends on the restored water states.
             ref = Dict{Any,Any}()
             cp = site.oldest_patch

@@ -277,6 +277,8 @@ fd_deriv(f, x; h=1e-6) = (f(x + h) - f(x - h)) / (2h)
             bagw, _ = CLM.bagw_allom(d, ft, 1, 1.0)
             bbgw, _ = CLM.bbgw_allom(d, ft, 1.0)
             @test isapprox(bsap, bagw + bbgw; rtol=1e-9)
+            # upstream FATES SapwoodAreaGrass: basal cross-section [m2]
+            @test sapw_area ≈ π * (d / 2)^2 / 1e4 rtol = 1e-10
         end
         p.allom_smode[ft] = 1   # restore
     end

@@ -1140,12 +1140,25 @@ Two Fortran behaviours the port reproduces deliberately:
   "previous" water by reference, aliased to the value UpdateH2OVeg zeroes and rewrites,
   so its conservation check compares the new value with itself and never fires (it could
   not hold at the cold start anyway). The port re-diagnoses without the check.
-* For grasses (`allom_smode = 2`) Fortran `bsap_allom` never assigns its intent(out)
-  `sapw_area`, so `UpdatePlantKmax` / `UpdatePlantHydrLenVol` read an uninitialized
-  `a_sapwood`: Fortran grass hydraulics are undefined behaviour (the reference shows grass
-  leaf water contents of 0.68 m3/m3 and positive leaf pressures). The port returns 0, so
-  grass conductances are NaN and grass leaves are hydraulically isolated. Woody PFTs are
-  unaffected; the plant-water scores below are means over the woody PFTs 1-11.
+* Grasses (`allom_smode = 2`): ctsm5.3.012's FATES `bsap_allom` never assigns its
+  intent(out) `sapw_area`, and nothing guards it (no `woody` checks in the hydraulics, no
+  conductance clamp, no `-finit-*` flags in the `-O` build), so `UpdatePlantKmax` /
+  `UpdatePlantHydrLenVol` read uninitialized stack memory. Measured by rebuilding the
+  reference `cesm.exe` from the same objects (`runs/fates_hydro_probe/`): an unmodified
+  rebuild reproduces the reference h0 bit-for-bit; adding one `write` of `a_sapwood` shows
+  **7.46 m2** in UpdatePlantKmax (every call) and ~1e-314 (sometimes ~0.3) in
+  UpdatePlantHydrLenVol, and that single write statement changes the whole run (H2OSOI by
+  up to 0.024, grass leaf psi by 7e9 Pa). The grass value is a property of the binary's
+  stack layout, so there is nothing reproducible to port. The port uses the upstream fix,
+  FATES main's `SapwoodAreaGrass` (basal cross-section, pi (d/2)^2): no NaN, and finite,
+  physical grass conductances. (Before this, the port returned 0, which made the grass stem
+  kmax 0/0 = NaN; that NaN stayed inside the grass cohort: no NaN reached root uptake,
+  BTRAN, carbon, or any history field.) Grass parity with this reference is therefore not
+  achievable; plant-water scores are woody means (PFTs 1-11).
+* The post-day-3 divergence is *not* from the grasses: with the port's grass kmax
+  `a_sapwood` forced to the probe binary's 7.46 m2 and compared against that probe
+  binary's run, grass leaf psi matches to 3.7e-4 on day 1, but after day 3 GPP is still
+  0.30x and QVEGT 0.12x — the same collapse.
 
 ## Fortran reference and result
 `stage_planthydro_run.sh` runs the archived case with `use_fates_planthydro = .true.`
@@ -1153,19 +1166,22 @@ Two Fortran behaviours the port reproduces deliberately:
 `fates_planthydro_parity.jl` steps the port and scores it (median per-step relative error;
 ratio = sum Julia / sum Fortran over the window):
 
+(With SapwoodAreaGrass; before it: PFT-1 psi after day 3 0.38, GPP ratio 0.28, QVEGT
+ratio 0.11, and 0.38 on days 2-3.)
+
 | field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
 |---|---|---|---|
-| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.38 |
-| leaf psi, woody mean | 1.6e-4 | 1.7e-2 | 0.55 |
+| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.32 |
+| leaf psi, woody mean | 1.6e-4 | 1.6e-2 | 0.51 |
 | leaf / stem water content | 4e-5 / 2e-5 | 1.3e-3 / 2.4e-3 | 0.10 / 0.06 |
 | cohort hydraulic btran | 4.1e-4 | 4.4e-2 | 0.73 |
 | FATES_VEGH2O | 1.1e-2 | 6.8e-3 | 5.1e-2 |
-| QROOTSINK layer 1 (ratio) | 4.1e-2 (1.03) | 7.9e-2 (0.99) | 0.21 (0.95) |
+| QROOTSINK layer 1 (ratio) | 3.0e-2 (1.05) | 8.0e-2 (1.02) | 0.23 (0.97) |
 | SOILLIQ layer 1 / 4 | 4.4e-3 / 0.14 | 4.1e-3 / 5.5e-2 | 2.2e-3 / 2.7e-3 |
 | EFLX_LH_TOT (ratio) | 0.14 (1.19) | 2.2e-2 (0.90) | 4.0e-2 (0.95) |
-| FATES_GPP (ratio) | 2.9e-2 (1.11) | 3.5e-2 (0.76) | 0.37 (0.28) |
-| QVEGT (ratio) | 0.19 (0.96) | 0.28 (0.38) | 0.69 (0.11) |
-| BTRAN (host, ratio) | 0.60 (1.60) | 0.50 (1.39) | 0.56 (0.50) |
+| FATES_GPP (ratio) | 2.9e-2 (1.12) | 3.5e-2 (0.85) | 0.33 (0.30) |
+| QVEGT (ratio) | 0.13 (1.03) | 0.13 (0.66) | 0.45 (0.15) |
+| BTRAN (host, ratio) | 0.60 (1.60) | 0.56 (1.42) | 0.59 (0.49) |
 
 * The woody plant water states track the Fortran to ~1e-4 for the first day: the solver,
   the transpiration partition, the rhizosphere and the soil coupling agree.
@@ -1174,8 +1190,9 @@ ratio = sum Julia / sum Fortran over the window):
   `cohortfuse` 58->43 vs 58->38, §"Reading of the result"). With hydraulics on, recruits
   take their water from the soil (`RecruitWUptake`) and both models show recruit
   leaf-potential spikes (to -600 MPa Fortran, -7000 MPa port). Not yet root-caused.
-* Host `BTRAN` is the biomass-weighted patch mean over all cohorts *including* the grasses,
-  so it inherits the Fortran grass undefined behaviour from step 1.
+* Host `BTRAN` is the biomass-weighted patch mean over all cohorts *including* the grasses;
+  its 60 % day-1 offset is unchanged with the grasses matched (the 7.46 experiment), so it
+  is not the grass term either — still open.
 * The site is extremely water-stressed (cold-start frozen soil; leaf psi ~ -15 MPa), so
   transpiration is ~1e-8 mm/s and QVEGT / BTRAN relative errors are on near-zero values.
 * Column water balance with hydraulics on (plant water in the budget): |errh2o| < 6e-13 mm
