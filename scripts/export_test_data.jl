@@ -20,12 +20,12 @@ using CLM
 # Configuration
 # ---------------------------------------------------------------------------
 
-const DATA_DIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const DATA_DIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped"
 const FSURDAT   = joinpath(DATA_DIR, "settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = joinpath(DATA_DIR, "settings/CLM/parameters/clm5_params.nc")
 const FORCING_DIR = joinpath(DATA_DIR, "data/forcing/CLM_input")
-const FSNOWOPTICS = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const FSNOWAGING  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const FSNOWOPTICS = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const FSNOWAGING  = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 
 const YEAR = 2002
 const START_DATE = DateTime(YEAR, 1, 1)
@@ -36,7 +36,7 @@ const INT_SNOW_MAX = 3113.2
 
 # Output directory
 const OUTDIR = length(ARGS) >= 1 ? ARGS[1] :
-    "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/CLM-hs/test/data"
+    "$(homedir())/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/CLM-hs/test/data"
 
 mkpath(OUTDIR)
 

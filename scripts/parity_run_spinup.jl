@@ -22,7 +22,7 @@ using NCDatasets, Dates, Printf, CLM
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
 
 const YEAR = 2003
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped"
 const caldir  = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters")
 
 fsurdat  = joinpath(caldir, "surfdata_clm.nc")
@@ -44,16 +44,16 @@ fhistory = joinpath(outdir,
               "julia_clm_bow_spinup_$(YEAR).nc")
 
 # Fortran spun-up restart IC + the Fortran reference history (h0).
-ffortran_restart = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.r.$(YEAR)-01-01-00000.nc"
-f_h0 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.h0.$(YEAR)-01-01-00000.nc"
+ffortran_restart = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_parity_run/Bow_at_Banff_lumped.clm2.r.$(YEAR)-01-01-00000.nc"
+f_h0 = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_parity_run/Bow_at_Banff_lumped.clm2.h0.$(YEAR)-01-01-00000.nc"
 
 # SNICAR data files. The Fortran lnd_in references /Users/.../projects/cesm-inputdata
 # (not present here); the same files live under SYMFLUENCE_data/installs/cesm-inputdata.
 # Without them Julia silently falls back to the BATS snow albedo while Fortran ran full
 # SNICAR — a scheme mismatch that melted Julia's spring snowpack ~a month early. Prefer
 # the existing copy, fall back to the projects path.
-const _snicar_dir1 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/cesm-inputdata/lnd/clm2/snicardata"
-const _snicar_dir2 = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata"
+const _snicar_dir1 = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/installs/cesm-inputdata/lnd/clm2/snicardata"
+const _snicar_dir2 = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata"
 _pick(f) = isfile(joinpath(_snicar_dir1, f)) ? joinpath(_snicar_dir1, f) : joinpath(_snicar_dir2, f)
 fsnowoptics = _pick("snicar_optics_5bnd_c013122.nc")
 fsnowaging  = _pick("snicar_drdt_bst_fit_60_c070416.nc")

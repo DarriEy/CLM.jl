@@ -31,9 +31,9 @@ const C = CLM
 const FT = Float64
 
 const FSURDAT = get(ENV, "CLM_FSURDAT",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
 const DT     = 1800.0
 const NSTEPS = parse(Int, get(ENV, "CLM_NSTEPS", "24"))
 const RAIN   = parse(Float64, get(ENV, "CLM_RAIN", "3e-4"))   # steady rain+snomelt input (kg/m2/s)

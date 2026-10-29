@@ -2,7 +2,7 @@
 # Fortran, to localize whether the 1.148x sminn over-drain is plant-uptake/nitrif
 # (NH4 side) or leaching/denit (NO3 side). Re-injects Fortran state before step.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const NSTEP = 1757852
 const NL = 6
 

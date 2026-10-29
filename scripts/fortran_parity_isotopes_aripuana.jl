@@ -43,7 +43,7 @@ include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 # in /private/tmp/claude-501/ari_iso_run. Same teacher-forced single-step diff as
 # the Bow harness, but at the canonical strong-δ13C-discrimination stress site.
 const ISO_DUMPDIR = get(ENV, "ARI_ISO_DUMPDIR", "/private/tmp/claude-501/ari_iso_run")
-const ARI_DATA    = "/Users/darri.eythorsson/projects/scratch/aripuana_data"
+const ARI_DATA    = "$(get(ENV, "CLM_SCRATCH", "/Users/darri.eythorsson/projects/scratch"))/aripuana_data"
 const ARI_SURF    = joinpath(ARI_DATA, "params/surfdata_clm.nc")
 const ARI_PARAM   = joinpath(ARI_DATA, "params/clm5_params.nc")
 const ISO_FORCING = joinpath(ARI_DATA, "forcing/clmforc.2002.nc")

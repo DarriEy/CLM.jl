@@ -24,7 +24,7 @@ const FT = Float64
 const DT = 1800.0
 const STEPS_PER_DAY = 48
 const ROOT = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
+    "$(homedir())/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
 const DOMAIN = get(ENV, "CLM_DOMAIN", "Stillwater_Oklahoma")
 const NDAYS = parse(Int, get(ENV, "CLM_NDAYS", "90"))
 const NSTEPS = NDAYS * STEPS_PER_DAY

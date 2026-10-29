@@ -32,9 +32,9 @@ const FT = Float64
 const DT = 1800.0
 const STEPS_PER_DAY = 48
 const FSURDAT = get(ENV, "CLM_FSURDAT",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PARAMFILE = get(ENV, "CLM_PARAMFILE",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
 const STAGE = get(ENV, "CLM_SNOW_STAGE", "probe")
 
 # cold/snow forcing to accumulate a pack; then a warmer high-solar melt forcing.
@@ -239,7 +239,7 @@ end
 # AD (LM diagonal-damped, checkpointed) vs DDS. Fixed-layer window (combine/divide omitted).
 # =============================================================================
 const ROOT = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
+    "$(homedir())/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
 const DOMAIN = get(ENV, "CLM_DOMAIN", "Boreal_Krycklan_Sweden")
 const DOM_DIR = joinpath(ROOT, "domain_$DOMAIN")
 const SNOW_FSURDAT = joinpath(DOM_DIR, "settings/CLM/parameters/surfdata_clm.nc")

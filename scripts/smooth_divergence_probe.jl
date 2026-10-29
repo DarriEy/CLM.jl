@@ -13,14 +13,14 @@ end
 const WARMUP = parse(Int, _argval("--warmup", "4800"))
 const DTIME  = 1800
 
-const basedir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped"
+const basedir = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped"
 const caldir  = joinpath(basedir, "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters")
 const fsurdat   = joinpath(caldir, "surfdata_clm.nc")
 const paramfile = joinpath(caldir, "clm5_params.nc")
 const fforcing  = joinpath(basedir, "data/forcing/CLM_input/clmforc.2002_2004.nc")
-const fsnowoptics = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const fsnowaging  = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
-const ffortran_restart = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.r.2003-01-01-00000.nc"
+const fsnowoptics = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const fsnowaging  = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const ffortran_restart = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_parity_run/Bow_at_Banff_lumped.clm2.r.2003-01-01-00000.nc"
 const baseflow_scalar = 0.0022119554
 const int_snow_max    = 3113.2227
 const USE_AQUIFER     = false

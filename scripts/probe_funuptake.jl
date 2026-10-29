@@ -3,7 +3,7 @@
 # (Nactive/Nam/Necm/Nnonmyc/Nfix _nh4) and (b) full 25-layer column NH4 drain
 # (Julia FUN nh4 uptake vs Fortran d smin_nh4). Re-injects Fortran state.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const NSTEP = 1757852
 
 inst, bounds = run_one_parity_step!(NSTEP; use_cn=true, dumpdir=DD,

@@ -2,7 +2,7 @@
 # (4 segments) + htop/tsai/qflx against the Fortran after_canopyfluxes dump.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 
 function fvec(ds, v)
     haskey(ds, v) || return Float64[]

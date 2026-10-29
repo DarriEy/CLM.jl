@@ -4,7 +4,7 @@
 # lmr_sun=0.36738 lmr_sha=0.17280 leaf_mr=9.424e-7 froot_mr=2.0259e-6 ci=25.258
 # vcmax_z_sun=59.94 t_veg=288.55 bsun=0.5259
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup"
 const NSTEP = 1757873
 
 inst, bounds = run_one_parity_step!(NSTEP; use_cn=true, dumpdir=DD,

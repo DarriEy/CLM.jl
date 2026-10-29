@@ -32,13 +32,13 @@
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
-const STW   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Stillwater_Oklahoma"
+const STW   = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Stillwater_Oklahoma"
 const FS    = joinpath(STW, "settings/CLM/parameters/surfdata_clm.nc")
 const FP    = joinpath(STW, "settings/CLM/parameters/clm5_params.nc")
 const FFORC = joinpath(STW, "data/forcing/CLM_input/clmforc.2002.nc")
-const DUMPS = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_stillwater_parity"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const DUMPS = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_stillwater_parity"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 const _read_fortran_restart! = getfield(CLM, Symbol("read_fortran_restart!"))
 
 function registry(inst)

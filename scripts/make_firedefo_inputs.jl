@@ -56,9 +56,9 @@
 
 using NCDatasets
 
-const SRC_SURFDAT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/" *
+const SRC_SURFDAT = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/" *
                     "optimization/CLM/dds_run_1/final_evaluation/settings/CLM/parameters/surfdata_clm.nc"
-const DEFAULT_OUT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firedefo"
+const DEFAULT_OUT = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bow_ref_firedefo"
 
 # natpft index (0-based on file) → CLM PFT number. 4 = broadleaf evergreen
 # tropical tree (nbrdlf_evr_trp_tree), 6 = broadleaf deciduous tropical tree

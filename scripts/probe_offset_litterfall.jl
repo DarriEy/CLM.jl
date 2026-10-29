@@ -20,7 +20,7 @@
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const AUT_DIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_autumn"
+const AUT_DIR  = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_autumn"
 const AUT_BASE = 1753153
 const DT       = 3600.0
 const GF       = 3          # Fortran grass patch index (pft 12)

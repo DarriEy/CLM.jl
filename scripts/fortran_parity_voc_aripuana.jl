@@ -29,7 +29,7 @@
 using CLM, NCDatasets, Dates, Printf
 
 const ARI_RUN   = get(ENV, "ARI_ISO_DUMPDIR", "/private/tmp/claude-501/ari_iso_run")
-const MEGAN_FILE = "/Users/darri.eythorsson/projects/cesm-inputdata/atm/cam/chem/trop_mozart/emis/megan21_emis_factors_78pft_c20161108.nc"
+const MEGAN_FILE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/atm/cam/chem/trop_mozart/emis/megan21_emis_factors_78pft_c20161108.nc"
 # The megan_specifier from the Fortran run's drv_flds_in (order matters: isoprene
 # must be compound #1, matching Fortran's imeg==1 diagnostic convention).
 const MEGAN_SPEC = ["ISOP = isoprene",

@@ -43,7 +43,7 @@ function basin_rain(domain_dir)
     catch; return RAIN_FLOOR; end
 end
 const ROOT   = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
+    "$(homedir())/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
 
 # ---- top-level Enzyme-safe phase functions (per-basin data via Const aux, never closures) ----
 function setup_forcing!(a2l, T, ng, rain)

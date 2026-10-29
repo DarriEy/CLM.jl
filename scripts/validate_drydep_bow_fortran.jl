@@ -34,7 +34,7 @@ using Statistics
 const C = CLM
 
 const HIST = "/private/tmp/claude-501/drydep_run/Bow_at_Banff_lumped.clm2.h0.2006-01-02-00000.nc"
-const SURF = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
+const SURF = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc"
 
 # ---- independent inline transcription of DryDepVelocity.F90:384-418 (soil landunit) ----
 # Returns index_season for a soil (istsoil) patch. Bow patches are all istsoil.
