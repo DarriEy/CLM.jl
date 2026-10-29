@@ -400,6 +400,87 @@ end
         end
     end
 
+    @testset "CNP history: nutrient fluxes + N/P size x pft pools" begin
+        g = _fates_save_globals()
+        lv_dyn, lv_hf = _C.hlm_hist_level_dynam[], _C.hlm_hist_level_hifrq[]
+        try
+            # CTSM's FATES history default is fates_history_dimlevel = 2,2, which
+            # exercises the size x pft (scpf) fills as well as the site totals.
+            r = _run_fates_mode(ndays=2, parteh_mode=_C.prt_cnp_flex_allom_hyp,
+                                nitrogen_spec=1, phosphorus_spec=0, hist_dimlevel=2)
+            @test r.no_error
+            @test r.daily_fires >= 1
+            h = r.inst.fates.hist
+            v1(sym) = h.hvars[h.ih[sym]].r81d[1]
+            v2(sym) = h.hvars[h.ih[sym]].r82d[1, :]
+
+            # update_history_nutrflux (EDMainMod.F90:707-709) now runs: with the
+            # FatesColdPRT2 prescribed uptake (=1) every cohort takes up exactly its
+            # demand, split NH4/NO3 by vmax_nh4/vmax_no3.
+            ndem = v1(:ih_ndemand_si)
+            @test isfinite(ndem) && ndem > 0.0
+            @test v1(:ih_nh4uptake_si) + v1(:ih_no3uptake_si) ≈ ndem rtol = 1e-12
+            @test v1(:ih_pdemand_si) > 0.0
+            # FATES_PUPTAKE is the P actually allocated (p_gain0 - p_gain after
+            # DailyPRT, storage draw-down included), so it can be slightly negative
+            # (Fortran's own day-11 value on fates_parity_1pt is -2.3e-9).
+            @test isfinite(v1(:ih_puptake_si))
+            @test sum(v2(:ih_ndemand_scpf)) ≈ ndem rtol = 1e-12
+            @test sum(v2(:ih_nh4uptake_scpf)) ≈ v1(:ih_nh4uptake_si) rtol = 1e-12
+            @test sum(v2(:ih_puptake_scpf)) ≈ v1(:ih_puptake_si) rtol = 1e-12
+
+            # N/P scpf pools (dyn2) roll up to the dyn1 site totals.
+            for (scpf, si) in ((:ih_leafn_scpf, :ih_leafn_si), (:ih_fnrtn_scpf, :ih_fnrtn_si),
+                               (:ih_sapwn_scpf, :ih_sapwn_si), (:ih_storen_scpf, :ih_storen_si),
+                               (:ih_repron_scpf, :ih_repron_si),
+                               (:ih_leafp_scpf, :ih_leafp_si), (:ih_storep_scpf, :ih_storep_si))
+                @test v1(si) > 0.0 || si in (:ih_repron_si,)
+                @test sum(v2(scpf)) ≈ v1(si) rtol = 1e-10 atol = 1e-20
+            end
+            @test sum(v2(:ih_totvegn_scpf)) > 0.0
+            @test sum(v2(:ih_totvegp_scpf)) > 0.0
+
+            # Storage fractions of the stoich_growth_min target: filled where cohorts
+            # exist, bounded by the overflow cap (1 + store_ovrflw_frac = 2).
+            for sym in (:ih_storentfrac_canopy_scpf, :ih_storeptfrac_canopy_scpf)
+                f = v2(sym)
+                @test any(>(0.0), f)
+                @test all(x -> 0.0 <= x <= 2.0 + 1e-8, f)
+            end
+            @test 0.0 < v1(:ih_storentfrac_si) <= 2.0 + 1e-8
+        finally
+            _C.hlm_hist_level_dynam[] = lv_dyn; _C.hlm_hist_level_hifrq[] = lv_hf
+            _fates_restore_globals(g)
+        end
+    end
+
+    @testset "CNP host config: parteh kwargs + prescribed-uptake file values" begin
+        # clm_initialize!(fates_parteh_mode) -> clm_fates_init! keywords.
+        @test _C._fates_parteh_kwargs(1, true) == NamedTuple()
+        @test _C._fates_parteh_kwargs(2, true) ==
+              (parteh_mode = _C.prt_cnp_flex_allom_hyp, nitrogen_spec = 1, phosphorus_spec = 0)
+        @test _C._fates_parteh_kwargs(2, false).nitrogen_spec == 2
+        @test_throws ErrorException _C._fates_parteh_kwargs(3, true)
+
+        # Default parameter file (prescribed uptake 0): FatesColdPRT2 values applied,
+        # prescribed modes + trivial competitor scaling (FatesInterfaceMod.F90:901-926).
+        g = _fates_save_globals()
+        try
+            r = _run_fates_mode(ndays=1, parteh_mode=_C.prt_cnp_flex_allom_hyp,
+                                nitrogen_spec=1, phosphorus_spec=0)
+            @test r.no_error
+            evc = _C.edpftvarcon_inst()
+            @test all(==(1.0), evc.prescribed_nuptake)
+            @test all(==(1.0), evc.prescribed_puptake)
+            @test _C.ed_params().n_uptake_mode == _C.prescribed_n_uptake
+            @test _C.ed_params().p_uptake_mode == _C.prescribed_p_uptake
+            @test _C.max_comp_per_site[] == 1
+            @test _C.fates_np_comp_scaling[] == _C.trivial_np_comp_scaling
+        finally
+            _fates_restore_globals(g)
+        end
+    end
+
     @testset "tree-damage mode" begin
         g = _fates_save_globals()
         try
