@@ -239,8 +239,9 @@ Its forward-AD boundary is **smoothness**: the discrete snow events make the str
 piecewise-smooth. The continuous heat/mass partitions were already smoothed; **Phase-3 now also
 smooths the `imelt` melt label** on the temperature axis (negligible bias, default byte-identical),
 removing the label-flip gradient spikes (§5b). The gradient is **exact away from transitions and
-usable across sparse ones (and empirically calibrates real basins)**; the **one remaining
-discontinuity is the `snl` combine/divide layer-count** — a genuine dimension change that needs a
-structural fixed-layer reformulation, not a threshold smoothing. `Dual`-clean is necessary but not
-sufficient; smoothness is the deeper requirement, and it is now closed except for the integer
-layer count.
+usable across sparse ones (and empirically calibrates real basins)**. The integer layer count
+`snl` — once the last discontinuity — is now held fixed through the melt window under smooth mode
+(§5c, Stages 1–2): across the full θ sweep `snl` stays constant and the sweep verdict is
+gradient-BENIGN, default byte-identical. One isolated point (θ=4.981, rel 4.5e-2) remains and is
+**not** `snl`-related; it is undiagnosed. `Dual`-clean is necessary but not sufficient; smoothness
+is the deeper requirement, and it is now closed for the snow melt window.
