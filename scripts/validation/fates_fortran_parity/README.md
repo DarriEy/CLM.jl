@@ -1406,12 +1406,74 @@ Fortran CNP's leaf-off.
   arithmetic; the result is ill-conditioned.
 * Melt season (Feb-May) is still +0.3 to +1.1 K warm, with single days up to 5 K. In
   March the tree patch absorbs about 7 W/m2 more SABV and holds more canopy snow.
-  Not localized further.
+  Not localized further. **Closed below ("Melt season").**
 * 412 days into SPITFIRE: `FATES_VEGC` +7 %, live-grass fuel +35 %.
 
 Reproduce: stage the carbon-only control (`fates_cnp_ctrl_c1` namelists) with
 `hist_dov2xy = .false.` and the per-patch fields above. Score the port with
 `FATES_CNP_PARTEH=1 fates_cnp_parity.jl <h0> 240`.
+
+## Melt season: snow burial, per-patch `tveg24`, case snow namelist (2026-10-29)
+
+Localized with a per-patch hourly Fortran tape over the SPITFIRE case (fates_fire_1pt
+namelists, 335 days, `hist_fincl2` hourly with `hist_dov2xy = .false.`: TV, SABV, SABG,
+ELAI/TLAI, SNOCAN, unloading, SNOWDP, H2OSNO, FSNO, ALBD/ALBGRD, ...) against the same
+quantities dumped from the port each step. In March 2003 both FATES patches had the same
+TLAI, HTOP, SWE and snow cover in both models, but the port's exposed LAI was far higher
+(tree patch `elai` 0.41-0.55 vs 0.24-0.35; the small patch 0.14-0.21 vs the 0.1 floor),
+and its snow was 6-15 % shallower. Three causes:
+
+1. **The snowpack never reached FATES** (`src/`, FATES path). Fortran
+   `wrap_update_hlmfates_dyn` (clmfates_interfaceMod.F90:1494-1504) opens with
+   `bc_in%snow_depth_si = snow_depth(c)`, `bc_in%frac_sno_eff_si = frac_sno_eff(c)` and
+   `UpdateFatesAvgSnowDepth` (EDCanopyStructureMod.F90:1478, `site%snow_depth = depth *
+   fsno`). The port ported `UpdateFatesAvgSnowDepth!` but never called it or packed the
+   two fields, so `site%snow_depth` stayed 0: the leaf-area profile buried nothing,
+   `elai = tlai` all winter, and the canopy absorbed 2-15x the Fortran SABV
+   (small patch, March: 11 vs 0.7 W/m2). `fates_update_snow_burial!` now runs where
+   Fortran calls `wrap_update_hlmfates_dyn`: after the daily dynamics, at the cold
+   start, and at a restart (pack only; the restarted `snow_depth` is kept).
+2. **`tveg24` per patch** (`src/`, FATES path). `WrapUpdateFatesRmean`
+   (clmfates_interfaceMod.F90:3227-3245) packs every patch's `t_veg_patch` into
+   `t_veg_pa(ifp)` before `UpdateFatesRMeansTStep`, which rolls each patch's
+   `tveg24`/`tveg_lpa`/`tveg_longterm` from its own value (FatesInterfaceMod.F90:2119-2121).
+   The port drove every patch from the first finite `t_veg_pa`, the value the
+   photosynthesis iteration had left for patch 1, not each patch's final leaf
+   temperature. After fix 1 this was the remaining +0.17..0.34 K Feb-May bias.
+3. **Snow namelist in the FATES harnesses** (harness). Every Fortran FATES case lnd_in
+   (fates_parity_1pt, fates_fire_1pt, fates_cnp_*, fates_bgc_1pt_v2, fates_sp/nocomp/
+   fixedbg/hydro/lu_*) sets `snow_overburden_compaction_method = 'Vionnet2012'` and
+   `wind_dependent_snow_density = .true.`. The port defaults are Anderson1976 and no wind
+   term (the smoother AD path); `parity_run_domain.jl` already set the Fortran values,
+   the FATES harnesses did not. `fates_case_snow_namelist!` (fates_fortran_parity.jl)
+   is now called by every FATES build (build, build_cnp, build_mode, build_hydro, the
+   land-use build). Snow depth, March: 0.851/0.851 m (was 0.76/0.89).
+
+SPITFIRE mode-1 case, `FATES_TVEG24` J - F by 30-day block (Fortran: the committed
+`fates_spitfire_fortran.csv`):
+
+| days | before (main) | + case snow namelist | + snow burial | + per-patch tveg24 |
+|---|---|---|---|---|
+| 181-210 | +0.17 (max 0.43) | +0.12 | +0.08 | **+0.00 (max 0.04)** |
+| 211-240 | +0.33 (0.73) | +0.28 | +0.17 | **-0.00 (0.01)** |
+| 241-270 | +0.79 (1.74) | +0.76 | +0.26 | **-0.01 (0.13)** |
+| 271-300 | +1.15 (2.92) | +1.07 | +0.34 | **+0.00 (0.00)** |
+| 301-330 | +0.86 (5.27) | +0.77 | +0.29 | **+0.00 (0.06)** |
+| 331-360 | | | +0.09 | +0.05 (0.55) |
+| `FATES_VEGC` J/F, day 330 / 412 | 1.048 / | 1.047 | 1.0002 | **1.0000 / 0.9996** |
+
+The per-patch hourly means (20-day blocks) then agree to the last digit shown for TV,
+TG, SABV, SABG, FSA, SNOCAN, SNOWDP, H2OSNO and FSNO on both FATES patches.
+
+**Effect on the 4-year demography** (docs/FATES_MULTIYEAR_ENERGY.md, last follow-up):
+the year-2..4 excess was this canopy. Recruitment J/F goes from 1.16/1.57/1.53/2.16 to
+1.00/0.90/0.99/1.01, NPP from 1.00/1.30/1.42/1.40 to 0.99/0.98/0.99/0.98, the seed bank
+from 1.8-2.4x to 0.94-1.02x, and the PFT-14 summer collapse (day 721: 0.74 vs 9.2 m-2)
+to 8.3 vs 9.2 m-2.
+
+Reproduce (scratch tooling, not committed): stage the fates_fire_1pt namelists with an
+hourly `hist_fincl2` / `hist_dov2xy = .false.` tape and run the stock `cesm.exe`; dump
+the port from `fates_spitfire_parity.jl`'s `build()` with the same per-patch fields.
 
 ---
 
