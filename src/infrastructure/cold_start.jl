@@ -138,14 +138,24 @@ end
 """
     init_surface_albedo_cold!(inst, bounds)
 
-Seed the ground albedo (albgrd/albgri) at a cold start. surface_radiation! runs
-BEFORE surface_albedo! within a step, so on the first step it reads these fields to
-compute absorbed solar (sabg). Without a seed they are garbage/zero, so the first-step
-ground absorption is wrong — harmless on high-heat-capacity soil/lake columns, but on
-the thin, low-heat-capacity glacier (istice) ice top layer the over-absorption drives
-t_grnd -> NaN. Seed per-landunit defaults (glacier = ALBICE 0.80/0.55; other land a
-generic 0.20/0.40); surface_albedo! refines them from the second step. The restart /
-injection path sets these from the dump, so this only affects cold starts.
+Cold-start ground albedo (albgrd/albgri). `surface_radiation!` runs BEFORE
+`surface_albedo!` within a step, and under the CTSM NUOPC cap the first albedo solve
+is on nstep 2 (`nuopc_doalb`), so the first steps' absorbed solar comes from these
+values. Fortran `surfalb_type%InitCold` (SurfaceAlbedoType.F90:370-371) sets
+albgrd = albgri = 0.2 in EVERY band on every column; `surfalb_init_cold!` (run earlier
+by `init_misc_state!`) already does exactly that, so non-glacier columns are left as
+it set them.
+
+The only override is glacier (istice) columns, which get ALBICE (0.80 / 0.55): a
+deliberate, glacier-only deviation from the Fortran 0.2 kept for the thin ice top layer
+(see scripts/glacier_smoke.jl). Soil/crop/wetland/lake columns are byte-faithful.
+
+History: this used to seed every non-glacier column with vis 0.20 / NIR 0.40, i.e. a
+broadband 0.3 instead of Fortran's 0.2. At a summer cold start (Bow, July 2002, FSDS
+484 W/m2) that cut the ground's absorbed solar by 48 W/m2 (SABG 339 vs 387) on each of
+the first three steps, so the frozen top soil thawed late and SOILLIQ_1..4 were 9-16 %
+low at nstep 2 (the "cold-start thaw" residual of #336 / #345). The restart / injection
+path overwrites these from the dump, so restart-initialised runs are unaffected.
 """
 function init_surface_albedo_cold!(inst::CLMInstances, bounds::BoundsType)
     sa = inst.surfalb
@@ -155,10 +165,10 @@ function init_surface_albedo_cold!(inst::CLMInstances, bounds::BoundsType)
     for c in bounds.begc:bounds.endc
         l = col.landunit[c]
         lit = (l >= 1 && l <= length(lun.itype)) ? lun.itype[l] : ISTSOIL
-        # vis, nir defaults; ALBICE = [0.80, 0.55] (see surface_albedo.jl)
-        avis, anir = lit == ISTICE ? (0.80, 0.55) : (0.20, 0.40)
+        lit == ISTICE || continue
+        # glacier: ALBICE = [0.80, 0.55] (see surface_albedo.jl)
         for ib in 1:nb
-            a = ib == 1 ? avis : anir
+            a = ib == 1 ? 0.80 : 0.55
             sa.albgrd_col[c, ib] = a
             sa.albgri_col[c, ib] = a
         end

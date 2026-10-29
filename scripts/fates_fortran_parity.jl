@@ -274,7 +274,7 @@ function run_and_dump(outpath::String; nsteps::Int=NSTEPS)
         _C.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
 
         nstep_ref[] = i
-        _C.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+        _C.clm_drv!(config, inst, filt, filt_ia, bounds, _C.nuopc_doalb(i), nextsw, declin, declin,
             _C.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=i, is_first_step=(i <= 1),
             is_beg_curr_day=(i > 0 && tod == 0), is_end_curr_day=false, is_beg_curr_year=false,
