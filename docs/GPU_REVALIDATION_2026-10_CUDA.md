@@ -6,8 +6,8 @@ KernelAbstractions 0.9.45. All device runs are **Float64** (`CuArray`, no `cu()`
 
 Every `scripts/gpu_validate_*.jl` and `scripts/gpu_ad_*.jl` harness (129) ran serially
 at `main` `e5c3c18`, one fresh Julia process each, 25-min per-harness timeout (6.8 h in
-all). The 9 non-passes were then rerun on this branch (80-min limit) together with every harness that uses
-`scripts/gpu_adapt.jl` (see defect 3) — those had never actually run in Float64 on CUDA.
+all). The non-passes (except the known-pending reverse-AD one) were then rerun on this
+branch with an 80-min limit, together with every harness that uses `scripts/gpu_adapt.jl` (see defect 3) — those had never actually run in Float64 on CUDA.
 
 Site data: the small Bow / Aripuana `clm5_params.nc` + `surfdata_clm.nc` and the two
 SNICAR optics files (6.7 MB total) were copied to the server and pointed at with
