@@ -24,6 +24,11 @@ using LinearAlgebra
 
 include("testdata.jl")
 
+# Per-field max relative error tolerances of the Picard (solver 2) day-1 run vs the
+# Fortran extract. WIP: to be set from the 240-step parity scorecard (not yet run to
+# completion); empty => only the column water balance is checked.
+const PICARD_TOL = Dict{String,Float64}()
+
 # ---------------------------------------------------------------------------------
 # Synthetic single-cohort site (same construction as test_fates_planthydraulics_tierB)
 # ---------------------------------------------------------------------------------

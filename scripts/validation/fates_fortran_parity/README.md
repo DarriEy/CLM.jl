@@ -1571,13 +1571,64 @@ copy semantics showed up as a 0.3x / 0.16x shortfall.
   the balive-weighted `BTranForHLMDiagnosticsFromCohortHydr`). With the harness fixed,
   day 1 matches to float32 precision. The days 3-10 error is the plant-state
   decorrelation above.
-* **2-D solvers.** `MatSolve2D` and `PicardSolve2D` are still not ported.
+* **2-D solvers.** Ported; see the next section.
 * **Near-zero fluxes.** The site is extremely water-stressed (cold-start frozen soil; leaf
   psi ~ -15 MPa). Transpiration is ~1e-8 mm/s, so the QVEGT and BTRAN relative errors are
   on near-zero values.
 * **Water balance.** With hydraulics on (plant water in the budget), the column balance
   |errh2o| is < 1e-12 mm on every step n >= 1 of the 240-step run. Fortran's daily
   plant-water conservation check is the inert one described above.
+
+## PLANT HYDRAULICS: 2-D solvers (`fates_hydro_solver` = 2, 3)
+
+`clm_initialize!(use_fates_planthydro=true, fates_hydro_solver=k)` overrides the FATES
+parameter `fates_hydro_solver` (CTSM 5.3 has no namelist entry; the value lives in the
+parameter file). The numbering is FatesHydraulicsMemMod.F90's, and the parameter file's
+long name says the same: **1 = 1-D Taylor, 2 = 2-D Picard (`PicardSolve2D`),
+3 = 2-D Newton (`MatSolve2D`, "deprecated")**. Note that 2 is Picard, not Newton.
+
+Both solvers treat the cohort and the rhizosphere of every layer as a single system:
+3 + 2 x nlevrhiz nodes and the same number of connections minus one, with the troot
+joining all layers. They assemble a dense Jacobian and solve it with LAPACK DGESV.
+The port's `_dgesv!` is the DGETF2/DGETRS algorithm as a plain loop, so it is
+type-generic and allocation-free. The reference `cesm.exe` links Accelerate's LAPACK.
+
+Reproduced Fortran details:
+* `dpsi_scap = dpsi_pcap = 0.1` and Picard's `1.e-3` theta test are single-precision
+  literals (gfortran `-O` with no `-fdefault-real-8`), i.e. 0.10000000149 and 1.0000000475e-3.
+* `PicardSolve2D` passes `dftc_dtheta_node(id_up/id_dn)` to GetImTaylorKAB's
+  `intent(inout)` dummies, the same aliasing as the 1-D solver (#354). `MatSolve2D`'s
+  GetKAndDKDPsi copies its inputs, so it has no aliasing.
+* Newton's convergence test uses the signed `sum(residual)`, not the absolute value.
+* Picard floors psi at -1e5 MPa for the CFL estimate and at -1e2 MPa in the iterations.
+  Its final fluxes reuse the last iteration's kmax.
+
+### Reference runs
+`instrument_planthydro.py` plus a per-iteration trace (NWT / PIC lines in `lnd.log`, the
+same quantities as the port's `CLM._HYDRO2D_TRACE` hook), relinked with the
+SapwoodAreaGrass SourceMod. Then `stage_planthydro_run.sh` is run with `CDL=` set to the
+default parameter file with `fates_hydro_solver` set to 2 or 3. The trace does not change
+the run (the per-call dumps of the traced and untraced Picard runs are identical).
+
+### Newton (3): Fortran aborts on the first hydraulics call
+Fortran endruns on the first call (`Newton hydraulics solve could not converge`, pft 1,
+dbh 0.764 cm), on all 30 launches. In each round:
+* iteration 1 has max |residual| 6e-6 kg/s;
+* the first update raises it to 6.6e-2;
+* the second update leaves a node whose residual is NaN.
+
+`lnd.log` carries 242 `bisect_pv` "100 iterations" warnings from the TFS retention
+inversion. Each round therefore fails, and the substep is halved 11 times (3600 s ->
+3.5 s) until `nsteps > max_newton_rounds`. Halving the step does not help, because the
+first update (capped at 0.1 MPa per node) already overshoots. The port follows the same
+path: 33 iterations, NaN at the same iterations, max |residual| equal to ~1e-9 relative
+(iteration 2 bit-for-bit), then the same endrun. The 33-line Fortran trace is committed as
+`fates_planthydro_newton_fortran_trace.txt` and checked by
+`test_fates_planthydro_2d_solvers.jl`. No Fortran reference exists past this point, so
+nothing further can be compared; the parameter file's "deprecated" label fits.
+
+### Picard (2)
+PICARD_RESULTS
 
 ---
 
