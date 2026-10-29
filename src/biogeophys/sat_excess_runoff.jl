@@ -244,12 +244,13 @@ _ser_col_dv(col, lun, wfb) = _SERColDV(;
 
 # Whole-function per-column kernel. fsat_method/flags are Int/Bool host scalars.
 @kernel function _sat_excess_runoff_kernel!(fsat, fcov, qflx_sat_excess_surf,
-        @Const(mask), hyd, cdv, fff,
+        @Const(mask), hyd, cdv, @Const(realpar),
         fsat_method::Int, crop_zero::Bool, hillslope_zero::Bool,
         istcrop::Int, ispval::Int)
     c = @index(Global)
     @inbounds if mask[c]
-        T = typeof(fff)
+        T = eltype(realpar)
+        fff = realpar[1]
 
         # --- 1. Compute fsat (TOPModel or VIC) ---
         if fsat_method == FSAT_METHOD_TOPMODEL
@@ -350,14 +351,15 @@ function saturated_excess_runoff!(ser::SaturatedExcessRunoffData,
 
     # Convert the host Float64 fff parameter to the working eltype so a
     # Float32-only backend (Metal) carries no Float64 (byte-identical on F64).
-    fff = oftype(zero(eltype(fsat)), sat_excess_runoff_params.fff)
+    FT = eltype(fsat)
+    realpar = _to_backend_like(fsat, FT, FT[sat_excess_runoff_params.fff])
 
     hyd = _ser_hyd_dv(soilhydrology_inst, soilstate_inst)
     cdv = _ser_col_dv(col, lun, waterfluxbulk_inst)
 
     # Whole routine in one per-column kernel (all loops are independent).
     _launch!(_sat_excess_runoff_kernel!, fsat, fcov, qflx_sat_excess_surf,
-        mask_hydrology, hyd, cdv, fff,
+        mask_hydrology, hyd, cdv, realpar,
         ser.fsat_method, crop_fsat_equals_zero, hillslope_fsat_equals_zero,
         ISTCROP, ISPVAL; ndrange = length(mask_hydrology))
 

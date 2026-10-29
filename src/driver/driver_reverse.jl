@@ -55,8 +55,20 @@ function soiltemp_rev_bundle(inst)
     (; inst=sti, soiltemp=soiltemp_rev_scratch(inst))
 end
 
-driver_rev_bundle(inst) =
-    (; inst, scratch = cf_rev_scratch(Float64, length(inst.patch.column)))
+function _reverse_backend_adapt(proto, x)
+    proto isa Array && return x
+    return Adapt.adapt(typeof(proto).name.wrapper, x)
+end
+
+function driver_rev_bundle(inst)
+    scratch = cf_rev_scratch(eltype(inst.temperature.t_grnd_col), length(inst.patch.column))
+    h2osfc = inst.water.waterstatebulk_inst.ws.h2osfc_col
+    zsurf() = fill!(similar(h2osfc), zero(eltype(h2osfc)))
+    return (; inst, scratch = _reverse_backend_adapt(inst.temperature.t_grnd_col, scratch),
+              soiltemp = soiltemp_rev_scratch(inst),
+              soilwater = soilwater_rev_scratch(inst),
+              surfacewater = (; surf=zsurf(), drain=zsurf(), qinmax=zsurf()))
+end
 
 # Robust config-field accessor. CLMDriverConfig forwards most CN settings via a custom
 # getproperty (ndecomp_pools/i_litr_*/npcropmin/nrepr/use_c13/…) but NOT use_fun /
@@ -75,10 +87,15 @@ _cfgget(config, f::Symbol, default) = try getproperty(config, f) catch; default 
 function bgc_rev_bundle(inst, bounds, config)
     nc = length(bounds.begc:bounds.endc); nld = varpar.nlevdecomp
     ndp = config.ndecomp_pools; nct = config.ndecomp_cascade_transitions
-    z3(d) = zeros(Float64, nc, nld, d)
+    FT = eltype(inst.temperature.t_grnd_col)
+    z3(d) = zeros(FT, nc, nld, d)
     bgc = (; cn_decomp_pools = z3(ndp), p_decomp_cpool_loss = z3(nct), p_decomp_cn_gain = z3(ndp),
              pmnf_decomp_cascade = z3(nct), p_decomp_npool_to_din = z3(nct))
-    return (; inst, scratch = cf_rev_scratch(Float64, length(inst.patch.column)), bgc)
+    scratch = cf_rev_scratch(FT, length(inst.patch.column))
+    return (; inst,
+        scratch = _reverse_backend_adapt(inst.temperature.t_grnd_col, scratch),
+        soilwater = soilwater_rev_scratch(inst),
+        bgc = _reverse_backend_adapt(inst.temperature.t_grnd_col, bgc))
 end
 
 # --------------------------------------------------------------------------
@@ -95,7 +112,10 @@ _canopy_view(b) = cf_rev_bundle(b.inst.canopystate, b.inst.energyflux, b.inst.fr
     b.inst.photosyns, b.scratch)
 
 function canopy_rev_block!(b, aux, n::Int)
-    cv = _canopy_view(b)
+    canopy_rev_block_view!(_canopy_view(b), aux, n)
+end
+
+function canopy_rev_block_view!(cv, aux, n::Int)
     for (f, cargs) in cf_rev_phases(aux, n)
         f(cv, cargs...)
     end
@@ -114,7 +134,12 @@ driver_canopy_converged_n(b, canopy_aux) = canopy_rev_converged_n(_canopy_view(b
 # needs the real LUNA/alb arrays and is a follow-up.
 function canopy_rev_aux(inst, bounds, filt; use_psn::Bool = false, dtime = 1800.0)
     FT = Float64; NP = bounds.endp; ev = filt.exposedvegp
-    fp = Int[p for p in bounds.begp:bounds.endp if ev[p]]; fn = length(fp)
+    # Auxiliary topology is assembled on the host, then adapted as one tree to
+    # the live state's backend below. Iterating `ev` or `patch.column` here is
+    # scalar indexing when `inst` is already a CUDA state.
+    ev_host = Array(ev)
+    patch_column_host = Array(inst.patch.column)
+    fp = Int[p for p in bounds.begp:bounds.endp if ev_host[p]]; fn = length(fp)
     a2l = inst.atm2lnd
     forc_q_col = fill!(similar(a2l.forc_pbot_downscaled_col), zero(FT))
     compute_forc_q!(forc_q_col, inst.column.gridcell, a2l.forc_vp_grc, a2l.forc_pbot_downscaled_col)
@@ -157,12 +182,16 @@ function canopy_rev_aux(inst, bounds, filt; use_psn::Bool = false, dtime = 1800.
            o3coefv = fill(FT(1.0), NP), o3coefg = fill(FT(1.0), NP),
            t10 = copy(inst.temperature.t_a10_patch))
     end
-    return (; patch = inst.patch, col = inst.column, grid = inst.gridcell, forc = forc, pft = pft,
-        psn = psn, filterp = fp, fn = fn, active = Bool[ev[p] for p in 1:NP], mask = ev,
+    aux = (; patch = inst.patch, col = inst.column, grid = inst.gridcell, forc = forc, pft = pft,
+        psn = psn, filterp = fp, fn = fn, active = Bool[ev_host[p] for p in 1:NP], mask = ev,
         ivt = inst.patch.itype .+ 1,
-        forc_pbot_patch = FT[a2l.forc_pbot_downscaled_col[inst.patch.column[p]] for p in 1:NP],
+        forc_pbot_patch = FT[Array(a2l.forc_pbot_downscaled_col)[patch_column_host[p]] for p in 1:NP],
         soilevap_beta = do_soilevap_beta(), soil_resis_sl14 = do_soil_resistance_sl14(),
         nlevsno = varpar.nlevsno, dtime = FT(dtime), use_psn = use_psn)
+    # Every array referenced by a differentiated device kernel must share its
+    # backend. Adapt the complete NamedTuple so synthetic constants (`pft`,
+    # `filterp`, `active`, and non-PSN placeholders) cannot remain on host.
+    return ev isa Array ? aux : Adapt.adapt(typeof(ev).name.wrapper, aux)
 end
 
 # --------------------------------------------------------------------------
@@ -598,16 +627,96 @@ end
 # soil_water! (Zeng-Decker 2009 default; the retention curve is an empty singleton
 # and the movement config a small mutable struct — both pass cleanly as Const).
 # --------------------------------------------------------------------------
+function soilwater_rev_scratch(inst)
+    ref = inst.water.waterstatebulk_inst.ws.h2osoi_liq_col
+    nc = size(ref, 1); nl = varpar.nlevsoi
+    z() = begin
+        x = similar(ref, nc, nl)
+        _zero_all!(x)
+        x
+    end
+    return MfScr(; hk=z(), smp=z(), dhkdw=z(), dsmpdw=z(), imped=z(), s2=z(),
+        vwc_liq=z(), dt_dz=z(), qin=z(), qout=z(), dqidw0=z(), dqidw1=z(),
+        dqodw1=z(), dqodw2=z(), dwat=z(), amx=z(), bmx=z(), cmx=z(), rmx=z(),
+        gam=z(), fluxNet0=z(), fluxNet1=z())
+end
+
+soiltemp_gnet_snicar_view(b) = let i=b.inst
+    (; inst=(; energyflux=i.energyflux, solarabs=i.solarabs,
+        canopystate=i.canopystate, water=i.water, column=i.column,
+        landunit=i.landunit, patch=i.patch, temperature=i.temperature,
+        atm2lnd=i.atm2lnd), soiltemp=b.soiltemp)
+end
+soiltemp_heatdiff_view(b) = let i=b.inst
+    (; inst=(; column=i.column, landunit=i.landunit, temperature=i.temperature,
+        energyflux=i.energyflux, urbanparams=i.urbanparams, water=i.water),
+        soiltemp=b.soiltemp)
+end
+soiltemp_solve_view(b) = let i=b.inst
+    (; inst=(; column=i.column, landunit=i.landunit, temperature=i.temperature,
+        water=i.water), soiltemp=b.soiltemp)
+end
+soiltemp_post_view(b) = let i=b.inst
+    (; inst=(; column=i.column, landunit=i.landunit, temperature=i.temperature,
+        energyflux=i.energyflux, water=i.water, soilstate=i.soilstate,
+        urbanparams=i.urbanparams), soiltemp=b.soiltemp)
+end
+
+# Allocation-free decomposition used by the CUDA driver reverse. Calling the
+# coarse soil_temperature! wrapper under Enzyme differentiates its temporary
+# GPU fill! allocations, which turns the fill value into an unsupported active
+# kernel scalar. These entries expose the existing launch boundaries and narrow
+# views, while preserving the production routine's forward ordering.
+function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
+    a = soiltemp_rev_aux(bounds, filt; dtime)
+    return Any[
+        (soiltemp_tk_layers_array_phase!, (a,), soiltemp_tk_layers_view),
+        (soiltemp_tk_interface_array_phase!, (a,), soiltemp_tk_interface_view),
+        (soiltemp_cv_array_phase!, (a,), soiltemp_cv_view),
+        (soiltemp_lwrad_array_phase!, (a,), soiltemp_lwrad_view),
+        (soiltemp_gnet_patch_rural_array_phase!, (a,), soiltemp_gnet_patch_rural_view),
+        (soiltemp_gnet_patch_rural_contrib_array_phase!, (a,), soiltemp_gnet_patch_rural_contrib_view),
+        (soiltemp_gnet_patch_urban_array_phase!, (a,), soiltemp_gnet_patch_view),
+        (soiltemp_gnet_patch_reduce_array_phase!, (a,), soiltemp_gnet_patch_view),
+        (soiltemp_gnet_snicar_rev_phase!, (a,), soiltemp_gnet_snicar_view),
+        (soiltemp_heatdiff_rev_phase!, (a,), soiltemp_heatdiff_view),
+        (soiltemp_solve_rev_phase!, (a,), soiltemp_solve_view),
+        (soiltemp_post_rev_phase!, (a,), soiltemp_post_view)]
+end
+
 function soilwater_rev_aux(filt, config; dtime = 1800.0)
     cfg = config.use_aquifer_layer ? SoilWaterMovementConfig() :
         SoilWaterMovementConfig(soilwater_movement_method = MOISTURE_FORM,
                                 lower_boundary_condition = BC_ZERO_FLUX)
+    realpar = _to_backend_like(filt.hydrologyc, Float64,
+        Float64[dtime, cfg.e_ice, cfg.dtmin, cfg.xTolerUpper, cfg.xTolerLower,
+                cfg.verySmall, DENH2O, M_TO_MM])
     return (; hydrologyc = filt.hydrologyc, urbanc = filt.urbanc,
-              swrc = SoilWaterRetentionCurveClappHornberg1978(), cfg = cfg, dtime = dtime)
+              swrc = SoilWaterRetentionCurveClappHornberg1978(), cfg = cfg, dtime = dtime,
+              realpar = realpar, expensive = cfg.flux_calculation == cfg.expensive,
+              lower_bc = cfg.lower_boundary_condition, joff = varpar.nlevsno,
+              joff_zi = varpar.nlevsno + 1, nlevsoi = varpar.nlevsoi)
 end
 
 function soilwater_rev_phase!(b, aux)
     i = b.inst
+    if aux.cfg.soilwater_movement_method == MOISTURE_FORM
+        use_aquifer_layer(aux.cfg) && error("CUDA reverse moisture form with aquifer recharge is not decomposed")
+        ws = i.water.waterstatebulk_inst.ws
+        st = MfState(; h2osoi_liq=ws.h2osoi_liq_col, smp_l=i.soilstate.smp_l_col,
+            hk_l=i.soilstate.hk_l_col, qcharge=i.soilhydrology.qcharge_col,
+            nsubsteps=i.soilhydrology.num_substeps_col)
+        mfin = MfIn(; z=i.column.z, zi=i.column.zi, dz=i.column.dz,
+            qflx_rootsoi=i.water.waterfluxbulk_inst.qflx_rootsoi_col,
+            watsat=i.soilstate.watsat_col, hksat=i.soilstate.hksat_col,
+            bsw=i.soilstate.bsw_col, sucsat=i.soilstate.sucsat_col,
+            icefrac=i.soilhydrology.icefrac_col, zwt=i.soilhydrology.zwt_col,
+            qflx_infl=i.water.waterfluxbulk_inst.wf.qflx_infl_col)
+        soilwm_moisture_form_solve_params!(st, b.soilwater, mfin,
+            aux.hydrologyc, i.column.nbedrock, aux.joff, aux.joff_zi,
+            aux.nlevsoi, aux.realpar, aux.expensive, aux.lower_bc)
+        return nothing
+    end
     soil_water!(i.column, aux.hydrologyc, aux.urbanc,
         i.soilhydrology, i.soilstate, i.water.waterfluxbulk_inst, i.water.waterstatebulk_inst,
         i.temperature, i.canopystate, i.energyflux, aux.swrc, aux.cfg, aux.dtime)
@@ -621,16 +730,45 @@ end
 # --------------------------------------------------------------------------
 watertable_rev_aux(bounds, filt, config; dtime = 1800.0) = (;
     hydrologyc = filt.hydrologyc, bc_col = bounds.begc:bounds.endc,
-    nlevsoi = varpar.nlevsoi, dtime = dtime,
+    nlevsoi = varpar.nlevsoi, joff = varpar.nlevsno,
+    joff_zi = varpar.nlevsno + 1,
+    realpar = _to_backend_like(filt.hydrologyc, Float64,
+        Float64[dtime, soilhydrology_params.aq_sp_yield_min,
+                TFRZ, DENH2O, DENICE]),
+    use_aquifer_layer = config.use_aquifer_layer,
     recompute_frost_table = config.use_aquifer_layer)
 
 function watertable_rev_phase!(b, aux)
     i = b.inst
-    water_table!(i.soilhydrology, i.soilstate,
-        i.temperature.t_soisno_col, i.water.waterstatebulk_inst.ws, i.water.waterfluxbulk_inst,
-        i.column.dz, i.column.z, i.column.zi,
-        aux.hydrologyc, aux.bc_col, aux.nlevsoi, aux.dtime;
-        recompute_frost_table = aux.recompute_frost_table)
+    ws = i.water.waterstatebulk_inst.ws
+    wf = i.water.waterfluxbulk_inst.wf
+    if !aux.use_aquifer_layer
+        perched_water_table!(i.soilhydrology, i.soilstate,
+            i.temperature.t_soisno_col, ws, i.column.dz, i.column.z,
+            i.column.zi, aux.hydrologyc, aux.bc_col, aux.nlevsoi;
+            joff=aux.joff, joff_zi=aux.joff_zi)
+        theta_based_water_table!(i.soilhydrology, i.soilstate, ws,
+            i.column.dz, i.column.z, i.column.zi, i.column.nbedrock,
+            aux.hydrologyc, aux.bc_col, aux.nlevsoi;
+            joff=aux.joff, joff_zi=aux.joff_zi)
+        clamp_zwt_to_bedrock!(i.soilhydrology.zwt_col, aux.hydrologyc,
+            i.column.nbedrock, i.column.zi, aux.joff)
+        return nothing
+    end
+    idv = _WTInDV(; col_dz=i.column.dz, col_z=i.column.z, col_zi=i.column.zi,
+        t_soisno=i.temperature.t_soisno_col, watsat=i.soilstate.watsat_col,
+        sucsat=i.soilstate.sucsat_col, bsw=i.soilstate.bsw_col,
+        qcharge=i.soilhydrology.qcharge_col, h2osoi_liq=ws.h2osoi_liq_col,
+        h2osoi_ice=ws.h2osoi_ice_col)
+    odv = _WTOutDV(; zwt=i.soilhydrology.zwt_col, wa=ws.wa_col,
+        zwt_perched=i.soilhydrology.zwt_perched_col,
+        frost_table=i.soilhydrology.frost_table_col, h2osoi_vol=ws.h2osoi_vol_col,
+        qflx_drain=wf.qflx_drain_col, qflx_rsub_sat=wf.qflx_rsub_sat_col,
+        qflx_drain_perched=wf.qflx_drain_perched_col)
+    _launch!(_water_table_kernel!, odv.zwt, odv, idv, aux.hydrologyc,
+        aux.nlevsoi, aux.joff, aux.joff_zi, aux.realpar,
+        aux.recompute_frost_table;
+        ndrange=length(aux.hydrologyc))
     return nothing
 end
 
@@ -665,11 +803,60 @@ end
 # All share one Const aux. saturated_excess_runoff!'s Bool kwargs + update_h2osfc!'s
 # dtime/h2osfcflag + compute_effec_rootfrac's use_hydrstress default inside the wrappers;
 # qflx_floodg is a zero gridcell vector (no river flood input), captured as Const.
-function surfhydro_rev_aux(bounds, filt; dtime = 1800.0, use_hydrstress = false)
+function surfhydro_rev_aux(bounds, filt; dtime = 1800.0, use_hydrstress = false,
+                           inst = nothing)
+    FT = eltype(filt.hydrologyc) <: AbstractFloat ? eltype(filt.hydrologyc) : Float64
+    qflx_floodg = fill!(similar(filt.hydrologyc, FT, bounds.endg), zero(FT))
+    runoff_realpar = _to_backend_like(filt.hydrologyc, FT,
+        FT[PONDMX_URBAN, dtime])
+    surface_realpar = _to_backend_like(filt.hydrologyc, FT,
+        FT[dtime, SURFACE_WATER_PC[], SURFACE_WATER_MU[]])
+    qinmax_realpar = _to_backend_like(filt.hydrologyc, FT,
+        FT[infilt_excess_params.e_ice, QINMAX_UNLIMITED])
+    satexcess_realpar = _to_backend_like(filt.hydrologyc, FT,
+        FT[sat_excess_runoff_params.fff])
+    root_filters = if inst === nothing
+        nothing
+    else
+        col_itype = Array(inst.column.itype)
+        col_landunit = Array(inst.column.landunit)
+        lun_itype = Array(inst.landunit.itype)
+        mask = Array(filt.hydrologyc)
+        roads = Int[c for c in bounds.begc:bounds.endc
+                    if mask[c] && col_itype[c] == ICOL_ROAD_PERV]
+        other = Int[c for c in bounds.begc:bounds.endc
+                    if mask[c] && col_itype[c] != ICOL_ROAD_PERV &&
+                       lun_itype[col_landunit[c]] != ISTSOIL]
+        natveg = Int[c for c in bounds.begc:bounds.endc
+                     if mask[c] && lun_itype[col_landunit[c]] == ISTSOIL]
+        proto = inst.soilstate.rootr_col
+        (; roads = _to_device_filter(proto, roads),
+           other = _to_device_filter(proto, other),
+           natveg = _to_device_filter(proto, natveg))
+    end
     return (; hydrologyc = filt.hydrologyc, nolakec = filt.nolakec, urbanc = filt.urbanc,
               bc_col = bounds.begc:bounds.endc, nlevsoi = varpar.nlevsoi, nlevsno = varpar.nlevsno,
-              dtime = dtime, qflx_floodg = zeros(Float64, bounds.endg),
-              use_hydrstress = use_hydrstress)
+              dtime = dtime, qflx_floodg = qflx_floodg,
+              runoff_realpar = runoff_realpar,
+              surface_realpar = surface_realpar,
+              qinmax_realpar = qinmax_realpar,
+              satexcess_realpar = satexcess_realpar,
+              use_hydrstress = use_hydrstress, root_filters = root_filters)
+end
+
+soilwater_rev_view(b) = let i=b.inst
+    (; inst=(; column=i.column, soilhydrology=i.soilhydrology,
+        soilstate=i.soilstate, water=i.water, temperature=i.temperature,
+        canopystate=i.canopystate, energyflux=i.energyflux),
+        soilwater=b.soilwater)
+end
+watertable_rev_view(b) = let i=b.inst
+    (; inst=(; column=i.column, soilhydrology=i.soilhydrology,
+        soilstate=i.soilstate, water=i.water, temperature=i.temperature))
+end
+hydnodrain_rev_view(b) = let i=b.inst
+    (; inst=(; temperature=i.temperature, soilstate=i.soilstate,
+        water=i.water, column=i.column, landunit=i.landunit))
 end
 
 function setsoilfrac_rev_phase!(b, aux)
@@ -686,8 +873,14 @@ function setfloodc_rev_phase!(b, aux)
 end
 function satexcess_rev_phase!(b, aux)
     i = b.inst
-    saturated_excess_runoff!(i.sat_excess_runoff, aux.hydrologyc, aux.bc_col,
-        i.column, i.landunit, i.soilhydrology, i.soilstate, i.water.waterfluxbulk_inst)
+    ser = i.sat_excess_runoff
+    wfb = i.water.waterfluxbulk_inst
+    hyd = _ser_hyd_dv(i.soilhydrology, i.soilstate)
+    cdv = _ser_col_dv(i.column, i.landunit, wfb)
+    _launch!(_sat_excess_runoff_kernel!, ser.fsat_col, ser.fcov_col,
+        wfb.qflx_sat_excess_surf_col, aux.hydrologyc, hyd, cdv,
+        aux.satexcess_realpar, ser.fsat_method, false, false, ISTCROP, ISPVAL;
+        ndrange=length(aux.hydrologyc))
     return nothing
 end
 function setqflx_rev_phase!(b, aux)
@@ -698,9 +891,24 @@ function setqflx_rev_phase!(b, aux)
 end
 function inflexcess_rev_phase!(b, aux)
     i = b.inst
-    infiltration_excess_runoff!(i.infilt_excess_runoff, i.soilhydrology, i.soilstate,
-        i.sat_excess_runoff.fsat_col, i.water.waterfluxbulk_inst, i.water.waterdiagnosticbulk_inst,
-        aux.hydrologyc, aux.bc_col)
+    ier = i.infilt_excess_runoff
+    qinmax_unsat = b.surfacewater.qinmax
+    if ier.qinmax_method == QINMAX_METHOD_NONE
+        _launch!(_infexcess_qinmax_none_kernel!, qinmax_unsat,
+            aux.hydrologyc, aux.qinmax_realpar;
+            ndrange=length(aux.hydrologyc))
+    else
+        _launch!(_qinmax_hksat_kernel!, qinmax_unsat, aux.hydrologyc,
+            i.soilhydrology.icefrac_col, i.soilstate.hksat_col,
+            aux.qinmax_realpar; ndrange=length(aux.hydrologyc))
+    end
+    wfb = i.water.waterfluxbulk_inst
+    _launch!(_infexcess_colavg_kernel!, ier.qinmax_col,
+        wfb.qflx_infl_excess_col, aux.hydrologyc,
+        i.sat_excess_runoff.fsat_col, qinmax_unsat,
+        wfb.qflx_in_soil_col,
+        i.water.waterdiagnosticbulk_inst.frac_h2osfc_col;
+        ndrange=length(aux.hydrologyc))
     return nothing
 end
 function routeinfl_rev_phase!(b, aux)
@@ -711,10 +919,26 @@ function routeinfl_rev_phase!(b, aux)
 end
 function updateh2osfc_rev_phase!(b, aux)
     i = b.inst
-    update_h2osfc!(i.column, i.soilhydrology, i.energyflux, i.water.waterfluxbulk_inst,
-        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
-        aux.hydrologyc, aux.bc_col; dtime = aux.dtime,
-        qinmax = i.infilt_excess_runoff.qinmax_col)
+    wfb = i.water.waterfluxbulk_inst
+    ws = i.water.waterstatebulk_inst.ws
+    wd = i.water.waterdiagnosticbulk_inst
+    qsurf = b.surfacewater.surf
+    qdrain = b.surfacewater.drain
+    _launch!(_surfwat_qflx_surf_kernel!, qsurf, aux.hydrologyc,
+        ws.h2osfc_col, i.soilhydrology.h2osfc_thresh_col,
+        wd.frac_h2osfc_nosnow_col, i.column.topo_slope,
+        aux.surface_realpar, 1; ndrange=length(aux.hydrologyc))
+    _launch!(_surfwat_partial_update_kernel!, ws.h2osfc_col,
+        aux.hydrologyc, wfb.qflx_in_h2osfc_col, qsurf,
+        aux.surface_realpar; ndrange=length(aux.hydrologyc))
+    _launch!(_surfwat_qflx_drain_kernel!, qdrain, aux.hydrologyc,
+        ws.h2osfc_col, wd.frac_h2osfc_col,
+        i.infilt_excess_runoff.qinmax_col, aux.surface_realpar, 1;
+        ndrange=length(aux.hydrologyc))
+    _launch!(_surfwat_final_update_kernel!, ws.h2osfc_col,
+        wfb.qflx_h2osfc_surf_col, wfb.qflx_h2osfc_drain_col,
+        aux.hydrologyc, qdrain, qsurf, aux.surface_realpar;
+        ndrange=length(aux.hydrologyc))
     return nothing
 end
 function infil_rev_phase!(b, aux)
@@ -723,27 +947,114 @@ function infil_rev_phase!(b, aux)
 end
 function totalrunoff_rev_phase!(b, aux)
     i = b.inst
-    total_surface_runoff!(i.water.waterfluxbulk_inst, i.soilhydrology, i.water.waterstatebulk_inst.ws,
-        i.column.snl, i.column.itype, i.column.landunit, i.landunit.urbpoi,
-        aux.hydrologyc, aux.urbanc, aux.bc_col, aux.dtime)
+    wfb = i.water.waterfluxbulk_inst
+    wf = wfb.wf
+    ws = i.water.waterstatebulk_inst.ws
+    soilhyd_surf_runoff!(wf.qflx_surf_col, aux.hydrologyc,
+        wfb.qflx_sat_excess_surf_col, wfb.qflx_infl_excess_surf_col,
+        wfb.qflx_h2osfc_surf_col)
+    _launch!(_soilhyd_surf_runoff_urban_kernel!, wf.qflx_surf_col,
+        i.soilhydrology.xs_urban_col, aux.urbanc, i.column.itype,
+        i.column.snl, wf.qflx_rain_plus_snomelt_col, ws.h2osoi_liq_col,
+        wf.qflx_liqevap_from_top_layer_col, wf.qflx_floodc_col,
+        ICOL_ROOF, ICOL_ROAD_IMPERV, ICOL_SUNWALL, ICOL_SHADEWALL,
+        aux.nlevsno, aux.runoff_realpar; ndrange=length(aux.urbanc))
     return nothing
 end
 function rootsink_rev_phase!(b, aux)
     i = b.inst
+    if aux.root_filters !== nothing
+        wf = i.water.waterfluxbulk_inst
+        ss = i.soilstate
+        col = i.column
+        p = i.patch
+        default_launch(filterc) = _plantsink_default_launch!(
+            ss.rootr_col, wf.qflx_rootsoi_col, filterc, ss.rootr_patch,
+            wf.wf.qflx_tran_veg_patch, wf.wf.qflx_tran_veg_col,
+            col.patchi, col.npatches, p.active, p.wtcol, aux.nlevsoi)
+        if aux.use_hydrstress
+            default_launch(aux.root_filters.roads)
+            for filterc in (aux.root_filters.other, aux.root_filters.natveg)
+                _plantsink_hydstress_launch!(wf.qflx_rootsoi_col,
+                    wf.qflx_phs_neg_col, wf.qflx_hydr_redist_patch, filterc,
+                    ss.k_soil_root_patch, ss.smp_l_col, i.canopystate.vegwp_patch,
+                    i.canopystate.frac_veg_nosno_patch, col.z, col.patchi,
+                    col.npatches, p.active, p.wtcol, aux.nlevsno,
+                    aux.nlevsoi, 4)
+            end
+        else
+            default_launch(aux.root_filters.roads)
+            default_launch(aux.root_filters.other)
+            default_launch(aux.root_filters.natveg)
+        end
+        return nothing
+    end
     compute_effec_rootfrac_and_vert_tran_sink!(aux.bc_col, aux.nlevsoi, aux.hydrologyc,
         i.soilstate, i.canopystate, i.water.waterfluxbulk_inst, i.energyflux,
         i.column, i.landunit, i.patch; use_hydrstress = aux.use_hydrstress)
     return nothing
 end
 
+
+# Narrow aliasing views keep Enzyme from traversing the complete CLMInstances
+# graph for phases that touch only a handful of components. The arrays are not
+# copied, so forward mutations and adjoint accumulation remain on the shared bundle.
+setsoilfrac_rev_view(b) = let i=b.inst
+    (; inst=(; soilhydrology=i.soilhydrology, soilstate=i.soilstate,
+        water=i.water, column=i.column))
+end
+setfloodc_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water, column=i.column))
+end
+satexcess_rev_view(b) = let i=b.inst
+    (; inst=(; sat_excess_runoff=i.sat_excess_runoff, water=i.water,
+        soilhydrology=i.soilhydrology, soilstate=i.soilstate,
+        column=i.column, landunit=i.landunit))
+end
+setqflx_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water, column=i.column))
+end
+inflexcess_rev_view(b) = let i=b.inst
+    (; inst=(; infilt_excess_runoff=i.infilt_excess_runoff,
+        sat_excess_runoff=i.sat_excess_runoff, water=i.water,
+        soilhydrology=i.soilhydrology, soilstate=i.soilstate),
+        surfacewater=b.surfacewater)
+end
+routeinfl_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water, soilhydrology=i.soilhydrology,
+        column=i.column, landunit=i.landunit))
+end
+updateh2osfc_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water, soilhydrology=i.soilhydrology,
+        column=i.column, infilt_excess_runoff=i.infilt_excess_runoff),
+        surfacewater=b.surfacewater)
+end
+infil_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water))
+end
+totalrunoff_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water, soilhydrology=i.soilhydrology, column=i.column))
+end
+rootsink_rev_view(b) = let i=b.inst
+    (; inst=(; water=i.water, soilstate=i.soilstate, column=i.column,
+        patch=i.patch, canopystate=i.canopystate, energyflux=i.energyflux,
+        landunit=i.landunit))
+end
+
 # Ordered pre-soil_water surface-hydrology phase entries.
-function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0, use_hydrstress = false)
-    a = surfhydro_rev_aux(bounds, filt; dtime, use_hydrstress)
-    return Any[(setsoilfrac_rev_phase!, (a,)), (setfloodc_rev_phase!, (a,)),
-               (satexcess_rev_phase!, (a,)),   (setqflx_rev_phase!, (a,)),
-               (inflexcess_rev_phase!, (a,)),  (routeinfl_rev_phase!, (a,)),
-               (updateh2osfc_rev_phase!, (a,)), (infil_rev_phase!, (a,)),
-               (totalrunoff_rev_phase!, (a,)),  (rootsink_rev_phase!, (a,))]
+function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0,
+                                      use_hydrstress = false, inst = nothing)
+    a = surfhydro_rev_aux(bounds, filt; dtime, use_hydrstress, inst)
+    return Any[(setsoilfrac_rev_phase!, (a,), setsoilfrac_rev_view),
+               (setfloodc_rev_phase!, (a,), setfloodc_rev_view),
+               (satexcess_rev_phase!, (a,), satexcess_rev_view),
+               (setqflx_rev_phase!, (a,), setqflx_rev_view),
+               (inflexcess_rev_phase!, (a,), inflexcess_rev_view),
+               (routeinfl_rev_phase!, (a,), routeinfl_rev_view),
+               (updateh2osfc_rev_phase!, (a,), updateh2osfc_rev_view),
+               (infil_rev_phase!, (a,), infil_rev_view),
+               (totalrunoff_rev_phase!, (a,), totalrunoff_rev_view),
+               (rootsink_rev_phase!, (a,), rootsink_rev_view)]
 end
 
 # --------------------------------------------------------------------------
@@ -1058,16 +1369,23 @@ end
 # water_table → hydrology_no_drainage. `canopy_aux === nothing` skips the canopy block.
 # `include_surface=false` reverts to the soil_temp→soil_water direct jump.
 # --------------------------------------------------------------------------
-function driver_rev_phases(bounds, filt, config; canopy_aux = nothing,
+function driver_rev_phases(bounds, filt, config; canopy_aux = nothing, inst = nothing,
                            n_canopy::Int = 12, dtime = 1800.0, include_surface::Bool = true)
     phases = Any[]
-    canopy_aux === nothing || push!(phases, (canopy_rev_block!, (canopy_aux, n_canopy)))
-    push!(phases, (soiltemp_rev_phase!, (soiltemp_rev_aux(bounds, filt; dtime),)))
+    if canopy_aux !== nothing
+        for entry in cf_rev_phases(canopy_aux, n_canopy)
+            push!(phases, (entry[1], entry[2], _canopy_view))
+        end
+    end
+    append!(phases, soiltemp_driver_rev_phases(bounds, filt; dtime))
     include_surface && append!(phases, surface_hydrology_rev_phases(bounds, filt; dtime,
-                                          use_hydrstress = config.use_hydrstress))
-    push!(phases, (soilwater_rev_phase!,  (soilwater_rev_aux(filt, config; dtime),)))
-    push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
-    push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))
+                                          use_hydrstress = config.use_hydrstress, inst))
+    push!(phases, (soilwater_rev_phase!,
+        (soilwater_rev_aux(filt, config; dtime),), soilwater_rev_view))
+    push!(phases, (watertable_rev_phase!,
+        (watertable_rev_aux(bounds, filt, config; dtime),), watertable_rev_view))
+    push!(phases, (hydnodrain_rev_phase!,
+        (hydnodrain_rev_aux(bounds, filt; dtime),), hydnodrain_rev_view))
     return phases
 end
 
@@ -1107,7 +1425,7 @@ function clm_drv_reverse!(inst, bounds, filt, config;
     else
         n_canopy
     end
-    phases = driver_rev_phases(bounds, filt, config; canopy_aux = canopy_aux,
+    phases = driver_rev_phases(bounds, filt, config; canopy_aux = canopy_aux, inst,
                                n_canopy = max(Nc, 1), dtime = dtime, include_surface = include_surface)
     return compositional_reverse!(phases, b, seed_bang!)
 end

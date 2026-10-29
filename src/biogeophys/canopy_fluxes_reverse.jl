@@ -68,8 +68,9 @@ function cf_rev_init!(b, aux)
     _launch!(_cf_init_zero_kernel!, sc.del_arr, sc.efeb, sc.wtlq0, sc.wtalq, sc.wtgq,
         sc.wtaq0, sc.obuold, b.energyflux.dhsdt_canopy_patch, b.energyflux.eflx_sh_stem_patch,
         fp; ndrange = fn)
+    cp_stem = fill!(similar(sc.rstem), zero(FT))
     _launch!(_cf_no_biomass_kernel!, sc.frac_rad_abs_by_stem, sc.sa_leaf, sc.sa_stem,
-        sc.sa_internal, sc.cp_leaf, zeros(FT, length(sc.rstem)), sc.rstem, fp, cs.elai_patch,
+        sc.sa_internal, sc.cp_leaf, cp_stem, sc.rstem, fp, cs.elai_patch,
         cs.esai_patch; ndrange = fn)
     fv.rb1_patch[1:length(sc.air)] .= zero(FT)
     if aux.use_psn
@@ -511,8 +512,10 @@ end
 
 # Advance a bundle forward through steps[lo+1 .. hi] (0-indexed steps lo..hi-1), in place.
 function _advance_steps!(steps, b, lo::Int, hi::Int)
-    for s in (lo + 1):hi, (f, cargs) in steps[s]
-        f(b, cargs...)
+    for s in (lo + 1):hi, entry in steps[s]
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(b), cargs...)
     end
     return b
 end

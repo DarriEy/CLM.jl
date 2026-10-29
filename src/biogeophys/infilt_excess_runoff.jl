@@ -139,10 +139,11 @@ Ported from `InfiltrationExcessRunoff` in `InfiltrationExcessRunoffMod.F90`.
 # ---- infiltration_excess_runoff! : per-column qinmax NONE-fill kernel ----
 # Fill qinmax_on_unsaturated_area with the (effectively infinite) unlimited value
 # for the QINMAX_METHOD_NONE path. One thread per column, mask-gated.
-@kernel function _infexcess_qinmax_none_kernel!(qinmax_unsat, @Const(mask), qinmax_unlimited)
+@kernel function _infexcess_qinmax_none_kernel!(qinmax_unsat, @Const(mask),
+                                                @Const(realpar))
     c = @index(Global)
     @inbounds if mask[c]
-        qinmax_unsat[c] = qinmax_unlimited
+        qinmax_unsat[c] = realpar[2]
     end
 end
 
@@ -191,11 +192,13 @@ function infiltration_excess_runoff!(
     # backend/eltype as the output qinmax (similar(), not zeros()).
     FT_ier = eltype(qinmax)
     qinmax_on_unsaturated_area = similar(qinmax, last(bounds))
+    realpar = _to_backend_like(qinmax, FT_ier,
+        FT_ier[params.e_ice, QINMAX_UNLIMITED])
 
     # --- Compute qinmax on unsaturated area ---
     if ier.qinmax_method == QINMAX_METHOD_NONE
         _launch!(_infexcess_qinmax_none_kernel!, qinmax_on_unsaturated_area,
-                 mask_hydrology, FT_ier(QINMAX_UNLIMITED))
+                 mask_hydrology, realpar)
     else  # QINMAX_METHOD_HKSAT
         compute_qinmax_hksat!(soilhydrology, soilstate,
                               qinmax_on_unsaturated_area,
@@ -239,14 +242,15 @@ Ported from `ComputeQinmaxHksat` in `InfiltrationExcessRunoffMod.F90`.
 # base 10 / Inf literals are eltype-converted so no Float64 reaches a Float32-only
 # backend (Metal); on Float64 these conversions are byte-identical.
 @kernel function _qinmax_hksat_kernel!(qinmax_unsat, @Const(mask),
-                                       @Const(icefrac), @Const(hksat), e_ice)
+                                       @Const(icefrac), @Const(hksat),
+                                       @Const(realpar))
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(qinmax_unsat)
         ten = T(10)
         qmin = T(Inf)
         for j in 1:3
-            val = ten^(-e_ice * icefrac[c, j]) * hksat[c, j]
+            val = ten^(-realpar[1] * icefrac[c, j]) * hksat[c, j]
             if val < qmin
                 qmin = val
             end
@@ -267,8 +271,10 @@ function compute_qinmax_hksat!(
     hksat   = soilstate.hksat_col
 
     FT = eltype(qinmax_on_unsaturated_area)
+    realpar = _to_backend_like(qinmax_on_unsaturated_area, FT,
+        FT[params.e_ice, QINMAX_UNLIMITED])
     _launch!(_qinmax_hksat_kernel!, qinmax_on_unsaturated_area, mask_hydrology,
-             icefrac, hksat, FT(params.e_ice); ndrange = last(bounds))
+             icefrac, hksat, realpar; ndrange = last(bounds))
 
     return nothing
 end

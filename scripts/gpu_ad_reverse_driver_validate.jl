@@ -7,6 +7,7 @@
 #   CLM_REVERSE_CPU=0|1       also run the expensive CPU reverse parity leg (default 0)
 #   CLM_REVERSE_PHASES=N       reverse only the first N assembled phases (diagnostic)
 #   CLM_REVERSE_PHASE_START=N  start at phase N for isolated compilation (default 1)
+#   CLM_REVERSE_DRIVER_PHASE=S isolate a named top-level driver phase (diagnostic)
 
 using CLM, Enzyme, Printf
 import CUDA
@@ -89,7 +90,27 @@ function main()
                n_canopy = include_canopy ? ncanopy : nothing)
     println("starting CUDA compositional reverse ..."); flush(stdout)
     maxphases = parse(Int, get(ENV, "CLM_REVERSE_PHASES", "0"))
-    if maxphases > 0
+    driver_phase = get(ENV, "CLM_REVERSE_DRIVER_PHASE", "")
+    if !isempty(driver_phase)
+        b_gpu = CLM.driver_rev_bundle(inst_gpu)
+        caux = include_canopy ? CLM.canopy_rev_aux(inst_gpu, bounds, filt_gpu) : nothing
+        phases = CLM.driver_rev_phases(bounds, filt_gpu, config; inst=inst_gpu,
+            canopy_aux=caux, n_canopy=max(ncanopy, 1), dtime=1800.0,
+            include_surface=include_surface)
+        phases = Any[p for p in phases if occursin(driver_phase, string(first(p)))]
+        isempty(phases) && error("CLM_REVERSE_DRIVER_PHASE=$(repr(driver_phase)) matched no phase")
+        length(phases) == 1 || error("driver phase selector matched $(length(phases)) phases")
+        println("diagnostic driver phase: ", first(first(phases)))
+        seed_driver_phase!(db,b) = begin
+            j0=CLM.varpar.nlevsno+1
+            @views db.inst.temperature.t_soisno_col[:,j0:end] .=
+                2 .* b.inst.temperature.t_soisno_col[:,j0:end]
+            db.inst.soilhydrology.zwt_col .= one(eltype(db.inst.soilhydrology.zwt_col))
+            db.inst.soilhydrology.zwt_perched_col .=
+                one(eltype(db.inst.soilhydrology.zwt_perched_col))
+        end
+        db_gpu = CLM.compositional_reverse!(phases, b_gpu, seed_driver_phase!)
+    elseif maxphases > 0
         b_gpu = CLM.soiltemp_rev_bundle(inst_gpu)
         caux = include_canopy ? CLM.canopy_rev_aux(inst_gpu, bounds, filt_gpu) : nothing
         staux = CLM.soiltemp_rev_aux(bounds, filt_gpu)

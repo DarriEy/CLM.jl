@@ -43,19 +43,23 @@ include(joinpath(@__DIR__, "testdata.jl"))
     c0 = first(c for c in bounds.begc:bounds.endc if hc[c])
     j1 = CLM.varpar.nlevsno + 1
 
-    # assembler (forward order): soil_temp + 10-phase surface-hydrology block +
-    # soil_water + water_table + hydrology_no_drainage = 14 (15 with a canopy block);
-    # include_surface=false reverts to the soil_temp→soil_water direct jump (4).
+    # assembler (forward order): 12 allocation-free soil-temperature phases + the
+    # 10-phase surface-hydrology block + soil_water + water_table +
+    # hydrology_no_drainage = 25. Canopy is flattened too: with one energy-only
+    # iteration it adds init + friction + resistance + energy = 4. Without surface: 15.
     ph = CLM.driver_rev_phases(bounds, filt, config)
-    @test length(ph) == 14
-    @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 15
-    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 4
+    @test length(ph) == 25
+    @test length(CLM.driver_rev_phases(bounds, filt, config;
+        canopy_aux=(; use_psn=false), n_canopy=1)) == 29
+    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 15
     @test length(CLM.surface_hydrology_rev_phases(bounds, filt)) == 10
 
     # run the full assembled chain forward on the shared-inst bundle.
     b = CLM.driver_rev_bundle(inst)
-    for (f, cargs) in ph
-        f(b, cargs...)
+    for entry in ph
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(b), cargs...)
     end
     @test b.inst === inst                                   # bundle aliases the inst
     @test isfinite(b.inst.temperature.t_soisno_col[c0, j1])
@@ -94,10 +98,12 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # validated on Julia 1.10/Enzyme in scripts/enzyme_driver_reverse_fullstep.jl).
     caux = CLM.canopy_rev_aux(inst, bounds, filt)
     full = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4)
-    @test length(full) == 15
+    @test length(full) == 38
     bf = CLM.driver_rev_bundle(deepcopy(inst))
-    for (f, cargs) in full
-        f(bf, cargs...)
+    for entry in full
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(bf), cargs...)
     end
     @test all(isfinite, bf.inst.temperature.t_veg_patch)
     @test isfinite(bf.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
@@ -139,13 +145,19 @@ include(joinpath(@__DIR__, "testdata.jl"))
     phref = CLM.driver_rev_phases(bounds, filt, config;
                                   canopy_aux=CLM.canopy_rev_aux(bref_drv.inst, bounds, filt),
                                   n_canopy=Nauto)
-    for (f, cargs) in phref; f(bref_drv, cargs...); end
+    for entry in phref
+        f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(bref_drv), cargs...)
+    end
     @test all(isfinite, bref_drv.inst.temperature.t_veg_patch)
     @test isfinite(bref_drv.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
     @test isa(CLM.clm_drv_reverse!, Function)                # top-level entry exists
     # the default seed touches the soil thermal profile (active soil layers only).
     bseed = CLM.driver_rev_bundle(deepcopy(inst))
-    for (f, cargs) in phref; f(bseed, cargs...); end
+    for entry in phref
+        f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(bseed), cargs...)
+    end
     dbz = CLM.Enzyme.make_zero(bseed)
     CLM._default_drv_seed!(dbz, bseed)
     @test dbz.inst.temperature.t_soisno_col[c0, j1] ≈ 2*bseed.inst.temperature.t_soisno_col[c0, j1] atol=1e-12
@@ -163,7 +175,10 @@ include(joinpath(@__DIR__, "testdata.jl"))
     Nstep = 3; steps = [ph for _ in 1:Nstep]
     bflat = CLM.driver_rev_bundle(deepcopy(inst)); after1 = NaN
     for (s, phs) in enumerate(steps)
-        for (f, cargs) in phs; f(bflat, cargs...); end
+        for entry in phs
+            f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+            f(viewfn(bflat), cargs...)
+        end
         s == 1 && (after1 = bflat.inst.temperature.t_soisno_col[c0, jdiff])
     end
     tfin = bflat.inst.temperature.t_soisno_col[c0, jdiff]
@@ -173,9 +188,17 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # multistep_reverse!'s forward sweep), then recompute the last step from its checkpoint.
     btl = CLM.driver_rev_bundle(deepcopy(inst)); cps = Any[]
     for phs in steps
-        push!(cps, deepcopy(btl)); for (f, cargs) in phs; f(btl, cargs...); end
+        push!(cps, deepcopy(btl))
+        for entry in phs
+            f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+            f(viewfn(btl), cargs...)
+        end
     end
-    blast = deepcopy(cps[end]); for (f, cargs) in steps[end]; f(blast, cargs...); end
+    blast = deepcopy(cps[end])
+    for entry in steps[end]
+        f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(blast), cargs...)
+    end
     @test btl.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
     @test blast.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
 

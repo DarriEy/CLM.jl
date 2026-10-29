@@ -1248,12 +1248,20 @@ Adapt.@adapt_structure MfIn
 Adapt.@adapt_structure MfScr
 
 @kernel function _soilwm_moisture_form_kernel!(st, scr, mfin, @Const(mask), @Const(nbedrock),
-        joff::Int, joff_zi::Int, nlevsoi::Int, dtime, e_ice, dtmin, xtu, xtl, verysmall,
-        expensive::Bool, lower_bc::Int, denh2o, m_to_mm)
+        joff::Int, joff_zi::Int, nlevsoi::Int, @Const(realpar),
+        expensive::Bool, lower_bc::Int)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(scr.hk)
         nlayers = nbedrock[c]
+        dtime = realpar[1]
+        e_ice = realpar[2]
+        dtmin = realpar[3]
+        xtu = realpar[4]
+        xtl = realpar[5]
+        verysmall = realpar[6]
+        denh2o = realpar[7]
+        m_to_mm = realpar[8]
 
         nsubstep = 0
         dtsub  = dtime
@@ -1508,10 +1516,22 @@ function soilwm_moisture_form_solve!(st::MfState, scr::MfScr, mfin::MfIn, mask,
     T = eltype(scr.hk)
     backend = _kernel_backend(scr.hk)
     expensive = (cfg.flux_calculation == cfg.expensive)
+    realpar = _to_backend_like(scr.hk, T,
+        T[dtime, cfg.e_ice, cfg.dtmin, cfg.xTolerUpper, cfg.xTolerLower,
+          cfg.verySmall, DENH2O, M_TO_MM])
+    return soilwm_moisture_form_solve_params!(st, scr, mfin, mask, nbedrock,
+        joff, joff_zi, nlevsoi, realpar, expensive, cfg.lower_boundary_condition)
+end
+
+function soilwm_moisture_form_solve_params!(st::MfState, scr::MfScr, mfin::MfIn,
+        mask, nbedrock, joff::Int, joff_zi::Int, nlevsoi::Int, realpar,
+        expensive::Bool, lower_boundary_condition::Int)
+    nc = length(mask)
+    nc == 0 && return nothing
+    backend = _kernel_backend(scr.hk)
     _soilwm_moisture_form_kernel!(backend)(st, scr, mfin, mask, nbedrock,
-        joff, joff_zi, nlevsoi, T(dtime), T(cfg.e_ice), T(cfg.dtmin),
-        T(cfg.xTolerUpper), T(cfg.xTolerLower), T(cfg.verySmall), expensive,
-        cfg.lower_boundary_condition, T(DENH2O), T(M_TO_MM); ndrange = nc)
+        joff, joff_zi, nlevsoi, realpar, expensive,
+        lower_boundary_condition; ndrange = nc)
     KA.synchronize(backend)
     return nothing
 end
@@ -1552,7 +1572,11 @@ function soilwater_moisture_form!(col_data::ColumnData,
     # grouped so the whole adaptive substep loop runs as one per-column kernel.
     # (do NOT capture the Type `FT` in this closure — see note in soilwater_zengdecker2009!;
     #  similar(arr, dims...) keeps eltype+backend, zero(eltype(arr)) is constant-folded.)
-    scrow() = fill!(similar(h2osoi_liq, nc, nlevsoi), zero(eltype(h2osoi_liq)))
+    scrow() = begin
+        x = similar(h2osoi_liq, nc, nlevsoi)
+        _zero_all!(x)
+        x
+    end
     scr = MfScr(; hk = scrow(), smp = scrow(), dhkdw = scrow(), dsmpdw = scrow(),
         imped = scrow(), s2 = scrow(), vwc_liq = scrow(), dt_dz = scrow(),
         qin = scrow(), qout = scrow(), dqidw0 = scrow(), dqidw1 = scrow(),

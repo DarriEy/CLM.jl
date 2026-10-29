@@ -279,10 +279,13 @@ Ported from `QflxH2osfcSurf` in `SurfaceWaterMod.F90`.
 @kernel function _surfwat_qflx_surf_kernel!(qflx_h2osfc_surf, @Const(mask_hydrologyc),
                                             @Const(h2osfc), @Const(h2osfc_thresh),
                                             @Const(frac_h2osfc_nosnow), @Const(topo_slope),
-                                            dtime, h2osfcflag::Int, pc, mu)
+                                            @Const(realpar), h2osfcflag::Int)
     c = @index(Global)
     T = eltype(qflx_h2osfc_surf)
     @inbounds if mask_hydrologyc[c]
+        dtime = realpar[1]
+        pc = realpar[2]
+        mu = realpar[3]
         if h2osfcflag != 1
             qflx_h2osfc_surf[c] = zero(T)
         else
@@ -320,9 +323,10 @@ function surfwat_qflx_surf!(qflx_h2osfc_surf, mask_hydrologyc, h2osfc, h2osfc_th
     # Scalar params/dtime move to the array precision so the kernel carries no
     # Float64 arg (Metal rejects Float64). No-op on the Float64 host path.
     FT = eltype(qflx_h2osfc_surf)
+    realpar = _to_backend_like(qflx_h2osfc_surf, FT,
+        FT[dtime, SURFACE_WATER_PC[], SURFACE_WATER_MU[]])
     _launch!(_surfwat_qflx_surf_kernel!, qflx_h2osfc_surf, mask_hydrologyc, h2osfc,
-             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, FT(dtime), h2osfcflag,
-             FT(SURFACE_WATER_PC[]), FT(SURFACE_WATER_MU[]))
+             h2osfc_thresh, frac_h2osfc_nosnow, topo_slope, realpar, h2osfcflag)
 end
 
 function qflx_h2osfc_surf!(mask_hydrologyc::AbstractVector{Bool},
@@ -356,9 +360,11 @@ Ported from `QflxH2osfcDrain` in `SurfaceWaterMod.F90`.
 # --------------------------------------------------------------------------
 @kernel function _surfwat_qflx_drain_kernel!(qflx_h2osfc_drain, @Const(mask_hydrologyc),
                                              @Const(h2osfc), @Const(frac_h2osfc),
-                                             @Const(qinmax), dtime, h2osfcflag::Int)
+                                             @Const(qinmax), @Const(realpar),
+                                             h2osfcflag::Int)
     c = @index(Global)
     T = eltype(qflx_h2osfc_drain)
+    dtime = realpar[1]
     @inbounds if mask_hydrologyc[c]
         if h2osfc[c] < zero(T)
             # Numerical error recovery
@@ -374,9 +380,12 @@ Ported from `QflxH2osfcDrain` in `SurfaceWaterMod.F90`.
 end
 
 surfwat_qflx_drain!(qflx_h2osfc_drain, mask_hydrologyc, h2osfc, frac_h2osfc,
-                    qinmax, dtime, h2osfcflag::Int) =
+                    qinmax, dtime, h2osfcflag::Int) = begin
+    FT = eltype(qflx_h2osfc_drain)
+    realpar = _to_backend_like(qflx_h2osfc_drain, FT, FT[dtime])
     _launch!(_surfwat_qflx_drain_kernel!, qflx_h2osfc_drain, mask_hydrologyc, h2osfc,
-             frac_h2osfc, qinmax, dtime, h2osfcflag)
+             frac_h2osfc, qinmax, realpar, h2osfcflag)
+end
 
 function qflx_h2osfc_drain!(mask_hydrologyc::AbstractVector{Bool},
                               bounds_col::UnitRange{Int},
@@ -399,9 +408,11 @@ end
 # --------------------------------------------------------------------------
 @kernel function _surfwat_partial_update_kernel!(h2osfc, @Const(mask_hydrologyc),
                                                  @Const(qflx_in_h2osfc),
-                                                 @Const(qflx_h2osfc_surf), dtime)
+                                                 @Const(qflx_h2osfc_surf),
+                                                 @Const(realpar))
     c = @index(Global)
     T = eltype(h2osfc)
+    dtime = realpar[1]
     @inbounds if mask_hydrologyc[c]
         h = h2osfc[c] + (qflx_in_h2osfc[c] - qflx_h2osfc_surf[c]) * dtime
         # Match NumericsMod.truncate_small_values with the pre-update h2osfc
@@ -414,9 +425,12 @@ end
 end
 
 surfwat_partial_update!(h2osfc, mask_hydrologyc, qflx_in_h2osfc,
-                        qflx_h2osfc_surf, dtime) =
+                        qflx_h2osfc_surf, dtime) = begin
+    FT = eltype(h2osfc)
+    realpar = _to_backend_like(h2osfc, FT, FT[dtime])
     _launch!(_surfwat_partial_update_kernel!, h2osfc, mask_hydrologyc,
-             qflx_in_h2osfc, qflx_h2osfc_surf, dtime)
+             qflx_in_h2osfc, qflx_h2osfc_surf, realpar)
+end
 
 # --------------------------------------------------------------------------
 # Kernel: step-4 final h2osfc update (subtract drainage) and store diagnostics.
@@ -427,9 +441,11 @@ surfwat_partial_update!(h2osfc, mask_hydrologyc, qflx_in_h2osfc,
                                                qflx_h2osfc_drain_col,
                                                @Const(mask_hydrologyc),
                                                @Const(qflx_h2osfc_drain_arr),
-                                               @Const(qflx_h2osfc_surf_arr), dtime)
+                                               @Const(qflx_h2osfc_surf_arr),
+                                               @Const(realpar))
     c = @index(Global)
     T = eltype(h2osfc)
+    dtime = realpar[1]
     @inbounds if mask_hydrologyc[c]
         h = h2osfc[c] - qflx_h2osfc_drain_arr[c] * dtime
         # Here the partially updated h2osfc is the Fortran baseline.
@@ -444,10 +460,13 @@ end
 
 surfwat_final_update!(h2osfc, qflx_h2osfc_surf_col, qflx_h2osfc_drain_col,
                       mask_hydrologyc, qflx_h2osfc_drain_arr,
-                      qflx_h2osfc_surf_arr, dtime) =
+                      qflx_h2osfc_surf_arr, dtime) = begin
+    FT = eltype(h2osfc)
+    realpar = _to_backend_like(h2osfc, FT, FT[dtime])
     _launch!(_surfwat_final_update_kernel!, h2osfc, qflx_h2osfc_surf_col,
              qflx_h2osfc_drain_col, mask_hydrologyc, qflx_h2osfc_drain_arr,
-             qflx_h2osfc_surf_arr, dtime)
+             qflx_h2osfc_surf_arr, realpar)
+end
 
 """
     update_h2osfc!(col_data, soilhydrology, energyflux,

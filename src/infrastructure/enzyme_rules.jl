@@ -54,6 +54,49 @@ function reverse(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT}, tape,
 end
 
 # --------------------------------------------------------------------------
+# hydrond_snow_persistence! — launch-level overwrite/add adjoint.
+#
+# Differentiating the KA launch directly makes the scalar `dtime` argument
+# Active under runtime activity, which KernelAbstractions cannot lower on GPU.
+# The exact in-place VJP only needs to zero the shadow where the primal's
+# no-snow branch overwrote persistence; snow adds a Const and all other columns
+# are identity maps.
+# --------------------------------------------------------------------------
+function augmented_primal(config,
+        func::Const{typeof(hydrond_snow_persistence!)}, ::Type{RT},
+        persistence::Duplicated, snow::Const, nosnow::Const,
+        dtime::Const, bounds::Const) where {RT}
+    func.val(persistence.val, snow.val, nosnow.val, dtime.val, bounds.val)
+    return AugmentedReturn(nothing, nothing, nothing)
+end
+
+function reverse(config,
+        func::Const{typeof(hydrond_snow_persistence!)}, ::Type{RT}, tape,
+        persistence::Duplicated, snow::Const, nosnow::Const,
+        dtime::Const, bounds::Const) where {RT}
+    hydrond_snow_persistence_pullback!(persistence.dval, nosnow.val, bounds.val)
+    return (nothing, nothing, nothing, nothing, nothing)
+end
+
+# Runtime activity can conservatively mark the scalar conversion of `dtime`
+# Active even though the outer reverse API treats timestep length as a constant.
+function augmented_primal(config,
+        func::Const{typeof(hydrond_snow_persistence!)}, ::Type{RT},
+        persistence::Duplicated, snow::Const, nosnow::Const,
+        dtime::Active, bounds::Const) where {RT}
+    func.val(persistence.val, snow.val, nosnow.val, dtime.val, bounds.val)
+    return AugmentedReturn(nothing, nothing, nothing)
+end
+
+function reverse(config,
+        func::Const{typeof(hydrond_snow_persistence!)}, ::Type{RT}, tape,
+        persistence::Duplicated, snow::Const, nosnow::Const,
+        dtime::Active, bounds::Const) where {RT}
+    hydrond_snow_persistence_pullback!(persistence.dval, nosnow.val, bounds.val)
+    return (nothing, nothing, nothing, zero(dtime.val), nothing)
+end
+
+# --------------------------------------------------------------------------
 # Constant parameter / control containers.
 #
 # These module-level structs hold physical constants and control flags that are
