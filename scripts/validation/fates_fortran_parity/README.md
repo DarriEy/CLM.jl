@@ -1293,6 +1293,44 @@ quantity in the chain, in the order found:
    `test_fates_planthydro_coupling.jl`. `fates_apply_deferred_activation!` now performs
    `dyn_ED`. The SP scores are unchanged.
 
+6. **Gridcell weights were never recomputed after `dyn_ED`.** CTSM follows `dyn_ED`
+   (dynSubgridDriverMod.F90:313) with `dynSubgrid_wrapup_weight_changes` (:333), whose
+   `compute_higher_order_weights` (:389; subgridWeightsMod.F90:216-242) re-derives
+   `patch%wtlunit`, `patch%wtgcell` and `col%wtgcell` from the new `wtcol` before
+   `reweight_wrapup` (:395). The port ran `dyn_ED` (`fates_apply_deferred_activation!`)
+   but not the recompute, so the FATES patches kept their **surfdata** `wtgcell`. An
+   inactive slot kept a nonzero gridcell weight (nocomp p6: 0.408), and the bare and
+   vegetated patches kept weights unrelated to their FATES area (nocomp bare patch:
+   `wtgcell` 0.350 vs `wtcol` 0.880). The port's history writer
+   (`_aggregate_to_gridcell`) averaged with those weights and without the
+   `patch%active` test of `p2g_1d` (subgridAveMod.F90:531-538). Fix:
+   `compute_higher_order_weights!` right after `fates_apply_deferred_activation!` in
+   `clm_drv!`. The history writer and `hist_dov2xy` now skip inactive units, zero
+   weights and spval, as p2g/c2g do, and `HistFieldDef` carries an `l2g_scale_type`.
+   Under FATES-SP, TLAI/TSAI point at `tlai/tsai_hist_patch` (CanopyStateType.F90:232-241).
+   Other `wtgcell`/`wtlunit` readers (lnd2atm, drydep, dust) also see the corrected
+   weights. The prognostic state should not move, because column averages already used
+   `wtcol`. The column fields below are identical before and after to the printed digits.
+
+   Port history-writer gridcell value vs the Fortran h0 (`hist_dov2xy` default), 240
+   hourly steps. The figure is the relative error of the window mean (`HIST_*` in
+   `fates_modes_parity.jl`).
+
+   | field | SP before | SP after | nocomp before | nocomp after |
+   |---|---|---|---|---|
+   | BTRAN (instantaneous, l2g `veg`) | 0.82 | 6.6e-4 | 1.51 | 6.8e-5 |
+   | TV | 4.5e-3 (1.3 K) | 4.1e-6 | 5.4e-3 | 3.4e-5 |
+   | FSH | 0.53 | 5.5e-4 | 0.33 | 1.3e-2 |
+   | EFLX_LH_TOT | 0.67 | 9.8e-4 | 0.16 | 6.8e-3 |
+   | FSA | 0.52 | 2.5e-6 | 0.37 | 2.0e-6 |
+   | FIRE | 0.53 | 2.6e-5 | 0.37 | 8.1e-4 |
+   | SABV | 0.75 | 4.2e-5 | 1.22 | 2.6e-4 |
+   | ELAI | 0.62 | 1.6e-8 | 0.94 | 2.0e-4 |
+
+   Column-level fields (QRUNOFF, H2OSNO, TSOI_10CM, ...) were already right and are
+   unchanged. `test_fates_higher_order_weights.jl` pins the weight invariants and the
+   SP history values.
+
 **Default (non-FATES) path.** Items 1, 2, 4 and 5 are FATES-only. Item 3 is a real
 default-behaviour change for any caller of `clm_initialize!` + `clm_drv!` that did not
 set `use_clm5_fpi` itself. It is not a change for `clm_run!` (and so not for

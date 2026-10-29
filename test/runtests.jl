@@ -452,6 +452,10 @@ const INPROCESS_TEST_FILES = [
     # plant water in the column budget, hydraulic-failure mortality, RestartHydrStates,
     # and woody leaf water potential vs the Fortran fates_parity_1pt run (data-gated).
     "test_fates_planthydro_coupling.jl",
+    # FATES re-weighting -> compute_higher_order_weights (dynSubgridDriverMod.F90:389):
+    # patch wtgcell follows the FATES wtcol; history p2g skips inactive/spval patches
+    # and matches the Fortran FATES-SP h0 (data-gated).
+    "test_fates_higher_order_weights.jl",
     # FATES land use: fates_harvest_mode switches, the host LUH2 reader / landuse x
     # PFT data, and data-gated logging + LUH2 runs scored against Fortran CTSM.
     "test_fates_landuse.jl",
