@@ -153,6 +153,10 @@ Base.@kwdef mutable struct CLMInstances
     pftcon_fire_li2014::PftConFireLi2014 = PftConFireLi2014()
     dgvs_fire::DgvsFireData              = DgvsFireData()
     cnfire_stream::FireStreamData        = FireStreamData()
+    # FATES SPITFIRE modes 2-5 host fire data (FATESFireDataMod): lightning /
+    # population-density streams + the lnfm24 accumulator. Inactive (zero-length)
+    # unless clm_initialize!(use_fates=true, fates_spitfire_mode>1, flnfm/fhdm).
+    fates_fire_data::FATESFireData       = FATESFireData()
 
     # --- Decomposition cascade ---
     decomp_cascade::DecompCascadeConData = DecompCascadeConData()

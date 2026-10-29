@@ -166,7 +166,7 @@ end
 # ==========================================================================
 # Build: the Julia FATES port on the SAME site the Fortran case runs.
 # ==========================================================================
-function build()
+function build(; fates_spitfire_mode::Int = 0, init_kw...)
     # use_bedrock=false MATCHES the Fortran case's lnd_in (`use_bedrock = .false.`,
     # from CLM build-namelist for I2000Clm50FatesRs — see setup_case.sh / the run dir).
     # clm_initialize! DEFAULTS use_bedrock=true; leaving it unset ran the port with a
@@ -179,7 +179,8 @@ function build()
     # the Fortran ground truth to ~0.01–0.02. The soil-hydrology port itself is faithful;
     # this was a harness↔reference namelist mismatch (the #233/#240/#248 trap).
     inst, bounds, filt, tm = _C.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
-        use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false)
+        use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false,
+        fates_spitfire_mode=fates_spitfire_mode, init_kw...)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
         isfinite(inst.gridcell.londeg[g]) || (inst.gridcell.londeg[g] = inst.gridcell.lon[g]*180/π)

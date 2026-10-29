@@ -165,6 +165,16 @@ function fire_stream_interp!(fire_li2014::CNFireLi2014Data,
                              calday::Real,
                              dayspyr::Real,
                              bounds_grc::UnitRange{Int})
+    _fire_stream_interp_into!(fire_li2014.forc_lnfm, fire_li2014.forc_hdm, s, grc;
+                              calday = calday, dayspyr = dayspyr, bounds_grc = bounds_grc)
+end
+
+# FireInterp core shared by the CN (Li) and FATES (FATESFireDataMod) hosts: fill the
+# gridcell lightning [counts/km2/hr] and population-density [counts/km2] arrays.
+function _fire_stream_interp_into!(forc_lnfm::AbstractVector, forc_hdm::AbstractVector,
+                                   s::FireStreamData, grc::GridcellData;
+                                   calday::Real, dayspyr::Real,
+                                   bounds_grc::UnitRange{Int})
     isempty(bounds_grc) && return nothing
 
     if s.lnfm.active
@@ -174,17 +184,78 @@ function fire_stream_interp!(fire_li2014::CNFireLi2014Data,
             xlat = grc.latdeg[g]
             v1 = _fire_space_interp(s.lnfm, k1, xlon, xlat)
             v2 = _fire_space_interp(s.lnfm, k2, xlon, xlat)
-            fire_li2014.forc_lnfm[g] = (1 - w) * v1 + w * v2
+            forc_lnfm[g] = (1 - w) * v1 + w * v2
         end
     end
 
     if s.hdm.active
         k = _fire_nearest_time_index(s.hdm.doy, calday, dayspyr)
         for g in bounds_grc
-            fire_li2014.forc_hdm[g] =
-                _fire_space_interp(s.hdm, k, grc.londeg[g], grc.latdeg[g])
+            forc_hdm[g] = _fire_space_interp(s.hdm, k, grc.londeg[g], grc.latdeg[g])
         end
     end
 
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# FATES fire data (FATESFireDataMod.F90) — the host side of SPITFIRE modes 2-5
+# ---------------------------------------------------------------------------
+"""
+    FATESFireData
+
+Host state for SPITFIRE `fates_spitfire_mode > 1` (`FATESFireDataMod.F90`):
+the lightning and population-density streams interpolated to the gridcell
+(`FireInterp`), and the 24-hour running mean of lightning (`lnfm24`, a `runmean`
+accumulator with period -1 day and init_value 0, updated every step in
+`UpdateAccVars`). `dynamics_driv` hands `lnfm24 * 24` [#/km2/day] to
+`bc_in%lightning24` and `forc_hdm` to `bc_in%pop_density` (modes >= 3).
+Zero-length (inactive) unless a FATES run with `fates_spitfire_mode > 1` is
+initialized with stream files.
+"""
+Base.@kwdef mutable struct FATESFireData
+    stream::FireStreamData          = FireStreamData()
+    forc_lnfm::Vector{Float64}      = Float64[]   # lightning [counts/km2/hr]
+    forc_hdm::Vector{Float64}       = Float64[]   # population density [counts/km2]
+    lnfm24::Vector{Float64}         = Float64[]   # 24-h running mean of forc_lnfm
+    lnfm24_nsteps::Vector{Float64}  = Float64[]   # accumulMod per-point nsteps
+end
+
+fates_fire_data_active(d::FATESFireData) = !isempty(d.lnfm24)
+
+"""
+    fates_fire_data_init!(d, ng; flnfm="", fhdm="")
+
+`FATESFireDataMod` Init + InitAccBuffer/InitAccVars: read the streams and allocate
+the gridcell arrays (lnfm24 = its init_value 0).
+"""
+function fates_fire_data_init!(d::FATESFireData, ng::Int;
+                               flnfm::AbstractString = "", fhdm::AbstractString = "")
+    fire_stream_init!(d.stream; flnfm = flnfm, fhdm = fhdm)
+    d.forc_lnfm     = zeros(ng)
+    d.forc_hdm      = zeros(ng)
+    d.lnfm24        = zeros(ng)
+    d.lnfm24_nsteps = zeros(ng)
+    return d
+end
+
+"`FATESFireDataMod::FireInterp` (called from clm_fates%InterpFileInputs each step)."
+fates_fire_interp!(d::FATESFireData, grc::GridcellData; calday::Real, dayspyr::Real,
+                   bounds_grc::UnitRange{Int}) =
+    _fire_stream_interp_into!(d.forc_lnfm, d.forc_hdm, d.stream, grc;
+                              calday = calday, dayspyr = dayspyr, bounds_grc = bounds_grc)
+
+"""
+`FATESFireDataMod::UpdateAccVars`: lnfm24 runmean (1 day) of forc_lnfm over the
+gridcells, with accumulMod's per-point step counter.
+"""
+function fates_fire_update_acc_vars!(d::FATESFireData, bounds_grc::UnitRange{Int};
+                                     dtime::Int)
+    w1 = Float64(accum_window_steps(1, dtime))
+    for g in bounds_grc
+        n = min(d.lnfm24_nsteps[g] + 1.0, w1)
+        d.lnfm24_nsteps[g] = n
+        d.lnfm24[g] = ((n - 1.0) * d.lnfm24[g] + d.forc_lnfm[g]) / n
+    end
     return nothing
 end

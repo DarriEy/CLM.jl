@@ -1106,3 +1106,82 @@ fragmentation scalars as the Fortran reference, and the oracle moves toward Fort
   on both sides and `suplnitro='ALL'` supplements immobilization.
 * MIMICS under FATES (`clm_initialize!` refuses `decomp_method=2` with FATES-BGC).
 * FATES-BGC restarts, and windows longer than 10 days for the soil pools.
+
+---
+
+# SPITFIRE FIRE (2026-10-28): host fire weather + mode 1 vs Fortran
+
+## What changed on the host
+* **24-hour fire-weather means.** SPITFIRE reads `bc_in%precip24_pa / relhumid24_pa /
+  wind24_pa` (and the FATES `tveg24` running mean). The port used to fill them from a
+  single-step stand-in in `clm_driver.jl` (this step's rain, a Tetens RH, `|u,v|`), the
+  same value for every patch. They now come from the host accumulators, as in Fortran:
+  `PREC24` / `RH24` (Wateratm2lndBulkType) and `WIND24` (atm2lndType) are accumulMod
+  `runmean`s with a 1-day period and init values 0 / 100 / 0. Only active patches update,
+  each with its own step counter (`fates24_nsteps_patch`), so a FATES patch that switches
+  on mid-run starts a fresh mean. `dynamics_driv` copies `prec24/rh24/wind24_patch(ifp +
+  patchi(c))` into `bc_in` for every vegetated FATES patch (`fates_pack_bcin_daily!`).
+  The fields are allocated only under `use_fates`.
+* **Modes 2-5 host (FATESFireDataMod).** `clm_initialize!(fates_spitfire_mode>1, flnfm,
+  fhdm)` reads the lightning / population-density streams (`FATESFireData`),
+  `FireInterp` runs every step, `lnfm24` is a 1-day runmean, and the daily pack sets
+  `lightning24 = lnfm24*24` (all modes > 1) and `pop_density = forc_hdm` (modes >= 3).
+* `clm_initialize!(fates_spitfire_mode=...)` now reaches `clm_fates_init!`.
+* The FATES clock fix from #341 (`fates_get_and_set_time!`, cherry-picked) is required:
+  without it FATES sits on 2 January and the fire-season comparison is meaningless.
+
+## Fortran reference
+`stage_spitfire_run.sh` runs the archived `fates_parity_1pt` case (Bow at Banff,
+2002-07-01, 3600 s, use_fates_bgc) with `fates_spitfire_mode=1` for 730 days and a
+daily-mean h0 of the fire fields. Variants: `CDL=<cdl>` swaps the FATES parameter file;
+`SPITFIRE_MODE=2..5` adds the synthetic uniform lightning/popdens streams (0.000457
+strikes/km2/hr). Committed extracts: `fates_spitfire_fortran.csv` (mode 1, default
+params), `fates_spitfire_thr5_fortran.csv` (mode 1, `fates_fire_threshold` 50 -> 5 kW/m,
+450 days) and `fates_spitfire_m2thr5_fortran.csv` (mode 2, same threshold).
+`fates_spitfire_parity.jl` steps the port over the same window and scores it.
+
+With default parameters the Fortran site never burns: fire intensity peaks at
+24.3 kW/m (2003-08-04..16, days 400-412, the 2003 dry spell), under the 50 kW/m
+`fates_fire_threshold`. The threshold-5 variant burns on days 402-412 and exercises
+area burnt, crown scorch, cambial kill, fire mortality and the fire carbon flux.
+
+Note on forcing alignment: DATM indexes the standard-calendar `clmforc.2004.nc` by
+elapsed time under the NO_LEAP model calendar, so from 2004-03-01 the model reads the
+previous calendar day. The parity script reproduces this (`datm_time`); aligning by
+date puts every day after 2004-02-28 one day off (TBOT ~2 K).
+
+## Result (mode 1, default parameters, 730 days)
+Host drivers (daily means): WIND, PRECIP, TBOT within 6e-8, RH within 1.1e-3.
+
+Fire weather and fuel moisture, which depend only on weather and `tveg24`, track:
+
+| window | NI mean F / J | FDI mean F / J | fuel moisture by class (mean rel) |
+|---|---|---|---|
+| days 1-40 | 275.9 / 280.1 (1.5 %) | 0.0876 / 0.0888 | 2e-5 .. 4e-3 |
+| days 380-420 (2003 fire season) | 2673 / 2672 (0.04 %) | 0.5415 / 0.5401 | |
+
+The Nesterov index rises, peaks (5611 / 5627 on day 412) and resets (day 413) on the
+same days. The day-1-10 NI gap comes from `TVEG24` (2.07 / 2.84 C on day 2), the
+cold-start canopy temperature residual, not from the fire code.
+
+Fuel **amount** and **composition** do not match, and the gap grows with the vegetation
+gap. FATES_VEGC and FATES_NPATCHES separate after about 5 weeks (Julia makes 9 patches by
+day 90, Fortran waits until day ~400; Fortran drops 0.02 kgC/m2 of live carbon into leaf
+litter on day 39, Julia does not). This happens identically with fire off (Fortran fire-on
+VEGC equals fire-off VEGC to every digit until the first burn), so it is the FATES
+demography residual tracked in `docs/FATES_MULTIYEAR_ENERGY.md`, not SPITFIRE. During the
+2003 fire season Julia carries 27 % more ground fuel (live grass +25 %), a 7 % lower
+effective wind (fewer trees), and therefore about 1.7x the ROS and 2.2x the intensity.
+It crosses the 50 kW/m threshold on days 409-412 while Fortran (24 kW/m) does not:
+
+| | Fortran | Julia |
+|---|---|---|
+| days with FI > 0 | 13 (400-412) | 13 (400-412) |
+| peak FI | 24.3 kW/m (day 411) | 46.5 kW/m (day 411) |
+| burn days (FI > 50 kW/m) | 0 | 4 (409-412), total burned fraction 1.2e-4 |
+
+SFMainMod (fire weather, ROS, fuel consumption, area burnt, scorch, crown/cambial damage,
+post-fire mortality), SFNesterovMod and SFFireWeatherMod were re-read line by line
+against the Fortran; no discrepancy was found. FatesFuelMod was not re-read, but its
+per-class fuel moisture output matches to < 0.5 %. The difference in the burn decision
+comes from the fuel load.

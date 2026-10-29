@@ -139,6 +139,11 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
 
     ng, nl, nc, np = 1, 1, 1, 2
     inst = _C.CLMInstances()
+    # varctl.use_fates gates the FATES-only host allocations (the WIND24/PREC24/RH24
+    # fire-weather accumulators), exactly as clm_initialize! sets it before
+    # clm_instInit!. Restored before returning.
+    use_fates_saved = _C.varctl.use_fates
+    _C.varctl.use_fates = true
     _C.clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                      nlevdecomp_full=_C.varpar.nlevdecomp_full)
 
@@ -147,6 +152,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
     col.patchi[1] = 1; col.patchf[1] = 2; col.npatches[1] = 2
     col.nbedrock[1] = _C.varpar.nlevsoi
     col.is_fates[1] = true
+    col.active[1] = true   # is_active_p (fates_set_filters) needs an active column
 
     lun = inst.landunit
     lun.itype[1] = _C.ISTSOIL; lun.urbpoi[1] = false
@@ -226,7 +232,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
         a.forc_pbot_not_downscaled_grc[g]=pbot; a.forc_q_not_downscaled_grc[g]=q
         a.forc_rho_not_downscaled_grc[g]=rho; a.forc_lwrad_not_downscaled_grc[g]=350.0
         a.forc_rain_not_downscaled_grc[g]=0.0; a.forc_snow_not_downscaled_grc[g]=0.0
-        a.forc_u_grc[g]=4.0; a.forc_v_grc[g]=0.0
+        a.forc_u_grc[g]=4.0; a.forc_v_grc[g]=0.0; a.forc_wind_grc[g]=4.0
         a.forc_hgt_grc[g]=30.0; a.forc_hgt_u_grc[g]=30.0
         a.forc_hgt_t_grc[g]=30.0; a.forc_hgt_q_grc[g]=30.0
         a.forc_vp_grc[g]=vp; a.forc_pco2_grc[g]=367.0e-6*pbot
@@ -300,6 +306,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
         end
     end
 
+    _C.varctl.use_fates = use_fates_saved
     return (inst=inst, no_error=no_error, balance_threw=balance_threw,
             nan_steps=nan_steps, daily_fires=daily_fires, errmsg=errmsg,
             pveg=pveg)
@@ -323,12 +330,18 @@ end
             # the SPITFIRE chain RAN live (the no_fire path leaves these at 0):
             # site fire-weather index, number of ignitions, fire-danger index.
             site = r.inst.fates.sites[1]
+            # NOTE: this hand-built 1-column harness never computes a canopy
+            # temperature for the FATES HLM patch (t_veg_patch stays NaN), so the
+            # FATES tveg24 running mean stays at 0 K and the Nesterov index is
+            # correctly 0 (T < dewpoint). The old single-step RH stand-in made NI > 0
+            # here only by accident. A real-site NI/FDI/fuel/ROS check against Fortran
+            # is scripts/validation/fates_fortran_parity/fates_spitfire_parity.jl.
             @test isfinite(site.fireWeather.fire_weather_index)
-            @test site.fireWeather.fire_weather_index > 0.0
+            @test site.fireWeather.fire_weather_index >= 0.0
             @test isfinite(site.NF)
-            @test site.NF > 0.0
+            @test site.NF > 0.0     # scalar_lightning: constant ignitions
             @test isfinite(site.fdi)
-            @test site.fdi > 0.0
+            @test 0.0 <= site.fdi < 1.0
             # per-patch fuel loading is populated + finite.
             cp = site.oldest_patch; totfuel = 0.0; allfin = true
             while cp !== nothing
@@ -341,6 +354,21 @@ end
             end
             @test allfin
             @test totfuel >= 0.0
+            # fire weather reached bc_in from the host's per-patch 24-h running means
+            # (dynamics_driv: bc_in%wind24_pa(ifp) = wind24_patch(ifp + patchi(c))).
+            # The forcing is constant (u = 4 m/s, no rain), so every active mean is
+            # exactly the forcing value.
+            bc = r.inst.fates.bc_in[1]; a2l = r.inst.atm2lnd
+            pi0 = r.inst.column.patchi[1]
+            for ip in 1:site.youngest_patch.patchno
+                ip + pi0 <= length(a2l.wind24_patch) || break  # 2 HLM slots here
+                @test bc.wind24_pa[ip] == a2l.wind24_patch[ip + pi0]
+                @test bc.precip24_pa[ip] == a2l.prec24_patch[ip + pi0]
+                @test bc.relhumid24_pa[ip] == a2l.rh24_patch[ip + pi0]
+            end
+            @test bc.wind24_pa[1] ≈ 4.0
+            @test bc.precip24_pa[1] == 0.0
+            @test bc.relhumid24_pa[1] ≈ a2l.forc_rh_grc[1]
             # final carbon mass balance holds.
             @test _C.TotalBalanceCheck(site, -1) === nothing
         finally
