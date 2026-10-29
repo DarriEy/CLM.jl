@@ -62,7 +62,7 @@
 using CLM, Printf, Dates, NCDatasets
 const _C = CLM
 
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+const DATA = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))"
 # The site the Fortran case runs (scripts/validation/fates_fortran_parity/setup_case.sh):
 # the proven Bow-at-Banff single-point settings dir + its local ERA5 clmforc.YYYY.nc.
 const SITEDIR   = get(ENV, "FATES_SITEDIR", "$DATA/domain_Bow_at_Banff_lumped_era5/settings/CLM")
@@ -166,7 +166,7 @@ end
 # ==========================================================================
 # Build: the Julia FATES port on the SAME site the Fortran case runs.
 # ==========================================================================
-function build()
+function build(; fates_spitfire_mode::Int = 0, init_kw = (;), cfg_kw = (;), extra_init_kw...)
     # use_bedrock=false MATCHES the Fortran case's lnd_in (`use_bedrock = .false.`,
     # from CLM build-namelist for I2000Clm50FatesRs — see setup_case.sh / the run dir).
     # clm_initialize! DEFAULTS use_bedrock=true; leaving it unset ran the port with a
@@ -179,7 +179,8 @@ function build()
     # the Fortran ground truth to ~0.01–0.02. The soil-hydrology port itself is faithful;
     # this was a harness↔reference namelist mismatch (the #233/#240/#248 trap).
     inst, bounds, filt, tm = _C.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
-        use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false)
+        use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false,
+        fates_spitfire_mode=fates_spitfire_mode, init_kw..., extra_init_kw...)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
         isfinite(inst.gridcell.londeg[g]) || (inst.gridcell.londeg[g] = inst.gridcell.lon[g]*180/π)
@@ -200,7 +201,7 @@ function build()
     # scripts/fates_longhorizon.jl). The Fortran case cold-starts CLM from the same
     # surfdata with all 14 FATES PFTs; a hand-tweaked initial soil profile or a
     # screened PFT set would compare the port against a DIFFERENT model.
-    config = _C.CLMDriverConfig(use_fates=true)
+    config = _C.CLMDriverConfig(; use_fates=true, cfg_kw...)
     return inst, bounds, filt, _C.clump_filter_inactive_and_active, config, tm
 end
 
@@ -266,14 +267,14 @@ function run_and_dump(outpath::String; nsteps::Int=NSTEPS)
         calday = dayofyear(cur) + tod / _C.SECSPDAY
         (declin, _e1)   = _C.compute_orbital(calday)
         (declinm1, _e2) = _C.compute_orbital(calday - DTIME / _C.SECSPDAY)
-        _C.init_daylength!(inst.gridcell, declin, declinm1, _C.ORB_OBLIQR_DEFAULT, 1:ng)
+        i <= 1 && _C.init_daylength!(inst.gridcell, declin, declinm1, _C.ORB_OBLIQR_DEFAULT, 1:ng)  # once: update_daylength! in clm_drv! shifts prev_dayl after step 1
         nextsw = calday + DTIME / _C.SECSPDAY
 
         _C.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)
         _C.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
 
         nstep_ref[] = i
-        _C.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+        _C.clm_drv!(config, inst, filt, filt_ia, bounds, _C.nuopc_doalb(i), nextsw, declin, declin,
             _C.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=i, is_first_step=(i <= 1),
             is_beg_curr_day=(i > 0 && tod == 0), is_end_curr_day=false, is_beg_curr_year=false,

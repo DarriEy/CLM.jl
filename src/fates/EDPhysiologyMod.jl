@@ -197,12 +197,16 @@ function GenerateDamageAndLitterFluxes(csite::ed_site_type, cpatch::fates_patch_
                                                  ipft, ndcohort.crowndamage)
 
                 crown_loss_frac = GetCrownReduction(cd - ccohort.crowndamage)
+                # Fraction of sapwood/structure/storage lost with the branches. Assigned
+                # BEFORE the element loop: inside it, Julia scopes the variable to the
+                # loop body and the PRTDamageLosses! calls after the loop threw
+                # UndefVarError on the first damage event (the Fortran local lives for
+                # the whole routine, EDPhysiologyMod.F90:356/399-401).
+                branch_loss_frac = crown_loss_frac * branch_frac * agb_frac
 
                 for el in 1:num_elements[]
                     litt = cpatch.litter[el]
                     elflux_diags = csite.flux_diags.elem[el]
-
-                    branch_loss_frac = crown_loss_frac * branch_frac * agb_frac
 
                     leaf_loss   = GetState(ndcohort.prt, leaf_organ, element_list[el]) * crown_loss_frac
                     repro_loss  = GetState(ndcohort.prt, repro_organ, element_list[el]) * crown_loss_frac

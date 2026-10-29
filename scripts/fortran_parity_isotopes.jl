@@ -38,7 +38,7 @@
 # ==========================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const ISO_DUMPDIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_iso"
+const ISO_DUMPDIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_iso"
 const ISO_FORCING = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2002.nc")
 
 # The veg-isotope pool stems: dump var "<stem>_13" / "<stem>_14" maps to the

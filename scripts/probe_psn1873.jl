@@ -4,7 +4,7 @@
 # One step from an exact IC → drift contamination ~0.024%, negligible vs the ~1.2%
 # grass residual we are chasing.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const SC = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup"  # clean before_step dumps (psn_probe run)
+const SC = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup"  # clean before_step dumps (psn_probe run)
 const NSTEP = 1757873
 inst, bounds = run_one_parity_step!(NSTEP; use_cn=true, dumpdir=SC,
     use_hydrstress=true, use_luna=true,
@@ -41,7 +41,7 @@ end
 
 # Aj-path inputs vs dump: parsun (absorbed PAR sunlit), jmx25t, SABV
 println("\n== Aj-path inputs: Julia vs Fortran dump (before_step_n1757873) ==")
-let b=NCDataset("/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/pdump_before_step_n1757873.nc")
+let b=NCDataset("$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/pdump_before_step_n1757873.nc")
   fpar=Float64.(replace(b["parsun"][1,:],missing=>NaN)); fsabv=Float64.(replace(b["SABV_P"][:],missing=>NaN))
   fjmx=haskey(b,"jmx25t") ? Float64.(replace(b["jmx25t"][:],missing=>NaN)) : fill(NaN,3)
   for p in 2:3

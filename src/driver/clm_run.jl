@@ -60,6 +60,28 @@ end
 # per-step full-tree `Adapt.adapt(Array, ·)` SNAPSHOT whose per-step allocation OOM'd a
 # full-year GPU run. `dst`/`src` share structure by construction (dst = adapt(Array, src)),
 # so we walk fields positionally; arrays are copied, mutable sub-structs are recursed.
+"""
+    nuopc_doalb(nstep) -> Bool
+
+Whether the CTSM NUOPC cap runs the albedo solve (`doalb`) on step `nstep` of a
+startup (cold-start) run driven by datm. `lnd_comp_nuopc.F90` ModelAdvance (:830-841):
+
+    if (nstep == 0) then;      doalb = .false.
+    else if (nstep == 1) then; doalb = (abs(nextsw_cday - caldayp1) < 1.e-10_r8)
+    else;                      doalb = (nextsw_cday >= -0.5_r8)
+
+With datm the nstep-1 test is false (checked on the fates_hydro_1pt Bow reference:
+SABV = 0 and SABG = 0.8 FSDS, the InitCold albedo, on nsteps 0, 1 and 2, and the first
+canopy absorption on nstep 3), and from nstep 2 on datm always sends a valid
+`nextsw_cday`. So the first albedo solve is at the END of nstep 2 and nsteps 0-2 radiate
+with the `surfalb_type%InitCold` albedos (0.2, fabd = 0, ftdd = 1). Calling `clm_drv!`
+with `doalb = true` from nstep 0 put real canopy albedos/absorption in from nstep 1.
+
+Only for runs that start at nstep 0/1 from a cold start; a run continued from a
+restart is past nstep 2 and has `doalb = true` every step.
+"""
+nuopc_doalb(nstep::Integer) = nstep >= 2
+
 function _refresh_host_tree!(dst, src)
     @inbounds for i in 1:fieldcount(typeof(src))
         s = getfield(src, i); d = getfield(dst, i)
@@ -350,6 +372,19 @@ function clm_run!(;
     history_writer_init!(hw, fhistory, fields, ng, nc, np)
     verbose && println("CLM.jl: Writing output to: ", fhistory)
 
+    # ---- Daylength initialization (Fortran clm_initializeMod.F90:362-370) ----
+    # InitDaylength sets dayl for the first step and prev_dayl for the step before.
+    # clm_drv!'s update_daylength! then skips the first step and shifts
+    # prev_dayl <- dayl on every later step; it must NOT be re-initialized inside the
+    # loop (that makes prev_dayl == dayl, so ws_flag is stuck at 1 and the
+    # season-deciduous autumn offset never fires). The loop computes the orbit from
+    # the post-advance calday, so step 1's calday is current_date + dtime.
+    let dts = round(Int, dtime)
+        (declin1, _)  = compute_orbital(get_curr_calday(tm; offset = dts))
+        (declin0, _)  = compute_orbital(get_curr_calday(tm))
+        init_daylength!(inst.gridcell, declin1, declin0, ORB_OBLIQR_DEFAULT, 1:ng)
+    end
+
     # ---- Optional device (GPU) mirror ----
     # When `device_adapt` is supplied (e.g. moves the tree to a Metal MtlArray/Float32
     # backend), keep `inst` as the host forcing-in / history-out shuttle and run clm_drv!
@@ -412,7 +447,9 @@ function clm_run!(;
         obliqr = ORB_OBLIQR_DEFAULT
 
         # --- Time flags ---
-        doalb = true  # compute albedo every step for simplicity
+        # Albedo every step, except the first steps of a cold start, where the CTSM
+        # NUOPC cap skips it (nuopc_doalb). A restart-initialised run keeps true.
+        doalb = have_ic_restart ? true : nuopc_doalb(tm.nstep)
         # `calday` is already post-advance_timestep! (= step_start + dtime), i.e. the
         # start of the NEXT radiation step — exactly the forcing time this step's
         # albedo is paired with in the next surface_radiation!. Adding another dtime

@@ -206,7 +206,7 @@ end
         mr = leaf_mr[p] + froot_mr[p]
         if woody[ivt] == one(T)
             mr = mr + livestem_mr[p] + livecroot_mr[p]
-        elseif ivt >= npcropmin
+        elseif itype[p] >= npcropmin   # npcropmin is the 0-based Fortran itype (ivt here is 1-based)
             if croplive[p]
                 reproductive_mr_tot = zero(T)
                 for k in 1:nrepr
@@ -548,7 +548,7 @@ Ported from `calc_allometry` in `CNAllocationMod.F90`.
         end
 
         f4  = flivewd[ivt]
-        if ivt >= npcropmin
+        if itype[p] >= npcropmin   # 0-based compare (ivt is 1-based)
             g1 = T(0.25)
         else
             g1 = grperc[ivt]
@@ -571,7 +571,7 @@ Ported from `calc_allometry` in `CNAllocationMod.F90`.
             n_allometry[p] = one(T) / cnl + f1 / cnfr +
                 (f3 * f4 * (one(T) + f2)) / cnlw +
                 (f3 * (one(T) - f4) * (one(T) + f2)) / cndw
-        elseif ivt >= npcropmin  # skip generic crops
+        elseif itype[p] >= npcropmin  # skip generic crops (0-based compare; ivt is 1-based)
             cng = graincn[ivt]
             f1 = aroot[p] / aleaf[p]
             f3 = astem[p] / aleaf[p]

@@ -15,7 +15,7 @@
 using CLM, NCDatasets, Dates, Printf
 
 const DATA = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))")
 const STW = joinpath(DATA, "domain_Stillwater_Oklahoma")
 const FS  = joinpath(STW, "settings/CLM/parameters/surfdata_clm.nc")
 const FP  = joinpath(STW, "settings/CLM/parameters/clm5_params.nc")

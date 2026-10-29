@@ -362,6 +362,30 @@
                 mask_soilc=mask_soilc)
     end
 
+    # The crop-harvest branch of cn_offset_litterfall! (CNOffsetLitterfall's
+    # `ivt >= npcropmin` block) reads the grain, seed-deficit, biofuel and residue
+    # arrays that make_test_data leaves unallocated. Zero-fill every still-empty
+    # array of those structs (patch-sized; reproductive / harvest dims from varpar)
+    # so the crop-path tests run under --check-bounds=yes.
+    function alloc_crop_offset!(d; np::Int=1, npft::Int=20)
+        for obj in (d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf, d.crop, d.cnveg_state)
+            for f in fieldnames(typeof(obj))
+                v = getfield(obj, f)
+                (v isa AbstractArray && isempty(v)) || continue
+                n = ndims(v)
+                dims = n == 1 ? (np,) : n == 2 ? (np, CLM.NREPR) : (np, CLM.MXHARVESTS, CLM.NREPR)
+                setfield!(obj, f, zeros(eltype(v), dims...))
+            end
+        end
+        for f in fieldnames(typeof(d.pftcon))
+            v = getfield(d.pftcon, f)
+            (v isa AbstractArray && isempty(v)) || continue
+            dims = ndims(v) == 1 ? (npft,) : (npft, CLM.NREPR)
+            setfield!(d.pftcon, f, zeros(eltype(v), dims...))
+        end
+        return d
+    end
+
     # =====================================================================
     # seasonal_decid_onset
     # =====================================================================
@@ -462,6 +486,78 @@
 
         # Reset
         CLM.cn_phenology_set_nml!(critical_daylight_method_in=CLM.critical_daylight_constant)
+    end
+
+    # =====================================================================
+    # Season-deciduous AUTUMN OFFSET under per-step daylength stepping.
+    # Regression for the cn_annual parity gap (docs/N_CYCLE_PARITY.md §8): the
+    # drivers re-ran init_daylength! every step before clm_drv!'s
+    # update_daylength!, which left prev_dayl == dayl. ws_flag
+    # (CNPhenologyMod.F90:1023-1027) was then always 1, so the offset test
+    # `ws_flag == 0 .and. dayl < crit_daylat` (F90:1182) never fired and the
+    # Bow grass kept its leaves all winter. Fortran calls InitDaylength once
+    # (clm_initializeMod.F90:362-370) and UpdateDaylength every step after.
+    # =====================================================================
+    @testset "season_decid autumn offset (daylength stepping)" begin
+        CLM.cn_phenology_set_nml!(critical_daylight_method_in=CLM.critical_daylight_constant)
+        obl  = CLM.ORB_OBLIQR_DEFAULT
+        decl(cal) = CLM.compute_orbital(cal)[1]
+        cal0 = 280.0                      # early October, before dayl < crit_dayl
+
+        function autumn_setup()
+            d = make_test_data()
+            d.pftcon.season_decid[5] = 1.0
+            d.cnveg_state.dormant_flag_patch[1] = 0.0     # leaves out (growing season)
+            g = d.gridcell
+            g.lat = [deg2rad(51.2)]; g.latdeg = [51.2]; g.max_dayl = [0.0]
+            return d
+        end
+        step_pheno!(d) = CLM.cn_season_decid_phenology!(d.pstate, d.params,
+            d.mask_soilp, d.pftcon, d.temperature, d.water_diag, d.cnveg_state,
+            d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf, d.patch_data, d.gridcell)
+
+        # (a) Fortran sequencing: init once, update every step.
+        d  = autumn_setup(); g = d.gridcell; dt = d.pstate.dt
+        nmax = round(Int, 40 * CLM.SECSPDAY / dt)
+        CLM.init_daylength!(g, decl(cal0), decl(cal0 - dt / CLM.SECSPDAY), obl, 1:1)
+        @test g.dayl[1] > d.pstate.crit_dayl
+        fired = 0
+        for n in 1:nmax
+            CLM.update_daylength!(g, decl(cal0 + n * dt / CLM.SECSPDAY), obl, false, 1:1)
+            @test g.prev_dayl[1] > g.dayl[1]           # ws_flag = 0 after the solstice
+            step_pheno!(d)
+            if d.cnveg_state.offset_flag_patch[1] == 1.0
+                fired = n; break
+            end
+        end
+        @test fired > 0
+        @test g.dayl[1] < d.pstate.crit_dayl <= g.prev_dayl[1]   # fired on the crossing
+        @test d.cnveg_state.offset_counter_patch[1] == d.pstate.ndays_off * CLM.SECSPDAY
+        @test d.cnveg_state.dormant_flag_patch[1] == 0.0
+        # and the offset litterfall starts draining the leaf pool
+        d.cnveg_state.offset_counter_patch[1] -= dt
+        CLM.cn_offset_litterfall!(d.pstate, d.mask_soilp, d.pftcon,
+            d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
+            d.crop, d.patch_data)
+        @test d.cnveg_cf.leafc_to_litter_patch[1] > 0.0
+
+        # (b) The old driver pattern -- re-seeding before every update -- pins
+        # prev_dayl == dayl, so ws_flag stays 1 and the offset never fires.
+        d2 = autumn_setup(); g2 = d2.gridcell
+        for n in 1:nmax
+            cal = cal0 + n * dt / CLM.SECSPDAY
+            CLM.init_daylength!(g2, decl(cal), decl(cal - dt / CLM.SECSPDAY), obl, 1:1)
+            CLM.update_daylength!(g2, decl(cal), obl, false, 1:1)
+            @test g2.prev_dayl[1] == g2.dayl[1]
+            step_pheno!(d2)
+        end
+        @test g2.dayl[1] < d2.pstate.crit_dayl
+        @test d2.cnveg_state.offset_flag_patch[1] == 0.0
+
+        # (c) get_curr_calday(offset=) as used by clm_run!'s InitDaylength seed
+        tm = CLM.TimeManager(; current_date=CLM.Dates.DateTime(2003, 12, 31, 23), dtime=3600)
+        @test CLM.get_curr_calday(tm; offset=3600) ≈ 1.0
+        @test CLM.get_curr_calday(tm; offset=-3600) ≈ 365.0 + 22 / 24
     end
 
     # =====================================================================
@@ -708,7 +804,7 @@
         @test d.cnveg_cf.leafc_to_litter_patch[1] == 0.0
 
         # ... but a prognostic-crop patch DOES dump its leaves.
-        dc = make_test_data()
+        dc = alloc_crop_offset!(make_test_data())
         dc.cnveg_state.offset_flag_patch[1] = 1.0
         dc.cnveg_state.offset_counter_patch[1] = dc.pstate.dt
         CLM.cn_offset_litterfall!(dc.pstate, dc.mask_soilp, dc.pftcon,
@@ -718,7 +814,7 @@
     end
 
     @testset "cn_offset_litterfall! CNratio_floating" begin
-        d = make_test_data()
+        d = alloc_crop_offset!(make_test_data())
         dt = d.pstate.dt
         d.cnveg_state.offset_flag_patch[1] = 1.0
         d.cnveg_state.offset_counter_patch[1] = dt

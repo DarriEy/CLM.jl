@@ -474,7 +474,17 @@ function run_one_parity_step!(nstep::Int; use_cn::Bool=false, dumpdir::String=DU
     # albedo is computed a whole step late.)
     nextsw_cday = calday
     (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
-    CLM.init_daylength!(inst.gridcell, declin, declinm1, obliqr, 1:bounds.endg)
+    # clm_drv!'s update_daylength! shifts prev_dayl <- dayl on every step but the
+    # first (DaylengthMod.F90:192-202). So seed the state it expects to find: on
+    # nstep 1 the InitDaylength values (declin, declinm1); later, the PREVIOUS step's
+    # (declinm1, declinm2), which the update then advances to (declin, declinm1).
+    # Seeding (declin, declinm1) on a later step gave prev_dayl == dayl.
+    if tm.nstep == 1
+        CLM.init_daylength!(inst.gridcell, declin, declinm1, obliqr, 1:bounds.endg)
+    else
+        (declinm2, _) = CLM.compute_orbital(calday - 2 * 3600.0 / CLM.SECSPDAY)
+        CLM.init_daylength!(inst.gridcell, declinm1, declinm2, obliqr, 1:bounds.endg)
+    end
 
     # forcing_offset_hours lets the harness match Fortran datm's record-alignment
     # convention (datm applies the record one step behind the CLM.jl step-start read).

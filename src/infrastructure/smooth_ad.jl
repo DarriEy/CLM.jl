@@ -9,8 +9,9 @@
 # exact but sharper transition. k=50 gives ~1e-22 approximation error.
 # ==========================================================================
 
-# No ForwardDiff import needed — Float64 methods are exact,
-# generic Real methods handle Dual via dispatch.
+# Float64 methods are exact, generic Real methods handle Dual via dispatch. ForwardDiff is
+# imported only for `_primal` (the tie-safe branch value, below).
+import ForwardDiff
 
 # --------------------------------------------------------------------------
 # Smooth evaluation mode control
@@ -65,6 +66,21 @@ global. Default `SMOOTH_MODE[] === :auto` → false → Float64 stays exact (sui
 unchanged).
 """
 @inline _smooth_f64() = (SMOOTH_MODE[] === :always)
+
+# --------------------------------------------------------------------------
+# _primal — the primal value for a BRANCH DECISION (strips ForwardDiff partials)
+# --------------------------------------------------------------------------
+# ForwardDiff ≥ 1.0 breaks exact-value TIES in `<`, `<=`, `==`, `isless` by comparing the
+# PARTIALS (`Dual(v, ∂) < v` is `∂ < 0`). Its intent is directional (branch the way a
+# perturbation would), but CLM pins state at a threshold EXACTLY by assignment (a melting
+# layer's `t_soisno = tfrz`) and computes residuals that are identically zero in exact
+# arithmetic (`heatr = hm - hfus*(wice0 - h2osoi_ice)/dtime`), so at a tie the partials are
+# ROUNDOFF NOISE and the tie-break takes a branch the Float64 primal (and central FD) never
+# does. Comparing `_primal(x)` makes the Dual take the SAME branch as the Float64 run at the
+# same state. Identity for every AbstractFloat (Float64/Float32 → byte-identical, GPU-safe);
+# recursive so nested (hyper-)duals reduce to their innermost value.
+@inline _primal(x) = x
+@inline _primal(x::ForwardDiff.Dual) = _primal(ForwardDiff.value(x))
 
 # Saturation threshold for the LogSumExp smooth_min/max. When one argument dominates the other
 # by k·|a−b| > _SMOOTH_SAT, the dominated branch's softmax weight is < exp(−36) ≈ 2e-16 (below

@@ -31,7 +31,10 @@ include(joinpath(@__DIR__, "generate_forcing.jl"))
     # (A) In-memory conservation of the new streamflow aggregation.
     # ---------------------------------------------------------------------
     @testset "A. hillslope_streamflow_to_grc! + stream-budget conservation" begin
-        # Minimal 1-gridcell / 1-landunit / 4-column catena.
+        # Minimal 1-gridcell / 1-landunit / 4-column catena. varpar starts unset
+        # after `using CLM`; set the layer counts here instead of relying on an
+        # earlier file (block B's clm_run! re-initializes them for itself).
+        CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
         ncol = 4
         grc = CLM.GridcellData(); CLM.gridcell_init!(grc, 1); grc.area[1] = 100.0  # km2
         lun = CLM.LandunitData(); CLM.landunit_init!(lun, 1)

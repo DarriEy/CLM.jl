@@ -1,7 +1,7 @@
 # Probe: multi-step grass+tree availc decomposition vs Fortran dump availc.
 # vegwp already verified <0.5% — this isolates the GPP/mr residual.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup"
 
 function run_step(nstep)
     inst, bounds = run_one_parity_step!(nstep; use_cn=true, dumpdir=DD,

@@ -541,6 +541,16 @@ end
 # =====================================================================================
 
 """
+    SapwoodAreaGrass(d) -> sapw_area
+
+Sapwood cross-sectional area [m2] of a grass plant from its basal diameter `d` [cm]:
+the cross-section of a cylinder of diameter `d`, treating the tillers' water
+transport collectively. Port of the upstream FATES `SapwoodAreaGrass` (NGEET/fates
+main), which fixes the unassigned grass `sapw_area` in ctsm5.3.012's FATES.
+"""
+SapwoodAreaGrass(d::Real) = (pi_const * ((d / 2.0)^2.0)) / cm2_per_m2
+
+"""
     bsap_allom(d, ipft, crowndamage, canopy_trim, elongf_stem) -> (sapw_area, bsap, dbsapdd)
 
 Generic sapwood wrapper. Dispatches on `prt_params.allom_smode[ipft]`. Returns the
@@ -595,9 +605,18 @@ function bsap_allom(d::Real, ipft::Integer, crowndamage::Integer, canopy_trim::R
         # the final dbsapdd does NOT include elongf_stem.
         dbsapdd = dbagwdd + dbbgwdd
 
-        # sapw_area is not set for grass (dummy); return 0.0 to match the
-        # uninitialized Fortran intent(out) being unused by grass callers.
-        sapw_area = 0.0
+        # Grass sapwood area. In the FATES shipped with ctsm5.3.012 this branch
+        # never assigns the intent(out) `sapw_area`, so its only consumers -- the
+        # plant-hydraulics UpdatePlantKmax / UpdatePlantHydrLenVol -- read
+        # uninitialized stack memory. Measured with an instrumented rebuild of the
+        # reference cesm.exe: 7.46 m2 in UpdatePlantKmax and ~1e-314 (or ~0.3) in
+        # UpdatePlantHydrLenVol, and adding that single write statement changes
+        # the whole run, so the value is binary-layout dependent and cannot be
+        # reproduced. (Returning 0 instead makes the grass stem kmax 0/0 = NaN.)
+        # Upstream FATES fixed this with SapwoodAreaGrass (NGEET/fates main,
+        # biogeochem/FatesAllometryMod.F90): the basal cross-section of the plant,
+        # a cylinder of diameter d. No non-hydraulics caller reads sapw_area.
+        sapw_area = SapwoodAreaGrass(d)
         return sapw_area, bsap, dbsapdd
     else
         fates_endrun("An undefined sapwood allometry was specified: $(allom_smode)")

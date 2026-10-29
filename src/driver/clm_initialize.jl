@@ -96,13 +96,81 @@ function clm_initialize!(;
     # would be wrong too: control.jl:102 endruns on PHS+FATES, mirroring CTSM,
     # so `nothing` resolves the condition. See docs/PHS_DEFAULT_BLOCKERS.md.
     use_hydrstress::Union{Bool,Nothing} = nothing,
+    # CTSM &clm_canopyhydrology_inparm use_clm5_fpi: .true. in the namelist defaults
+    # for phys=clm5_0/clm6_0 (the CLM4 form, 0.25*(1-exp(-0.5*lai)), is only the
+    # code fallback). clm_run! already forced it; callers that drive
+    # clm_initialize! + clm_drv! directly (the FATES parity harnesses) ran with the
+    # CLM4 interception and held ~1/10 of Fortran's intercepted rain on the canopy.
+    use_clm5_fpi::Bool = true,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
     use_c13::Bool = false,
     use_c14::Bool = false,
     use_fates::Bool = false,
+    # FATES reduced-complexity modes (CTSM &clm_inparm use_fates_sp /
+    # use_fates_nocomp / use_fates_fixed_biogeog, passed to FATES as
+    # hlm_use_sp / hlm_use_nocomp / hlm_use_fixed_biogeog by clmfates_interfaceMod
+    # CLMFatesGlobals1). All default .false. (the full-competition NBG cold start).
+    #   * use_fates_fixed_biogeog: the per-PFT site areas come from the surfdata
+    #     PCT_NAT_PFT (wt_nat_patch), mapped onto FATES PFTs by fates_hlm_pft_map;
+    #     PFTs with zero area are never seeded or recruited.
+    #   * use_fates_nocomp: one FATES patch per PFT (plus bare ground), no
+    #     competition between PFTs for light.
+    #   * use_fates_sp: satellite phenology. LAI/SAI/height are PRESCRIBED from the
+    #     surfdata MONTHLY_* fields; FATES keeps one cohort per PFT patch. FATES
+    #     enforces SP => nocomp .and. fixed_biogeog (FatesInterfaceMod check_allset).
+    use_fates_sp::Bool = false,
+    use_fates_nocomp::Bool = false,
+    use_fates_fixed_biogeog::Bool = false,
+    # CTSM fates_history_dimlevel (both entries): 1 = site-scalar FATES history only
+    # (the port's historical default), 2 = also the multiplexed (per-PFT, per-size) ones.
+    fates_history_dimlevel::Int = 1,
+    # CTSM controlMod.F90:474-479 sets use_fates_bgc = .not. use_fates_sp whenever
+    # use_fates: a (non-SP) FATES run carries CLM's CENTURY soil biogeochemistry, fed
+    # by the FATES litter fluxes; an SP run has no soil BGC. `nothing` resolves to
+    # that default. Pass `false` for the legacy FATES-without-soil-BGC configuration.
+    use_fates_bgc::Union{Bool,Nothing} = nothing,
+    # CTSM `fates_parteh_mode`: 1 = carbon-only allometric PARTEH (the default),
+    # 2 = CNP (prt_cnp_flex_allom_hyp). Under CLM, CNP runs with prescribed N/P
+    # uptake (fates_cnp_prescribed_nuptake/puptake; see clm_fates_init!).
+    fates_parteh_mode::Int = 1,
+    # FATES land use (CTSM &clm_inparm). All off by default.
+    #   * fates_harvest_mode: 'no_harvest' | 'event_code' (FATES logging on the
+    #     fates_landuse_logging_event_code schedule) | 'luhdata_area' / 'luhdata_mass'
+    #     (logging at the LUH2 harvest rates, area fraction or carbon; need use_fates_luh)
+    #   * use_fates_luh: LUH2 land-use states + transitions from `fluh_timeseries`
+    #     (with fixed biogeography also the landuse x PFT map `flandusepftdat`)
+    #   * use_fates_lupft: build-namelist shorthand for luh + nocomp + fixed biogeog
+    #     with the landuse x PFT map (no runtime switch of its own)
+    #   * use_fates_potentialveg: LUH bookkeeping with potential vegetation only (no
+    #     LUH2 file is read)
+    fates_harvest_mode::AbstractString = "no_harvest",
+    use_fates_luh::Bool = false,
+    use_fates_lupft::Bool = false,
+    use_fates_potentialveg::Bool = false,
+    fluh_timeseries::AbstractString = "",
+    flandusepftdat::AbstractString = "",
+    # FATES parameter file (.cdl); default data/fates/fates_params_default.cdl.
+    fates_paramfile::AbstractString = FATES_PARAMS_DEFAULT_CDL,
     fates_pft_areafrac::Union{Nothing,AbstractVector} = nothing,
     fates_biogeog_screen::Symbol = :none,
+    # CTSM use_fates_planthydro (clm_varctl): FATES plant hydraulics, default 1-D
+    # Taylor solver (fates_hydro_solver=1). Requires use_fates (+ the FATES soil BGC
+    # layering). Off by default.
+    use_fates_planthydro::Bool = false,
+    # FATES SPITFIRE mode (namelist fates_spitfire_mode): 0 no fire, 1 scalar
+    # lightning (constant ignitions, no streams), 2-5 need lightning/popdens streams.
+    fates_spitfire_mode::Int = 0,
+    # FATES research modes (CTSM &clm_inparm, all .false./0 by default — see
+    # scripts/validation/fates_fortran_parity/README.md "RESEARCH MODES"). Validated by `fates_check_niche_modes`, which
+    # mirrors CTSM's build-namelist + FATES check_allset rules.
+    use_fates_tree_damage::Bool = false,
+    use_fates_ed_st3::Bool = false,
+    use_fates_ed_prescribed_phys::Bool = false,
+    use_fates_cohort_age_tracking::Bool = false,
+    fates_seeddisp_cadence::Int = 0,
+    use_fates_inventory_init::Bool = false,
+    fates_inventory_ctrl_filename::AbstractString = "",
     # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
     # 178-181): .false. under use_fates / vichydro / phys=clm4_5, .true. otherwise (CLM5).
     # `nothing` reproduces that conditional; pass an explicit Bool to override it. Getting
@@ -224,14 +292,97 @@ function clm_initialize!(;
     # Without this the HLM reserves only the surfdata natpft count and FATES's extra
     # (disturbance) patches are dropped from the HLM coupling.
     varctl.use_fates = use_fates
-    varctl.fates_maxpatch = use_fates ? fates_maxpatch_total() : 0
+    if use_fates
+        # namelist_defaults_ctsm.xml: use_fates_lupft turns on use_fates_luh,
+        # use_fates_nocomp and use_fates_fixed_biogeog; the LUH harvest modes and
+        # potential vegetation turn on use_fates_luh.
+        use_fates_lupft && (use_fates_luh = use_fates_nocomp = use_fates_fixed_biogeog = true)
+        (fates_harvest_mode in ("luhdata_area", "luhdata_mass") || use_fates_potentialveg) &&
+            (use_fates_luh = true)
+        use_fates_lupft && isempty(flandusepftdat) &&
+            error("clm_initialize!: flandusepftdat is required when use_fates_lupft is true")
+        use_fates_potentialveg && !isempty(fluh_timeseries) &&
+            error("clm_initialize!: fluh_timeseries can not be defined when " *
+                  "use_fates_potentialveg is true")
+        use_fates_sp && !(use_fates_nocomp && use_fates_fixed_biogeog) &&
+            error("clm_initialize!: use_fates_sp requires use_fates_nocomp=true and " *
+                  "use_fates_fixed_biogeog=true (FATES: 'SP cannot be on if nocomp " *
+                  "mode is off' / 'if fixed biogeog mode is off')")
+        use_fates_sp && use_fates_bgc === true &&
+            error("clm_initialize!: use_fates_bgc cannot be true with use_fates_sp " *
+                  "(CTSM controlMod: use_fates_bgc = .not. use_fates_sp)")
+        use_fates_fixed_biogeog && (fates_pft_areafrac !== nothing ||
+                                    fates_biogeog_screen != :none) &&
+            error("clm_initialize!: use_fates_fixed_biogeog reads the PFT areas from the " *
+                  "surfdata; do not combine it with fates_pft_areafrac/fates_biogeog_screen")
+    else
+        (use_fates_sp || use_fates_nocomp || use_fates_fixed_biogeog) &&
+            error("clm_initialize!: use_fates_sp/nocomp/fixed_biogeog require use_fates=true")
+        (use_fates_luh || use_fates_lupft || use_fates_potentialveg ||
+         fates_harvest_mode != "no_harvest") &&
+            error("clm_initialize!: the FATES land-use options require use_fates=true")
+    end
+    varctl.use_fates_luh = use_fates && use_fates_luh
+    varctl.use_fates_lupft = use_fates && use_fates_lupft
+    varctl.use_fates_potentialveg = use_fates && use_fates_potentialveg
+    varctl.fates_harvest_mode = String(fates_harvest_mode)
+    varctl.fluh_timeseries = String(fluh_timeseries)
+    varctl.flandusepftdat = String(flandusepftdat)
+    varctl.use_fates_sp = use_fates && use_fates_sp
+    varctl.use_fates_nocomp = use_fates && use_fates_nocomp
+    varctl.use_fates_fixed_biogeog = use_fates && use_fates_fixed_biogeog
+    _fates_bgc = use_fates && (use_fates_bgc === nothing ? !use_fates_sp : use_fates_bgc)
+    _fates_bgc && decomp_method != 1 &&
+        error("clm_initialize!: FATES soil BGC is ported for CENTURY (decomp_method=1) only")
+    varctl.use_fates_bgc = _fates_bgc
+    use_fates_planthydro && !use_fates &&
+        error("clm_initialize!: use_fates_planthydro requires use_fates")
+    varctl.use_fates_planthydro = use_fates_planthydro
+    if use_fates
+        fates_check_niche_modes(; use_fates_tree_damage, use_fates_ed_st3,
+                                  use_fates_ed_prescribed_phys,
+                                  use_fates_cohort_age_tracking, fates_seeddisp_cadence,
+                                  use_fates_inventory_init, fates_inventory_ctrl_filename)
+    end
+    let on = use_fates   # the switches are "Only relevant if FATES is on"
+        varctl.use_fates_tree_damage         = on && use_fates_tree_damage
+        varctl.use_fates_ed_st3              = on && use_fates_ed_st3
+        varctl.use_fates_ed_prescribed_phys  = on && use_fates_ed_prescribed_phys
+        varctl.use_fates_cohort_age_tracking = on && use_fates_cohort_age_tracking
+        varctl.fates_seeddisp_cadence        = on ? fates_seeddisp_cadence : 0
+        varctl.use_fates_inventory_init      = on && use_fates_inventory_init
+        varctl.fates_inventory_ctrl_filename = on ? String(fates_inventory_ctrl_filename) : ""
+    end
+    # The soil-BGC cascade (pools/transitions, decomp params, competition) runs for
+    # use_cn OR use_fates_bgc (clm_instMod.F90 / CNDriverInit gate on both).
+    _soil_bgc = use_cn || _fates_bgc
 
     # ---- Step 2: Read surface file metadata ----
     (numpft, numcft) = surfrd_get_num_patches(fsurdat)
     nlevurb = surfrd_get_nlevurb(fsurdat)
+    # HLM patch slots per FATES column = fates_maxPatchesPerSite (SetFatesGlobalElements1),
+    # i.e. fates_maxpatch + 1 (the +1 is bare ground). Mode-dependent: nocomp raises the
+    # primary-land patch count to numpft; SP sizes it to hold the surfdata LAI of every
+    # surface PFT+CFT (numpft here is the max natpft index, so the count is numpft+1).
+    varctl.fates_maxpatch = use_fates ?
+        fates_max_patches_per_site(; use_sp = use_fates_sp, use_nocomp = use_fates_nocomp,
+                                   surf_numpft = numpft + 1, surf_numcft = numcft,
+                                   cdl_path = fates_paramfile) - 1 : 0
 
     # ---- Step 3: Initialize varpar dimensions ----
     varpar_init!(varpar, 1, numpft, numcft, nlevurb)
+    # Under FATES (create_crop_landunit = .false.) CTSM clm_varpar_init sets
+    # surfpft_ub = surf_numpft + surf_numcft - 1 (the PFT+CFT vector FATES' fixed
+    # biogeography and SP read; here numpft is already the max natpft index) and
+    # maxveg = maxsoil_patches - 1 = fates_maxPatchesPerSite - 1, which bounds the
+    # SP monthly-vegetation read. Applied on the reduced-complexity mode paths only, so
+    # the default FATES configuration keeps its layout byte-identical.
+    if use_fates && (use_fates_sp || use_fates_fixed_biogeog)
+        varpar.surfpft_ub = numpft + numcft
+    end
+    if use_fates && use_fates_sp
+        varpar.maxveg = max(varpar.maxveg, varctl.fates_maxpatch)
+    end
 
     # ---- Step 4: Initialize varcon (vertical coordinate arrays) ----
     varcon_init!()
@@ -247,6 +398,7 @@ function clm_initialize!(;
     # parameter state (pftcon and the various *_params singletons) — it touches no
     # subgrid structure — so moving it earlier is safe.
     readParameters!(paramfile)
+    canopy_hydrology_read_nml!(use_clm5_fpi=use_clm5_fpi)
 
     # ---- Step 5: Read surface data ----
     surf = SurfaceInputData()
@@ -315,7 +467,13 @@ function clm_initialize!(;
     inst.bgc_vegetation.config.decomp_method = decomp_method
     # clm5_0 BGC defaults to nitrification/denitrification ON (use_nitrif_denitrif);
     # the Fortran BGC spinup used it, so the mineral N is tracked as NO3/NH4.
-    inst.bgc_vegetation.config.use_nitrif_denitrif = use_cn
+    inst.bgc_vegetation.config.use_nitrif_denitrif = _soil_bgc
+    # FATES soil BGC: the facade/driver run the soil-only CN path (the bgc_vegp filter
+    # is empty — FATES owns the vegetation) and CStateUpdate1 pulls the FATES litter
+    # fluxes into the decomposition pools (clmfates_interfaceMod UpdateCLitterFluxes).
+    inst.bgc_vegetation.config.use_fates_bgc = _fates_bgc
+    inst.bgc_vegetation.driver_config.use_fates = use_fates
+    inst.bgc_vegetation.driver_config.use_fates_bgc = _fates_bgc
     # clm5_0 BGC also defaults to FUN (Fixation & Uptake of Nitrogen) + flexible
     # leaf C:N ON (the Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true.).
     # FUN is left OFF by default here ONLY to keep the default (use_fun=false) path
@@ -340,7 +498,10 @@ function clm_initialize!(;
     # only place the pool count is baked; downstream everything reads config.ndecomp_*.
     _mimics = use_cn && decomp_method == 2
     ndecomp_pools = _mimics ? 8 : 7
-    ndecomp_cascade_transitions = _mimics ? 15 : (use_cn ? 10 : 5)
+    # FATES-BGC CENTURY uses 6 pools / 8 transitions (no CWD — FATES owns it); the
+    # arrays keep the CN 7/10 allocation and the unused CWD slot stays zero, while the
+    # driver loops run over CLMDriverConfig's 6/8.
+    ndecomp_cascade_transitions = _mimics ? 15 : (_soil_bgc ? 10 : 5)
     clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                   nlevdecomp_full=nlevdecomp_full,
                   ndecomp_pools=ndecomp_pools,
@@ -490,6 +651,17 @@ function clm_initialize!(;
         @warn "friction-velocity param wiring failed: $e" maxlog=1
     end
 
+    # ---- Methane parameters (ch4Mod.F90 readParams) ----
+    # Only under use_lch4 (Fortran calls ch4Mod readParams only when use_lch4), so
+    # the default non-CH4 path is byte-identical. Before this, the CH4 model ran on
+    # struct defaults; q10ch4 was 1.5 instead of the paramfile's 1.33.
+    if use_lch4
+        NCDataset(paramfile, "r") do ds
+            read_ch4_params!(inst.ch4_params, ds;
+                             use_aereoxid_prog = inst.ch4_varcon.use_aereoxid_prog)
+        end
+    end
+
     # ---- Step 13: Initialize vertical structure ----
     initVertical!(bounds, inst.gridcell, inst.landunit, inst.column, surf)
 
@@ -552,16 +724,31 @@ function clm_initialize!(;
     end
 
     # ---- Step 15e: Initialize snow cover fraction method ----
+    # accum_factor / n_melt_coef come from the param file (SnowCoverFraction
+    # SwensonLawrence2012Mod ReadParams). They were wired only in clm_run!, so any
+    # caller of clm_initialize! + clm_drv! (the lake / single-step harnesses) ran
+    # the 0.1 / 200 defaults -- e.g. Bow's accum_factor is 0.00176, so new snow on
+    # the Bow lake got a frac_sno ~60x CTSM's.
+    scf_accum, scf_nmelt = 0.1, 200.0
+    try
+        NCDatasets.Dataset(paramfile) do ds
+            haskey(ds, "accum_factor") && (scf_accum = Float64(ds["accum_factor"][1]))
+            haskey(ds, "n_melt_coef") && (scf_nmelt = Float64(ds["n_melt_coef"][1]))
+        end
+    catch e
+        @warn "snow-cover-fraction param wiring failed: $e" maxlog=1
+    end
     scf = SnowCoverFractionSwensonLawrence2012()
     snow_cover_fraction_init!(scf, nc;
         col_lun_itype = inst.column.lun_itype,
         col_gridcell = inst.column.gridcell,
         col_topo_std = inst.column.topo_std,
-        int_snow_max = int_snow_max)
+        int_snow_max = int_snow_max,
+        accum_factor = scf_accum, n_melt_coef = scf_nmelt)
     inst.scf_method = scf
 
-    # ---- Step 15f: Initialize decomposition cascade for CN mode ----
-    if use_cn
+    # ---- Step 15f: Initialize decomposition cascade for CN / FATES-BGC mode ----
+    if _soil_bgc
         # Read BGC decomposition parameters from param file
         NCDatasets.Dataset(paramfile) do ds
             ndecomp_pools_max = 7
@@ -636,13 +823,18 @@ function clm_initialize!(;
                                       ndecomp_pools_max=7,
                                       ndecomp_cascade_transitions_max=10,
                                       spinup_state=0,
-                                      use_fates=false)
+                                      use_fates=_fates_bgc)
         end
 
         # Initialize competition state
+        # suplnitro: CLM-BGC namelist default 'NONE'; a carbon-only FATES run
+        # (fates_parteh_mode=1) MUST use 'ALL' (controlMod.F90:481-487 endruns
+        # otherwise), i.e. CNAllocate carbon_only — mineral N is supplemented so N
+        # never limits decomposition (fpi = 1).
         soil_bgc_competition_init!(inst.competition_state,
                                     inst.competition_params;
-                                    dt=Float64(dtime))
+                                    dt=Float64(dtime),
+                                    suplnitro = _fates_bgc ? SUPLN_ALL : SUPLN_NONE)
     end
 
     # ---- Step 15g: InitCold for the soil-BGC / CN-vegetation state ----------
@@ -667,6 +859,16 @@ function clm_initialize!(;
                           nlevdecomp = varpar.nlevdecomp,
                           nlevdecomp_full = nlevdecomp_full,
                           ndecomp_pools = (use_cn && decomp_method == 2) ? 8 : 7)
+    if _fates_bgc
+        # FATES-BGC: the CWD slot (pool 7) of the CN-sized arrays is unused (FATES owns
+        # CWD; ndecomp_pools = 6). InitCold seeds it from initial_stock = 0 and a zero
+        # initial C:N, which leaves 0/0 in the N pool; hold the slot at exactly zero.
+        _fates_zero_unused_cwd_slot!(inst)
+        # fates_litter_flux is allocated per column only under use_fates
+        # (SoilBiogeochemCarbon/NitrogenFluxType InitAllocate).
+        inst.soilbiogeochem_carbonflux.fates_litter_flux = fill(NaN, nc)
+        inst.soilbiogeochem_nitrogenflux.fates_litter_flux = fill(NaN, nc)
+    end
 
     # ---- Step 15h: InitAccBuffer / InitAccVars -------------------------------
     # Fortran's accumulator setup phase (clm_instMod.F90 `init_accflds`, then
@@ -701,11 +903,58 @@ function clm_initialize!(;
     if use_fates
         varctl.use_fates = true
         nlevsoil_fates = varpar.nlevsoi
-        # Carbon-only / non-vertsoilc cold start => one decomposition layer.
-        nlevdecomp_fates = 1
+        # CTSM clm_varpar.F90:302-310: nlevdecomp = nlevsoi when use_fates and not
+        # use_fates_sp, and clmfates_interfaceMod passes use_vertsoilc=1. Without soil
+        # BGC the legacy one-layer configuration is kept.
+        nlevdecomp_fates = _fates_bgc ? varpar.nlevdecomp : 1
+        # Fixed biogeography: each site's PFT areas are its gridcell's surfdata
+        # wt_nat_patch over HLM PFTs 0:surfpft_ub (clmfates_interfaceMod init).
+        hlm_areafrac = nothing
+        if use_fates_fixed_biogeog
+            fcol0 = fates_site_columns(inst.column, inst.landunit, nc)
+            nsurf = varpar.surfpft_ub + 1
+            hlm_areafrac = Vector{Vector{Float64}}(undef, nc)
+            for s in 1:nc
+                v = zeros(nsurf)
+                if fcol0[s] != 0
+                    g = inst.column.gridcell[fcol0[s]]
+                    for k in 1:min(nsurf, size(surf.wt_nat_patch, 2))
+                        v[k] = surf.wt_nat_patch[g, k]
+                    end
+                else
+                    v[1] = 1.0      # no host column: all bare ground
+                end
+                hlm_areafrac[s] = v
+            end
+        end
+        # FATES-SP: interpolate the surfdata monthly vegetation to the start date and
+        # run SatellitePhenology over every soil patch (active AND inactive) BEFORE the
+        # cold start, which hands the resulting LAI/SAI/height to FATES
+        # (clm_initializeMod: interpMonthlyVeg + SatellitePhenology(filter_inactive_
+        # and_active%soilp) ahead of init_coldstart).
+        if use_fates_sp
+            _fates_sp_host_phenology!(inst; mon = month(start_date), day = day(start_date),
+                                      first_read = true)
+        end
+        # Flag the FATES columns BEFORE the FATES cold start, as the Fortran host does
+        # (clmfates_interfaceMod::init sets `col%is_fates(c) = .true.` for every istsoil
+        # column, ahead of init_coldstart). The cold-start canopy transfer
+        # (wrap_update_hlmfates_dyn: FATES patch weights, elai/esai, z0m/displa) walks
+        # the is_fates columns, so flagging them only after clm_initialize! returned
+        # left the HLM on the surfdata patch layout for the first timestep(s).
+        let col = inst.column, lun = inst.landunit
+            for c in eachindex(col.is_fates)
+                lun.itype[col.landunit[c]] == ISTSOIL && (col.is_fates[c] = true)
+            end
+        end
         # One FATES site per CLM column (single-site MVP: nc is typically 1). PFT
         # count comes from the parameter file (numpft_in omitted => use the file).
         clm_fates_init!(inst; nsites = nc,
+                        use_sp = use_fates_sp,
+                        use_nocomp = use_fates_nocomp,
+                        hlm_pft_areafrac = hlm_areafrac,
+                        surf_numpft = numpft + 1, surf_numcft = numcft,
+                        hist_dimlevel = fates_history_dimlevel,
                         nlevsoil = nlevsoil_fates,
                         nlevdecomp = nlevdecomp_fates,
                         current_year = year(start_date),
@@ -713,7 +962,34 @@ function clm_initialize!(;
                         current_day = day(start_date),
                         fates_pft_areafrac = fates_pft_areafrac,
                         fates_biogeog_screen = fates_biogeog_screen,
-                        dtime = dtime)
+                        use_vertsoilc = _fates_bgc,
+                        decomp_method = _fates_bgc ? "CENTURY" : "CTC",
+                        use_tree_damage = use_fates_tree_damage,
+                        use_ed_st3 = use_fates_ed_st3,
+                        use_ed_prescribed_phys = use_fates_ed_prescribed_phys,
+                        use_cohort_age_tracking = use_fates_cohort_age_tracking,
+                        seeddisp_cadence = fates_seeddisp_cadence,
+                        use_inventory_init = use_fates_inventory_init,
+                        inventory_ctrl_file = use_fates_inventory_init ?
+                            fates_inventory_ctrl_filename : "none",
+                        spitfire_mode = fates_spitfire_mode,
+                        params_path = fates_paramfile,
+                        harvest_mode = fates_harvest_mode,
+                        use_luh = use_fates_luh,
+                        use_potentialveg = use_fates_potentialveg,
+                        fluh_timeseries = fluh_timeseries,
+                        flandusepftdat = flandusepftdat,
+                        use_planthydro = use_fates_planthydro,
+                        dtime = dtime,
+                        _fates_parteh_kwargs(fates_parteh_mode, _fates_bgc)...)
+        # SPITFIRE modes 2-5 read lightning (and, modes >= 3, population density)
+        # through FATESFireDataMod (CNFireFactory selects it whenever
+        # fates_spitfire_mode > scalar_lightning). Same flnfm/fhdm kwargs as the Li
+        # CN fire schemes. Without files the arrays stay inactive and bc_in
+        # lightning24/pop_density stay 0 (no ignitions), as before.
+        if fates_spitfire_mode > 1 && !(isempty(flnfm) && isempty(fhdm))
+            fates_fire_data_init!(inst.fates_fire_data, ng; flnfm = flnfm, fhdm = fhdm)
+        end
     end
 
     # ------------------------------------------------------------------------
@@ -732,6 +1008,91 @@ function clm_initialize!(;
     end
 
     return (inst, bounds, filt, tm)
+end
+
+"""
+    _fates_parteh_kwargs(fates_parteh_mode, use_fates_bgc) -> NamedTuple
+
+`clm_fates_init!` keywords for the PARTEH mode. The carbon-only default passes
+nothing (keeps that path byte-identical). CNP (mode 2) passes `parteh_mode` and the
+nutrient specs CTSM sends (clmfates_interfaceMod.F90:453-460): `nitrogen_spec` = 1
+with nitrification/denitrification (on under FATES soil BGC), else 2;
+`phosphorus_spec` = 0 (P is not tracked in CLM).
+"""
+function _fates_parteh_kwargs(fates_parteh_mode::Integer, use_fates_bgc::Bool)
+    fates_parteh_mode == prt_carbon_allom_hyp && return NamedTuple()
+    fates_parteh_mode == prt_cnp_flex_allom_hyp ||
+        error("clm_initialize!: fates_parteh_mode must be 1 (carbon) or 2 (CNP), " *
+              "got $(fates_parteh_mode)")
+    return (parteh_mode = prt_cnp_flex_allom_hyp,
+            nitrogen_spec = use_fates_bgc ? 1 : 2,
+            phosphorus_spec = 0)
+end
+
+"""
+    _fates_sp_host_phenology!(inst; mon, day, first_read=false, mask=nothing)
+
+Host satellite phenology for FATES-SP: `interpMonthlyVeg` (reading the two bracketing
+months of surfdata MONTHLY_LAI/SAI/HEIGHT_TOP/HEIGHT_BOT when they change, or always
+when `first_read`) followed by `SatellitePhenology` with `use_fates_sp=true`, which sets
+tlai/tsai/htop/hbot by patch type but leaves elai/esai (FATES's) alone. `mask` defaults
+to every patch on a soil landunit, active or not (CTSM passes
+`filter_inactive_and_active%soilp`: FATES reads the LAI of HLM PFT ft from patch
+`patchi + ft` whether or not that patch currently has weight).
+"""
+function _fates_sp_host_phenology!(inst::CLMInstances; mon::Int, day::Int,
+                                   first_read::Bool = false,
+                                   mask::Union{Nothing,AbstractVector{Bool}} = nothing,
+                                   do_phenology::Bool = true)
+    surf = inst.surfdata
+    surf === nothing && error("FATES-SP needs the surfdata monthly vegetation fields")
+    sp = inst.satellite_phenology
+    pch = inst.patch
+    np = length(pch.itype)
+    months, needs_read = interp_monthly_veg!(sp; kmo = mon, kda = day)
+    if needs_read || first_read
+        read_monthly_vegetation!(sp, inst.canopystate, pch, 1:np;
+            monthly_lai = surf.monthly_lai, monthly_sai = surf.monthly_sai,
+            monthly_height_top = surf.monthly_htop, monthly_height_bot = surf.monthly_hbot,
+            months = months)
+    end
+    do_phenology || return inst
+    if mask === nothing
+        lun = inst.landunit
+        mask = BitVector(undef, np)
+        for p in 1:np
+            l = pch.landunit[p]
+            mask[p] = (1 <= l <= length(lun.itype)) &&
+                      (lun.itype[l] == ISTSOIL || lun.itype[l] == ISTCROP)
+        end
+    end
+    satellite_phenology!(sp, inst.canopystate, inst.water.waterdiagnosticbulk_inst,
+                         pch, mask, 1:np; use_fates_sp = true)
+    return inst
+end
+
+"""
+    _fates_zero_unused_cwd_slot!(inst)
+
+Zero the CWD pool slot (index 7) of the soil C/N state arrays under FATES soil BGC,
+where CENTURY runs 6 pools and FATES owns coarse woody debris.
+"""
+function _fates_zero_unused_cwd_slot!(inst)
+    i_cwd_slot = 7
+    for st in (inst.soilbiogeochem_carbonstate, inst.soilbiogeochem_nitrogenstate)
+        for f in (:decomp_cpools_vr_col, :decomp_npools_vr_col)
+            hasproperty(st, f) || continue
+            a = getproperty(st, f)
+            ndims(a) == 3 && size(a, 3) >= i_cwd_slot && (a[:, :, i_cwd_slot] .= 0.0)
+        end
+        for f in (:decomp_cpools_col, :decomp_cpools_1m_col, :decomp_npools_col,
+                  :decomp_npools_1m_col)
+            hasproperty(st, f) || continue
+            a = getproperty(st, f)
+            ndims(a) == 2 && size(a, 2) >= i_cwd_slot && (a[:, i_cwd_slot] .= 0.0)
+        end
+    end
+    return inst
 end
 
 """

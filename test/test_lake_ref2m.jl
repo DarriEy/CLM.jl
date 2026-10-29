@@ -198,16 +198,18 @@ using Test, CLM
                 @test_skip rep === true
             else
                 jt = rep.jv["TSA"]; ft = rep.fv["TSA"]
-                @test length(jt) == 24
+                # Model steps s = 0..24 (s = 0 replicates CTSM's NUOPC nstep=0 physics
+                # step; see the harness header) against h0 records 1..25.
+                @test length(jt) == 25
 
                 # The assertion that matters: the VALUE, in Kelvin, against the
-                # Fortran reference at every step. Before the fix this was a flat
-                # 283.000 against a 255-270 K reference — errors of 13-28 K.
-                # The bound is the MEASURED post-fix residual (max ~1.9 K, on the
-                # cold-start transient at step 1-2; ~0.1 K by the end of the run),
-                # not a target that was tuned until it passed.
+                # Fortran reference at every step. Before fix B this was a flat
+                # 283.000 against a 255-270 K reference — errors of 13-28 K. With the
+                # nstep=0 alignment and the faithful LakeFluxes iteration the port
+                # tracks the float32 h0 to ~1e-5 K; 1e-3 K leaves headroom only for
+                # round-off.
                 @test all(isfinite, jt)
-                @test maximum(abs.(jt .- ft)) < 2.5
+                @test maximum(abs.(jt .- ft)) < 1.0e-3
 
                 # ...and it is a genuinely evolving field, not a new constant:
                 # the reference TSA moves ~10 K over the first day.
@@ -216,46 +218,25 @@ using Test, CLM
 
                 # The reference exercises regime 1 (very unstable) at EVERY step —
                 # zeta stays in [-100, -15.7], never above the -zetat = -0.465
-                # transition. So the branch this fix adds is the branch this
+                # transition. So the branch fix C added is the branch this
                 # reference actually runs in, and a regression to the old
                 # regime-2-only kernel changes every one of these steps.
                 @test all(z -> z < -0.465, rep.zetas)
                 @test all(==(1), rep.regimes)
 
-                # Surface fluxes: the CHARACTERISED residual, split by window
-                # because the cause differs between them (not a re-thresholded
-                # pass target).
-                #
-                # History: (D, ks fix) the port's lake used to never freeze, sitting
-                # on the unfrozen roughness branch all run (~20% flux bias). Then it
-                # froze at step 6 but late — because the cold start SEEDED savedtke1
-                # high, welding the surface to the 277 K deep water for ~5 steps.
-                #
-                # Now (two fixes): (1) cold_start.jl restores the faithful molecular
-                # TKWAT so the surface cools freely; (2) lake_fluxes.jl re-evaluates
-                # the frozen/unfrozen SURFACE BRANCH each stability iteration against
-                # the CURRENT t_grnd (LakeFluxesMod.F90:470/558), not the fixed input.
-                # A lake that starts a step at 277 K but whose skin drops below tfrz
-                # mid-iteration now switches tksur savedtke1→tkice and z0mg Charnock→
-                # z0frzlake, exactly as Fortran. Step-1 t_grnd goes 265→270.8 K
-                # (Fortran's physically-aligned nstep=0 is 270.96), rah 358→143, and
-                # the port is frozen from step 1 like the reference.
-                #
-                # From step 3 on the flux residual is a few percent (FSH ~0.03,
-                # EFLX_LH ~0.11). The residual that REMAINS at steps 1-2 is now
-                # substantially a HARNESS ALIGNMENT offset, not a physics error: the
-                # port's step 1 physically equals Fortran nstep=0 (h0 record 1), but
-                # LAKE_REC_SHIFT=1 compares it to record 2 (nstep=1). See
-                # docs/LAKE_FLUX_RESIDUAL.md. All four bounds are the MEASURED
-                # residual per window (nsteps=24).
-                jh = rep.jv["FSH"]; fh = rep.fv["FSH"]
-                rh = abs.(jh .- fh) ./ (1 .+ abs.(fh))
-                @test maximum(rh[3:end]) < 0.06      # measured max 0.033, post-freeze bulk
-                @test maximum(rh[1:2])   < 0.50      # measured max 0.460, step-1 (alignment)
-                jl = rep.jv["EFLX_LH"]; fl = rep.fv["EFLX_LH"]
-                rl = abs.(jl .- fl) ./ (1 .+ abs.(fl))
-                @test maximum(rl[3:end]) < 0.15      # measured max 0.112, post-freeze bulk
-                @test maximum(rl[1:2])   < 0.35      # measured max 0.305, step-1 (alignment)
+                # Surface fluxes, EVERY step including the first. The former
+                # "step-1 alignment" residual (FSH 0.46, EFLX_LH 0.31) was (a) the
+                # harness skipping CTSM's nstep=0 physics step and (b) four
+                # LakeFluxes port gaps (Tetens water-only qsat, htvp keyed on layer
+                # ice, the Newton never re-linearised per pass, constant
+                # betaprime=0.4) plus the missing datm humidity cap. With those fixed
+                # the measured max over 25 steps is ~2.5e-6 (FSH, EFLX_LH); the bound
+                # is float32-h0 round-off, not a tuned target.
+                for nm in ("FSH", "EFLX_LH", "TG", "FIRE")
+                    jx = rep.jv[nm]; fx = rep.fv[nm]
+                    rx = abs.(jx .- fx) ./ (1 .+ abs.(fx))
+                    @test maximum(rx) < 1.0e-4
+                end
             end
         end
     end

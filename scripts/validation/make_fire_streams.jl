@@ -55,7 +55,7 @@
 
 using NCDatasets
 
-const NDEP_REF = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const NDEP_REF = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
                  "fndep_clm_ZERO_0.9x1.25_yr2000_CLMjl-parity.nc"
 
 # --- the two synthetic constants (see header for provenance) ---

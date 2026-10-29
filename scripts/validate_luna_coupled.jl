@@ -13,7 +13,7 @@
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const SUM   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const SUM   = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const N0    = 1757845
 const NST   = 28
 const BASE  = 1753153

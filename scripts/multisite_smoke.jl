@@ -14,7 +14,7 @@
 using CLM, NCDatasets, Dates, Printf
 
 const DATA = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))")
 const ARI = joinpath(DATA, "domain_Aripuana_Amazon")
 const FS  = joinpath(ARI, "settings/CLM/parameters/surfdata_clm.nc")
 const FP  = joinpath(ARI, "settings/CLM/parameters/clm5_params.nc")
@@ -76,7 +76,7 @@ function main(; nsteps::Int = 6, use_cn::Bool = false)
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
         nextsw = calday + 3600.0 / CLM.SECSPDAY
-        CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+        i == 1 && CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)  # once: update_daylength! in clm_drv! shifts prev_dayl after step 1
         CLM.advance_timestep!(tm)
         CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
         (yr, mon, d, tod) = CLM.get_curr_date(tm)

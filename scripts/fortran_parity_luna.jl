@@ -43,7 +43,7 @@
 # ==========================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const BGC_DUMPDIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const BGC_DUMPDIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const EOD_NSTEP   = 1757856      # the only end-of-day step in the dump window (23:00->00:00)
 const WINDOW      = 1757845:1757872
 

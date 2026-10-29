@@ -46,7 +46,7 @@ include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
 const NDEP_VAL = 1.0e-8            # g(N)/m2/s, by construction of the stream
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
 const DT = 3600.0
 
@@ -61,9 +61,9 @@ const DT = 3600.0
 # disagreed while the leaching OPERATOR was exact. There was no hydrology bug.
 const WINDOWS = Dict(
     # name   => (dumpdir, first nstep, last nstep, FORTRAN model date of first nstep)
-    "autumn" => ("/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_ndep",
+    "autumn" => ("$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_ndep",
                  1760377, 1760560, DateTime(2202, 10, 29, 0)),
-    "summer" => ("/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_ndep_summer",
+    "summer" => ("$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_ndep_summer",
                  1757873, 1758060, DateTime(2202, 7, 16, 16)),
 )
 

@@ -26,102 +26,7 @@
 
 using Test
 using CLM
-const _C = CLM
-
-# ---------------------------------------------------------------------------
-# Shared helpers (build a driver-ready FATES-tagged single-column inst, run the
-# real clm_drv! loop, walk the cohort/patch census).
-# ---------------------------------------------------------------------------
-
-# Snapshot of every FATES + varpar global clm_fates_init! mutates.
-function _fates_save_globals()
-    return (
-        prt_global = _C.prt_global[], numel = _C.num_elements[],
-        ellist = copy(_C.element_list), parteh = _C.hlm_parteh_mode[],
-        use_sp = _C.hlm_use_sp[], hydro = _C.hlm_use_planthydro[],
-        agetrk = _C.hlm_use_cohort_age_tracking[], nleafage = _C.nleafage[],
-        numpft = _C.numpft[], tod = _C.hlm_current_tod[],
-        nlevsc = _C.nlevsclass[], nlevca = _C.nlevcoage[], nlevage = _C.nlevage[],
-        nlevdam = _C.nlevdamage[], nlevhgt = _C.nlevheight[],
-        sfp = _C.SFParams[], edparams = _C.EDParams[], edpft = _C.EDPftvarcon_inst[],
-        paramd = _C.ParamDerived[], restart = _C.hlm_is_restart[],
-        nocomp = _C.hlm_use_nocomp[], biogeog = _C.hlm_use_fixed_biogeog[],
-        luh = _C.hlm_use_luh[], inv = _C.hlm_use_inventory_init[],
-        damage = _C.hlm_use_tree_damage[], doy = _C.hlm_day_of_year[],
-        dpy = _C.hlm_days_per_year[], freqday = _C.hlm_freq_day[],
-        nharv = _C.hlm_num_lu_harvest_cats[], ch4 = _C.hlm_use_ch4[],
-        vert = _C.hlm_use_vertsoilc[], spit = _C.hlm_spitfire_mode[],
-        paramfp = _C.fates_maxPatchesPerSite[],
-        maxcomp = _C.max_comp_per_site[], npcomp = _C.fates_np_comp_scaling[],
-        nspec = _C.hlm_nitrogen_spec[], pspec = _C.hlm_phosphorus_spec[],
-        nlevsno = _C.varpar.nlevsno, nlevsoi = _C.varpar.nlevsoi,
-        nlevgrnd = _C.varpar.nlevgrnd, nlevmaxu = _C.varpar.nlevmaxurbgrnd)
-end
-
-function _fates_restore_globals(g)
-    _C.prt_global[] = g.prt_global
-    _C.num_elements[] = g.numel
-    empty!(_C.element_list); append!(_C.element_list, g.ellist)
-    _C.hlm_parteh_mode[] = g.parteh
-    _C.hlm_use_sp[] = g.use_sp
-    _C.hlm_use_planthydro[] = g.hydro
-    _C.hlm_use_cohort_age_tracking[] = g.agetrk
-    _C.nleafage[] = g.nleafage
-    _C.numpft[] = g.numpft
-    _C.hlm_current_tod[] = g.tod
-    _C.nlevsclass[] = g.nlevsc
-    _C.nlevcoage[] = g.nlevca
-    _C.nlevage[] = g.nlevage
-    _C.nlevdamage[] = g.nlevdam
-    _C.nlevheight[] = g.nlevhgt
-    _C.SFParams[] = g.sfp
-    _C.EDParams[] = g.edparams
-    _C.EDPftvarcon_inst[] = g.edpft
-    _C.ParamDerived[] = g.paramd
-    _C.hlm_is_restart[] = g.restart
-    _C.hlm_use_nocomp[] = g.nocomp
-    _C.hlm_use_fixed_biogeog[] = g.biogeog
-    _C.hlm_use_luh[] = g.luh
-    _C.hlm_use_inventory_init[] = g.inv
-    _C.hlm_use_tree_damage[] = g.damage
-    _C.hlm_day_of_year[] = g.doy
-    _C.hlm_days_per_year[] = g.dpy
-    _C.hlm_freq_day[] = g.freqday
-    _C.hlm_num_lu_harvest_cats[] = g.nharv
-    _C.hlm_use_ch4[] = g.ch4
-    _C.hlm_use_vertsoilc[] = g.vert
-    _C.hlm_spitfire_mode[] = g.spit
-    _C.fates_maxPatchesPerSite[] = g.paramfp
-    _C.max_comp_per_site[] = g.maxcomp
-    _C.fates_np_comp_scaling[] = g.npcomp
-    _C.hlm_nitrogen_spec[] = g.nspec
-    _C.hlm_phosphorus_spec[] = g.pspec
-    _C.varpar.nlevsno = g.nlevsno
-    _C.varpar.nlevsoi = g.nlevsoi
-    _C.varpar.nlevgrnd = g.nlevgrnd
-    _C.varpar.nlevmaxurbgrnd = g.nlevmaxu
-end
-
-# Walk the cohort/patch linked lists: census + finiteness + total patch area.
-function _fates_census(inst)
-    site = inst.fates.sites[1]
-    npatch = 0; ncoh = 0; totarea = 0.0; bad = String[]
-    cp = site.oldest_patch
-    while cp !== nothing
-        npatch += 1
-        isfinite(cp.area) || push!(bad, "patch.area")
-        totarea += cp.area
-        cc = cp.tallest
-        while cc !== nothing
-            ncoh += 1
-            (isfinite(cc.n) && cc.n >= 0.0) || push!(bad, "cohort.n")
-            (isfinite(cc.dbh) && cc.dbh > 0.0) || push!(bad, "cohort.dbh")
-            cc = cc.shorter
-        end
-        cp = cp.younger
-    end
-    return (npatch=npatch, ncoh=ncoh, totarea=totarea, bad=bad)
-end
+include("fates_live_helpers.jl")
 
 # Build a driver-ready FATES-tagged single column with the given mode kwargs and
 # run `clm_drv!` for `ndays` days. Returns the populated inst + a run report.
@@ -139,6 +44,11 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
 
     ng, nl, nc, np = 1, 1, 1, 2
     inst = _C.CLMInstances()
+    # varctl.use_fates gates the FATES-only host allocations (the WIND24/PREC24/RH24
+    # fire-weather accumulators), exactly as clm_initialize! sets it before
+    # clm_instInit!. Restored before returning.
+    use_fates_saved = _C.varctl.use_fates
+    _C.varctl.use_fates = true
     _C.clm_instInit!(inst; ng=ng, nl=nl, nc=nc, np=np,
                      nlevdecomp_full=_C.varpar.nlevdecomp_full)
 
@@ -147,6 +57,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
     col.patchi[1] = 1; col.patchf[1] = 2; col.npatches[1] = 2
     col.nbedrock[1] = _C.varpar.nlevsoi
     col.is_fates[1] = true
+    col.active[1] = true   # is_active_p (fates_set_filters) needs an active column
 
     lun = inst.landunit
     lun.itype[1] = _C.ISTSOIL; lun.urbpoi[1] = false
@@ -213,7 +124,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
     fates = _C.clm_fates_init!(inst; nsites=1, nlevsoil=nlevsoil,
                                nlevdecomp=nlevdecomp, init_kwargs...)
 
-    config = _C.CLMDriverConfig(use_fates=true, use_aquifer_layer=false,
+    config = _C.CLMDriverConfig(use_fates=true, use_fates_bgc=false, use_aquifer_layer=false,
                                 use_hydrstress=false, use_luna=false)
 
     function set_forcing!(inst, sunfrac)
@@ -226,7 +137,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
         a.forc_pbot_not_downscaled_grc[g]=pbot; a.forc_q_not_downscaled_grc[g]=q
         a.forc_rho_not_downscaled_grc[g]=rho; a.forc_lwrad_not_downscaled_grc[g]=350.0
         a.forc_rain_not_downscaled_grc[g]=0.0; a.forc_snow_not_downscaled_grc[g]=0.0
-        a.forc_u_grc[g]=4.0; a.forc_v_grc[g]=0.0
+        a.forc_u_grc[g]=4.0; a.forc_v_grc[g]=0.0; a.forc_wind_grc[g]=4.0
         a.forc_hgt_grc[g]=30.0; a.forc_hgt_u_grc[g]=30.0
         a.forc_hgt_t_grc[g]=30.0; a.forc_hgt_q_grc[g]=30.0
         a.forc_vp_grc[g]=vp; a.forc_pco2_grc[g]=367.0e-6*pbot
@@ -300,6 +211,7 @@ function _run_fates_mode(; ndays::Int = 2, init_kwargs...)
         end
     end
 
+    _C.varctl.use_fates = use_fates_saved
     return (inst=inst, no_error=no_error, balance_threw=balance_threw,
             nan_steps=nan_steps, daily_fires=daily_fires, errmsg=errmsg,
             pveg=pveg)
@@ -319,16 +231,27 @@ end
             @test !r.balance_threw
             @test isempty(r.nan_steps)
             @test r.daily_fires >= 1   # the daily demographic + fire step fired
+            # CTSM's mode enumeration (FATESFireFactoryMod): 2 = lightning from data,
+            # 3 = successful ignitions, 4 = anthropogenic ignitions.
+            @test _C.hlm_sf_scalar_lightning_def[] == 1
+            @test _C.hlm_sf_successful_ignitions_def[] == 3
+            @test _C.hlm_sf_anthro_ignitions_def[] == 4
 
             # the SPITFIRE chain RAN live (the no_fire path leaves these at 0):
             # site fire-weather index, number of ignitions, fire-danger index.
             site = r.inst.fates.sites[1]
+            # NOTE: this hand-built 1-column harness never computes a canopy
+            # temperature for the FATES HLM patch (t_veg_patch stays NaN), so the
+            # FATES tveg24 running mean stays at 0 K and the Nesterov index is
+            # correctly 0 (T < dewpoint). The old single-step RH stand-in made NI > 0
+            # here only by accident. A real-site NI/FDI/fuel/ROS check against Fortran
+            # is scripts/validation/fates_fortran_parity/fates_spitfire_parity.jl.
             @test isfinite(site.fireWeather.fire_weather_index)
-            @test site.fireWeather.fire_weather_index > 0.0
+            @test site.fireWeather.fire_weather_index >= 0.0
             @test isfinite(site.NF)
-            @test site.NF > 0.0
+            @test site.NF > 0.0     # scalar_lightning: constant ignitions
             @test isfinite(site.fdi)
-            @test site.fdi > 0.0
+            @test 0.0 <= site.fdi < 1.0
             # per-patch fuel loading is populated + finite.
             cp = site.oldest_patch; totfuel = 0.0; allfin = true
             while cp !== nothing
@@ -341,6 +264,21 @@ end
             end
             @test allfin
             @test totfuel >= 0.0
+            # fire weather reached bc_in from the host's per-patch 24-h running means
+            # (dynamics_driv: bc_in%wind24_pa(ifp) = wind24_patch(ifp + patchi(c))).
+            # The forcing is constant (u = 4 m/s, no rain), so every active mean is
+            # exactly the forcing value.
+            bc = r.inst.fates.bc_in[1]; a2l = r.inst.atm2lnd
+            pi0 = r.inst.column.patchi[1]
+            for ip in 1:site.youngest_patch.patchno
+                ip + pi0 <= length(a2l.wind24_patch) || break  # 2 HLM slots here
+                @test bc.wind24_pa[ip] == a2l.wind24_patch[ip + pi0]
+                @test bc.precip24_pa[ip] == a2l.prec24_patch[ip + pi0]
+                @test bc.relhumid24_pa[ip] == a2l.rh24_patch[ip + pi0]
+            end
+            @test bc.wind24_pa[1] ≈ 4.0
+            @test bc.precip24_pa[1] == 0.0
+            @test bc.relhumid24_pa[1] ≈ a2l.forc_rh_grc[1]
             # final carbon mass balance holds.
             @test _C.TotalBalanceCheck(site, -1) === nothing
         finally
@@ -395,6 +333,87 @@ end
                 @test isfinite(site.mass_balance[el].err_fates)
             end
             @test _C.TotalBalanceCheck(site, -1) === nothing
+        finally
+            _fates_restore_globals(g)
+        end
+    end
+
+    @testset "CNP history: nutrient fluxes + N/P size x pft pools" begin
+        g = _fates_save_globals()
+        lv_dyn, lv_hf = _C.hlm_hist_level_dynam[], _C.hlm_hist_level_hifrq[]
+        try
+            # CTSM's FATES history default is fates_history_dimlevel = 2,2, which
+            # exercises the size x pft (scpf) fills as well as the site totals.
+            r = _run_fates_mode(ndays=2, parteh_mode=_C.prt_cnp_flex_allom_hyp,
+                                nitrogen_spec=1, phosphorus_spec=0, hist_dimlevel=2)
+            @test r.no_error
+            @test r.daily_fires >= 1
+            h = r.inst.fates.hist
+            v1(sym) = h.hvars[h.ih[sym]].r81d[1]
+            v2(sym) = h.hvars[h.ih[sym]].r82d[1, :]
+
+            # update_history_nutrflux (EDMainMod.F90:707-709) now runs: with the
+            # FatesColdPRT2 prescribed uptake (=1) every cohort takes up exactly its
+            # demand, split NH4/NO3 by vmax_nh4/vmax_no3.
+            ndem = v1(:ih_ndemand_si)
+            @test isfinite(ndem) && ndem > 0.0
+            @test v1(:ih_nh4uptake_si) + v1(:ih_no3uptake_si) ≈ ndem rtol = 1e-12
+            @test v1(:ih_pdemand_si) > 0.0
+            # FATES_PUPTAKE is the P actually allocated (p_gain0 - p_gain after
+            # DailyPRT, storage draw-down included), so it can be slightly negative
+            # (Fortran's own day-11 value on fates_parity_1pt is -2.3e-9).
+            @test isfinite(v1(:ih_puptake_si))
+            @test sum(v2(:ih_ndemand_scpf)) ≈ ndem rtol = 1e-12
+            @test sum(v2(:ih_nh4uptake_scpf)) ≈ v1(:ih_nh4uptake_si) rtol = 1e-12
+            @test sum(v2(:ih_puptake_scpf)) ≈ v1(:ih_puptake_si) rtol = 1e-12
+
+            # N/P scpf pools (dyn2) roll up to the dyn1 site totals.
+            for (scpf, si) in ((:ih_leafn_scpf, :ih_leafn_si), (:ih_fnrtn_scpf, :ih_fnrtn_si),
+                               (:ih_sapwn_scpf, :ih_sapwn_si), (:ih_storen_scpf, :ih_storen_si),
+                               (:ih_repron_scpf, :ih_repron_si),
+                               (:ih_leafp_scpf, :ih_leafp_si), (:ih_storep_scpf, :ih_storep_si))
+                @test v1(si) > 0.0 || si in (:ih_repron_si,)
+                @test sum(v2(scpf)) ≈ v1(si) rtol = 1e-10 atol = 1e-20
+            end
+            @test sum(v2(:ih_totvegn_scpf)) > 0.0
+            @test sum(v2(:ih_totvegp_scpf)) > 0.0
+
+            # Storage fractions of the stoich_growth_min target: filled where cohorts
+            # exist, bounded by the overflow cap (1 + store_ovrflw_frac = 2).
+            for sym in (:ih_storentfrac_canopy_scpf, :ih_storeptfrac_canopy_scpf)
+                f = v2(sym)
+                @test any(>(0.0), f)
+                @test all(x -> 0.0 <= x <= 2.0 + 1e-8, f)
+            end
+            @test 0.0 < v1(:ih_storentfrac_si) <= 2.0 + 1e-8
+        finally
+            _C.hlm_hist_level_dynam[] = lv_dyn; _C.hlm_hist_level_hifrq[] = lv_hf
+            _fates_restore_globals(g)
+        end
+    end
+
+    @testset "CNP host config: parteh kwargs + prescribed-uptake file values" begin
+        # clm_initialize!(fates_parteh_mode) -> clm_fates_init! keywords.
+        @test _C._fates_parteh_kwargs(1, true) == NamedTuple()
+        @test _C._fates_parteh_kwargs(2, true) ==
+              (parteh_mode = _C.prt_cnp_flex_allom_hyp, nitrogen_spec = 1, phosphorus_spec = 0)
+        @test _C._fates_parteh_kwargs(2, false).nitrogen_spec == 2
+        @test_throws ErrorException _C._fates_parteh_kwargs(3, true)
+
+        # Default parameter file (prescribed uptake 0): FatesColdPRT2 values applied,
+        # prescribed modes + trivial competitor scaling (FatesInterfaceMod.F90:901-926).
+        g = _fates_save_globals()
+        try
+            r = _run_fates_mode(ndays=1, parteh_mode=_C.prt_cnp_flex_allom_hyp,
+                                nitrogen_spec=1, phosphorus_spec=0)
+            @test r.no_error
+            evc = _C.edpftvarcon_inst()
+            @test all(==(1.0), evc.prescribed_nuptake)
+            @test all(==(1.0), evc.prescribed_puptake)
+            @test _C.ed_params().n_uptake_mode == _C.prescribed_n_uptake
+            @test _C.ed_params().p_uptake_mode == _C.prescribed_p_uptake
+            @test _C.max_comp_per_site[] == 1
+            @test _C.fates_np_comp_scaling[] == _C.trivial_np_comp_scaling
         finally
             _fates_restore_globals(g)
         end

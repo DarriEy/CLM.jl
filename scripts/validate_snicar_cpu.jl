@@ -8,7 +8,7 @@
 # ==========================================================================
 using CLM, Printf
 
-const FSNOWOPTICS = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const FSNOWOPTICS = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
 
 CLM.snow_optics_init!(CLM.snicar_optics; fsnowoptics=FSNOWOPTICS)
 

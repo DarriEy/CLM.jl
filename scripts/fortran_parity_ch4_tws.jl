@@ -50,13 +50,13 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
-const DUMPDIR_CH4 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4tws"
-const INV_FILE    = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/paramdata/" *
+const DUMPDIR_CH4 = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bow_ref_ch4tws"
+const INV_FILE    = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/paramdata/" *
                     "finundated_inversiondata_0.9x1.25_c170706.nc"
 const N0    = 4720
 const NLAST = 4888
 const DATE0 = DateTime(2003, 7, 16, 16)          # forcing date aligned to model 2202-07-16 16:00
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
 
 _dv(ds, n) = haskey(ds, n) ? Array(ds[n]) : nothing
@@ -104,8 +104,8 @@ function inject_ch4_tws!(inst, bounds, dumpfile::String)
         col2d!(ch4.conc_o2_unsat_col,  "CONC_O2_UNSAT")
         col2d!(ch4.o2stress_sat_col,   "O2STRESS_SAT")
         col2d!(ch4.o2stress_unsat_col, "O2STRESS_UNSAT")
-        col2d!(ch4.o2_decomp_depth_sat_col,   "O2_DECOMP_SAT")
-        col2d!(ch4.o2_decomp_depth_unsat_col, "O2_DECOMP_UNSAT")
+        col2d!(ch4.o2_decomp_depth_sat_col,   "O2_DECOMP_DEPTH_SAT")    # restart name (bgcdump: O2_DECOMP_SAT)
+        col2d!(ch4.o2_decomp_depth_unsat_col, "O2_DECOMP_DEPTH_UNSAT")  # read by nitrif (use_lch4)
         col2d!(ch4.layer_sat_lag_col,  "LAYER_SAT_LAG")
         col1d!(ch4.qflx_surf_lag_col,       "QFLX_SURF_LAG")
         col1d!(ch4.finundated_col,          "FINUNDATED")

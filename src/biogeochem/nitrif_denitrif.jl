@@ -570,6 +570,8 @@ Base.@kwdef struct _NSU1Flux{V,M}
     ndep_to_sminn_col::V
     nfix_to_sminn_col::V
     ffix_to_sminn_col::V
+    fert_to_sminn_col::V
+    soyfixn_to_sminn_col::V
     gross_nmin_vr_col::M
     actual_immob_nh4_vr_col::M
     actual_immob_no3_vr_col::M
@@ -591,7 +593,7 @@ end
 Adapt.@adapt_structure _NSU1Prof
 
 @kernel function _nsu1_kernel!(out, flux, prof, @Const(mask_bgc_soilc),
-        lo::Int, hi::Int, nlevdecomp::Int, dt, n2o, use_fun::Bool)
+        lo::Int, hi::Int, nlevdecomp::Int, dt, n2o, use_fun::Bool, use_crop::Bool)
     c = @index(Global)
     @inbounds if lo <= c <= hi && mask_bgc_soilc[c]
         T = eltype(out.smin_nh4_vr_col)
@@ -604,6 +606,14 @@ Adapt.@adapt_structure _NSU1Prof
             _fix = use_fun ? flux.ffix_to_sminn_col[c] : flux.nfix_to_sminn_col[c]
             out.smin_nh4_vr_col[c, j] += flux.ndep_to_sminn_col[c] * dt * prof.ndep_prof_col[c, j]
             out.smin_nh4_vr_col[c, j] += _fix * dt * prof.nfixation_prof_col[c, j]
+            # "repeating N dep and fixation for crops" (F90:93-118, nitrif branch):
+            # fertilizer on the deposition profile, soybean fixation on the fixation
+            # profile, both into NH4. Missing until 2026-10-28, so n_fert! and
+            # n_soyfix! produced column fluxes that never reached the soil pools.
+            if use_crop
+                out.smin_nh4_vr_col[c, j] += flux.fert_to_sminn_col[c] * dt * prof.ndep_prof_col[c, j]
+                out.smin_nh4_vr_col[c, j] += flux.soyfixn_to_sminn_col[c] * dt * prof.nfixation_prof_col[c, j]
+            end
             # gross mineralization → NH4
             out.smin_nh4_vr_col[c, j] += flux.gross_nmin_vr_col[c, j] * dt
             # immobilization ← NH4 / NO3
@@ -637,7 +647,8 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
                                           bounds_col::UnitRange{Int},
                                           nlevdecomp::Int,
                                           dt::Real,
-                                          use_fun::Bool=false)
+                                          use_fun::Bool=false,
+                                          use_crop::Bool=false)
     isempty(bounds_col) && return nothing
     FT = eltype(ns.smin_nh4_vr_col)
     out = _NSU1Out(; smin_nh4_vr_col=ns.smin_nh4_vr_col,
@@ -646,6 +657,8 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
     flux = _NSU1Flux(; ndep_to_sminn_col=nf.ndep_to_sminn_col,
                        nfix_to_sminn_col=nf.nfix_to_sminn_col,
                        ffix_to_sminn_col=nf.ffix_to_sminn_col,
+                       fert_to_sminn_col=(use_crop ? nf.fert_to_sminn_col : nf.ndep_to_sminn_col),
+                       soyfixn_to_sminn_col=(use_crop ? nf.soyfixn_to_sminn_col : nf.ndep_to_sminn_col),
                        gross_nmin_vr_col=nf.gross_nmin_vr_col,
                        actual_immob_nh4_vr_col=nf.actual_immob_nh4_vr_col,
                        actual_immob_no3_vr_col=nf.actual_immob_no3_vr_col,
@@ -661,7 +674,7 @@ function soilbiogeochem_n_state_update1!(ns::SoilBiogeochemNitrogenStateData,
     backend = _kernel_backend(out.smin_nh4_vr_col)
     _nsu1_kernel!(backend)(out, flux, prof, mask_bgc_soilc,
         first(bounds_col), last(bounds_col), nlevdecomp,
-        FT(dt), FT(NITRIF_N2O_LOSS_FRAC), use_fun; ndrange = last(bounds_col))
+        FT(dt), FT(NITRIF_N2O_LOSS_FRAC), use_fun, use_crop; ndrange = last(bounds_col))
     KA.synchronize(backend)
     return nothing
 end

@@ -32,13 +32,13 @@
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
-const STW   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Stillwater_Oklahoma"
+const STW   = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Stillwater_Oklahoma"
 const FS    = joinpath(STW, "settings/CLM/parameters/surfdata_clm.nc")
 const FP    = joinpath(STW, "settings/CLM/parameters/clm5_params.nc")
 const FFORC = joinpath(STW, "data/forcing/CLM_input/clmforc.2002.nc")
-const DUMPS = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_stillwater_parity"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const DUMPS = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_stillwater_parity"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 const _read_fortran_restart! = getfield(CLM, Symbol("read_fortran_restart!"))
 
 function registry(inst)
@@ -127,7 +127,7 @@ function main(; nsteps::Int = 24)
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0/CLM.SECSPDAY)
         nextsw = calday + 3600.0/CLM.SECSPDAY
-        CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+        s == 1 && CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)  # once: update_daylength! in clm_drv! shifts prev_dayl after step 1
         CLM.advance_timestep!(tm)
         # Forcing at the START of this step's interval (rec s-1, clamped to rec 1).
         force_date = base + Hour(max(s - 1, 1))

@@ -174,9 +174,13 @@ function Base.getproperty(c::CLMDriverConfig, s::Symbol)
     elseif s === :no_soil_decomp
         return m isa CNMode ? m.no_soil_decomp : 0
     elseif s === :ndecomp_pools
-        return m isa CNMode ? m.ndecomp_pools : 7
+        # FATES-BGC CENTURY drops the CWD pool (FATES owns CWD):
+        # SoilBiogeochemDecompCascadeConType.F90 init_decomp_cascade_constants
+        # sets ndecomp_pools=6 / ndecomp_cascade_transitions=8 when use_fates_bgc.
+        return m isa CNMode ? m.ndecomp_pools : (m isa FATESMode && m.use_fates_bgc ? 6 : 7)
     elseif s === :ndecomp_cascade_transitions
-        return m isa CNMode ? m.ndecomp_cascade_transitions : 10
+        return m isa CNMode ? m.ndecomp_cascade_transitions :
+               (m isa FATESMode && m.use_fates_bgc ? 8 : 10)
     elseif s === :i_litr_min
         return m isa CNMode ? m.i_litr_min : 1
     elseif s === :i_litr_max
@@ -196,7 +200,10 @@ end
 
 # Backward-compatible keyword constructor: CLMDriverConfig(use_cn=true, ...)
 function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
-                          use_fates_sp::Bool=false, use_fates_bgc::Bool=false,
+                          use_fates_sp::Bool=false,
+                          # CTSM controlMod.F90:474-479: use_fates_bgc = .not. use_fates_sp
+                          # whenever use_fates. `nothing` resolves to that default.
+                          use_fates_bgc::Union{Bool,Nothing}=nothing,
                           use_lch4::Bool=false, use_c13::Bool=false, use_c14::Bool=false,
                           use_crop::Bool=false, use_cropcal_streams::Bool=false,
                           use_matrixcn::Bool=false, use_cndv::Bool=false,
@@ -247,7 +254,8 @@ function CLMDriverConfig(; use_cn::Bool=false, use_fates::Bool=false,
         i_cwd = 8
     end
     if use_fates
-        mode = FATESMode(; use_fates_sp, use_fates_bgc,
+        _use_fates_bgc = use_fates_bgc === nothing ? !use_fates_sp : use_fates_bgc
+        mode = FATESMode(; use_fates_sp, use_fates_bgc = _use_fates_bgc,
                           fates_spitfire_mode, fates_seeddisp_cadence)
     elseif use_cn
         mode = CNMode(; use_lch4, use_c13, use_c14, use_crop,
@@ -664,6 +672,20 @@ function clm_drv!(config::CLMDriverConfig,
     # config.use_fates is a compile-time property of CLMDriverConfig{Mode}, so the branch
     # folds away and the differentiable !use_fates entry never sees the wrapper.
     if config.use_fates
+        # FATES soil BGC needs the decomposition cascade that clm_initialize!(use_fates=
+        # true) builds; a hand-assembled instance without it must say use_fates_bgc=false.
+        config.use_fates_bgc && !_decomp_initialized(inst.decomp_cascade) &&
+            error("clm_drv!: use_fates_bgc (the CTSM default for non-SP FATES) needs the " *
+                  "soil decomposition cascade, which this instance does not have. Build it " *
+                  "with clm_initialize!(use_fates=true), or pass " *
+                  "CLMDriverConfig(use_fates=true, use_fates_bgc=false).")
+        # The FATES SP control flag (set at clm_fates_init!) and the driver's SP branch
+        # (host satellite phenology) must agree, or FATES would read a stale LAI.
+        inst.fates !== nothing && hlm_use_sp[] != _ctrl_unset_int &&
+            (hlm_use_sp[] == itrue) != config.use_fates_sp &&
+            error("clm_drv!: CLMDriverConfig(use_fates_sp=$(config.use_fates_sp)) does " *
+                  "not match the FATES instance (clm_initialize!(use_fates_sp=" *
+                  "$(hlm_use_sp[] == itrue)))")
         return GPUArraysCore.@allowscalar clm_drv_core!(config, inst, filt,
             filt_inactive_and_active, bounds_proc, doalb, nextsw_cday, declinp1, declin,
             obliqr, rstwr, nlend, rdate, rof_prognostic, nstep, is_first_step,
@@ -1161,6 +1183,14 @@ function clm_drv_core!(config::CLMDriverConfig,
                                 bounds_grc = bc_grc)
         end
     end
+    if config.use_fates && fates_fire_data_active(inst.fates_fire_data)
+        # clm_fates%InterpFileInputs -> fates_fire_data_method%FireInterp
+        # (clm_driver.F90:464, only when fates_spitfire_mode > scalar_lightning).
+        fates_fire_interp!(inst.fates_fire_data, grc;
+                           calday     = jday + secs / SECSPDAY,
+                           dayspyr    = 365.0,
+                           bounds_grc = bc_grc)
+    end
     # Placeholder: urbantv_interp!(bounds_proc) [urban TV]
 
     if doalb && config.use_lai_streams
@@ -1314,12 +1344,19 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # BIOGEOPHYSICS PRE-FLUX CALCULATIONS — WIRED
     # ========================================================================
+    # FATES: TransferZ0mDisp, and SetZ0mDisp skips the FATES patches
+    # (BiogeophysPreFluxCalcsMod.F90:162-173).
+    fates_pif = nothing
+    if config.use_fates && inst.fates !== nothing
+        fates_transfer_z0m_disp!(inst)
+        fates_pif = fates_patch_is_fates(inst)
+    end
     biogeophys_pre_flux_calcs!(cs, ef, fv, temp, ss, wsb, wdb, wfb,
                                 col, lun, pch,
                                 a2l.forc_t_downscaled_col, a2l.forc_th_downscaled_col, forc_q_col,
                                 a2l.forc_hgt_u_grc, a2l.forc_hgt_t_grc, a2l.forc_hgt_q_grc,
                                 filt.nolakec, filt.nolakep, filt.urbanc,
-                                bc_col, bc_patch)
+                                bc_col, bc_patch; patch_is_fates=fates_pif)
 
     # Soil evaporation resistance (soilbeta or soilresis)
     calc_soilevap_resis!(col, lun, ss, wsb, wdb, temp,
@@ -1477,6 +1514,10 @@ function clm_drv_core!(config::CLMDriverConfig,
     if config.use_fates && inst.fates !== nothing
         for s in 1:inst.fates.nsites
             fill!(inst.fates.bc_in[s].filter_photo_pa, 1)
+            # prep_canopyfluxes (clmfates_interfaceMod.F90:2349-2351): zero the
+            # hydraulics transpiration BC; the exposed-veg filter may not call every
+            # patch, and only those patches are re-packed after the solve.
+            hlm_use_planthydro[] == itrue && fill!(inst.fates.bc_in[s].qflx_transp_pa, 0.0)
         end
     end
 
@@ -1650,12 +1691,9 @@ function clm_drv_core!(config::CLMDriverConfig,
         # flushes → carbon starvation → a phantom boom/bust die-back on multi-year runs.
         UpdateFatesRMeansTStep(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
 
-        # Per-timestep ("hifrq") FATES history fill — site GPP/AR/NEP/resp +
-        # stomatal/bl conductance + veg-temp + radiation-error diagnostics from
-        # the just-computed cohort per-step fluxes. Write-only; no-op until the
-        # history interface is built (clm_fates_init!). Mirrors the Fortran host's
-        # update_history_hifrq in the timestep path.
-        fates_hifrq_history_step!(inst; dt_tstep=dtime)
+        # (The per-timestep "hifrq" FATES history fill runs in the FATES dynamics
+        # block below, after EcosystemDynamicsPostDrainage, where the Fortran calls
+        # wrap_update_hifrq_hist — it needs this step's soil HR.)
 
         # W4c plant-hydraulics — FATES.  When plant hydraulics is enabled
         # (hlm_use_planthydro==itrue), run hydraulics_drive AFTER the photosynthesis
@@ -1666,7 +1704,8 @@ function clm_drv_core!(config::CLMDriverConfig,
         # bc_out.qflx_soil2root_sisl / plant_stored_h2o_si. Default path
         # (planthydro OFF) is byte-identical — the helper returns immediately.
         if hlm_use_planthydro[] == itrue
-            fates_hydraulics_step!(inst; nlevsoil=varpar.nlevsoi, dtime=dtime)
+            fates_hydraulics_step!(inst; nlevsoil=varpar.nlevsoi, dtime=dtime,
+                                   exposedvegp=filt.exposedvegp)
         end
     end
 
@@ -2019,6 +2058,12 @@ function clm_drv_core!(config::CLMDriverConfig,
         ss, cs, wfb, ef,
         col, lun, pch;
         use_hydrstress=config.use_hydrstress)
+    # FATES plant hydraulics: the soil sink is what the plant hydraulics took up,
+    # not the root-fraction x transpiration profile (HydrologyNoDrainageMod.F90:342-344,
+    # ComputeRootSoilFlux). Overwrites qflx_rootsoi_col on the FATES columns only.
+    if config.use_fates && inst.fates !== nothing && hlm_use_planthydro[] == itrue
+        fates_compute_root_soil_flux!(inst; nlevsoil=nlevsoi)
+    end
 
     # --- 12. Soil water movement (Richards equation) ---
     # Configure solver to match Fortran namelist:
@@ -2236,14 +2281,39 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Lake hydrology
     # ========================================================================
-    # LakeHydrology — WIRED
+    # LakeHydrology's new-snow step (LakeHydrologyMod.F90:242-262): copy precip onto
+    # the lake surface, then UpdateQuantitiesForNewSnow + InitializeExplicitSnowPack
+    # over the LAKE filter. handle_new_snow! is that same pair (its thawed-wetland
+    # step is inert on lake columns) and above runs only over nolakec, so until
+    # this call snowfall on a lake was never added: H2OSNO stayed 0 while CTSM
+    # accumulated whatever snowfall exceeded the lake-surface sublimation.
+    if any(filt.lakec)
+        sum_flux_fluxes_onto_ground!(forc_snow_col, forc_rain_col,
+                                     wfb.wf.qflx_snow_grnd_col, wfb.wf.qflx_liq_grnd_col,
+                                     filt.lakec, bc_col)
+        handle_new_snow!(temp, wsb, wdb, col, lun,
+                         filt.lakec, bc_col, dtime, varpar.nlevsno;
+                         forc_t=a2l.forc_t_downscaled_col,
+                         forc_wind=a2l.forc_wind_grc,
+                         qflx_snow_grnd=wfb.wf.qflx_snow_grnd_col,
+                         qflx_snow_drain=wfb.wf.qflx_snow_drain_col,
+                         int_snow=wsb.int_snow_col,
+                         scf_method=inst.scf_method)
+    end
+
+    # LakeHydrology — WIRED. The lake snowpack routines (SnowWater, SnowCapping,
+    # SnowCompaction, Combine/Divide/ZeroEmpty) run inside it, over its lake snow
+    # filters, through this callback (LakeHydrologyMod.F90:404-436).
+    _lake_snow! = (mlsnow, mlnosnow) -> _lake_snow_layer_physics!(inst, mlsnow, mlnosnow,
+                                                                filt.lakec, bc_col, dtime, nstep)
     lake_hydrology!(temp, ef, ls, ss, wsb, wdb,
                     inst.water.waterbalancebulk_inst, wfb,
                     col, pch,
                     filt.lakec, filt.lakep,
                     forc_rain_col, forc_snow_col, qflx_floodg,
                     bc_col, bc_patch, dtime,
-                    varpar.nlevsno, varpar.nlevsoi, varpar.nlevgrnd)
+                    varpar.nlevsno, varpar.nlevsoi, varpar.nlevgrnd;
+                    snow_layer_physics! = _lake_snow!)
 
     # AerosolMasses (lake) — WIRED
     aerosol_masses!(aer,
@@ -2314,6 +2384,7 @@ function clm_drv_core!(config::CLMDriverConfig,
             woody=pftcon.woody,
             harvdate=inst.crop.harvdate_patch,
             col_is_fates=col.is_fates,
+            fates_inst=(config.use_fates_bgc ? inst.fates : nothing),
             cascade_donor_pool=inst.decomp_cascade.cascade_donor_pool,
             cascade_receiver_pool=inst.decomp_cascade.cascade_receiver_pool,
             dt=dtime,
@@ -2387,6 +2458,9 @@ function clm_drv_core!(config::CLMDriverConfig,
             dayspyr=get_average_days_per_year(),
             h2osoi_vol=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_vol_col : nothing),
             h2osoi_liq=(_decomp_initialized(inst.decomp_cascade) ? wsb.ws.h2osoi_liq_col[:, (varpar.nlevsno+1):end] : nothing),
+            # use_lch4 coupling (CTSM anoxia == use_lch4): o_scalar from the previous
+            # step's o2stress_unsat, nitrif anaerobic_frac, fphr. nothing => non-CH4 path.
+            ch4=((config.use_lch4 && !isempty(inst.ch4.o2stress_unsat_col)) ? inst.ch4 : nothing),
             # ---- CN fire (Li family) bundle ----
             # Supplied ONLY when config.cnfire_method !== :nofire; otherwise every
             # entry is `nothing`/empty and cn_driver's `_fire_active` gate is false,
@@ -2445,7 +2519,13 @@ function clm_drv_core!(config::CLMDriverConfig,
                              pch, filt.nolakep, bc_patch)
     end
     if config.use_fates_sp && doalb
-        # Placeholder: SatellitePhenology!(bc, ...) [FATES-SP satellite phenology]
+        # FATES-SP (clm_driver.F90:1052): SatellitePhenology over ALL soil patches,
+        # active and inactive — FATES reads HLM PFT ft's LAI from patch patchi+ft
+        # whatever that patch's current weight. use_fates_sp leaves elai/esai/
+        # frac_veg_nosno_alb to FATES.
+        satellite_phenology!(inst.satellite_phenology, cs, wdb,
+                             pch, filt_inactive_and_active.soilp, bc_patch;
+                             use_fates_sp=true)
     end
 
     # Dry deposition velocity — WIRED (only if n_drydep > 0)
@@ -2589,7 +2669,10 @@ function clm_drv_core!(config::CLMDriverConfig,
         # diagnostics (no downstream physics reads them), so this is an output-correctness
         # fix. totvegc_col/totvegn_col (for the ecosystem totals) are aggregated from the
         # veg patch totals via p2c_1d! (unity scale).
-        if config.use_cn && _decomp_initialized(inst.decomp_cascade)
+        # FATES-BGC runs the same end-of-step soil summary (CNDriverSummarizeStates ->
+        # soilbiogeochem_carbonstate_inst%Summary); FATES columns carry no CN veg
+        # carbon (`if (col%is_fates(c)) totvegc_col = 0`), so the veg aggregates stay 0.
+        if (config.use_cn || config.use_fates_bgc) && _decomp_initialized(inst.decomp_cascade)
             _scs = inst.soilbiogeochem_carbonstate
             _sns = inst.soilbiogeochem_nitrogenstate
             _dc  = inst.decomp_cascade
@@ -2616,13 +2699,15 @@ function clm_drv_core!(config::CLMDriverConfig,
             # were themselves dead. Same story verbatim on the N side (totn_p2c_col).
             _tvc  = zeros(bc.endc); _tvn  = zeros(bc.endc)
             _tp2c = zeros(bc.endc); _tn2c = zeros(bc.endc)
-            p2c_1d!(_tvc,  _ccs.totvegc_patch, bc, "unity", pch)
-            p2c_1d!(_tvn,  _cns.totvegn_patch, bc, "unity", pch)
-            p2c_1d!(_tp2c, _ccs.totc_patch,    bc, "unity", pch)
-            p2c_1d!(_tn2c, _cns.totn_patch,    bc, "unity", pch)
-            # Keep the canonical fields in sync (they are history/restart outputs).
-            if !isempty(_ccs.totc_p2c_col); copyto!(_ccs.totc_p2c_col, _tp2c); end
-            if !isempty(_cns.totn_p2c_col); copyto!(_cns.totn_p2c_col, _tn2c); end
+            if config.use_cn
+                p2c_1d!(_tvc,  _ccs.totvegc_patch, bc, "unity", pch)
+                p2c_1d!(_tvn,  _cns.totvegn_patch, bc, "unity", pch)
+                p2c_1d!(_tp2c, _ccs.totc_patch,    bc, "unity", pch)
+                p2c_1d!(_tn2c, _cns.totn_patch,    bc, "unity", pch)
+                # Keep the canonical fields in sync (they are history/restart outputs).
+                if !isempty(_ccs.totc_p2c_col); copyto!(_ccs.totc_p2c_col, _tp2c); end
+                if !isempty(_cns.totn_p2c_col); copyto!(_cns.totn_p2c_col, _tn2c); end
+            end
             soil_bgc_carbon_state_summary!(_scs, filt.allc, bc_col;
                 nlevdecomp=varpar.nlevdecomp, ndecomp_pools=config.ndecomp_pools,
                 dzsoi_decomp_vals=dzsoi_decomp[], zisoi_vals=zisoi[],
@@ -2657,8 +2742,17 @@ function clm_drv_core!(config::CLMDriverConfig,
     # FATES dynamics
     # ========================================================================
     if config.use_fates
-        # Placeholder: clm_fates%WrapUpdateFatesRmean(...) [FATES running mean]
-        # Placeholder: clm_fates%wrap_update_hifrq_hist(...) [FATES history]
+        # clm_fates%wrap_update_hifrq_hist (clm_driver.F90:1132): hand this step's soil
+        # HR / SOMC / LITC to FATES (bc_in.tot_het_resp/tot_somc/tot_litc; zero without
+        # soil decomposition) and fill the per-timestep FATES history — site GPP/AR/NEP/
+        # HR + conductance + veg-temp + radiation-error diagnostics. Write-only; no-op
+        # until the history interface is built (clm_fates_init!). (The FATES running
+        # means, which Fortran updates just before this, are rolled in the canopy-flux
+        # block above.)
+        if inst.fates !== nothing
+            fates_wrap_update_hifrq_hist!(inst; dtime=dtime,
+                decomp_active=config.use_fates_bgc && config.decomp_method != config.no_soil_decomp)
+        end
 
         # FATES parity instrumentation — "fast" (sub-daily) phase. Fires on EVERY
         # timestep at exactly the point the Fortran clm_driver does (after the
@@ -2672,41 +2766,10 @@ function clm_drv_core!(config::CLMDriverConfig,
         end
 
         if is_beg_curr_day && inst.fates !== nothing
-            # SPITFIRE fire-weather (gated): when SPITFIRE is on, derive the per-day
-            # representative precip / relative-humidity / wind from the FATES column's
-            # current downscaled atmospheric forcing and pass them to the daily step
-            # (the bc daily pack fills the per-patch fire-weather bc_in the fire model
-            # reads). A single-step stand-in for the true 24-hour running means (the
-            # bc-pack docstring notes the running-mean nuance); finite + representative.
-            # OFF (no_fire) => fire_weather=nothing and the fields stay zero (the fire
-            # chain never runs), so the default path is byte-identical.
-            fire_weather = nothing
-            if hlm_spitfire_mode[] > hlm_sf_nofire_def[]
-                fc = _fates_first_fates_column(col)
-                if fc != 0
-                    g = col.gridcell[fc]
-                    a2l = inst.atm2lnd
-                    rain = a2l.forc_rain_downscaled_col[fc]
-                    snow = a2l.forc_snow_downscaled_col[fc]
-                    # Relative humidity [%] from specific humidity / saturation at
-                    # forcing temperature & pressure (Tetens; clamped to [1,100]).
-                    qair = a2l.forc_q_downscaled_col[fc]
-                    tair = a2l.forc_t_downscaled_col[fc]
-                    pbot = a2l.forc_pbot_downscaled_col[fc]
-                    esat_fw = 610.78 * exp(17.27 * (tair - 273.15) / (tair - 35.86))  # [Pa]
-                    qsat_fw = 0.622 * esat_fw / max(pbot - 0.378 * esat_fw, 1.0)
-                    rh = clamp(100.0 * qair / max(qsat_fw, 1.0e-9), 1.0, 100.0)
-                    # Wind speed from the east/north components (forc_wind_grc may be
-                    # an unset forcing slot; u/v are always packed by the harness/driver).
-                    wind = sqrt(a2l.forc_u_grc[g]^2 + a2l.forc_v_grc[g]^2)
-                    fire_weather = (precip24 = rain + snow, relhumid24 = rh,
-                                    wind24 = wind)
-                end
-            end
-
             # W5 daily demographic step — FATES `dynamics_driv`. Runs once per FATES
-            # site at the day boundary: pack the daily soil/decomp bc_in (+ fire
-            # weather when SPITFIRE is on), advance the cohort/patch population
+            # site at the day boundary: pack the daily soil/decomp bc_in (+ the
+            # SPITFIRE fire weather: the per-patch WIND24/PREC24/RH24 running means
+            # accumulated in atm2lnd_update_acc_vars!), advance the cohort/patch population
             # (ed_ecosystem_dynamics — includes the fire model, CNP nutrient
             # acquisition, and tree-damage when those modes are enabled), recompute
             # site diagnostics + canopy structure (ed_update_site), run the final
@@ -2716,12 +2779,11 @@ function clm_drv_core!(config::CLMDriverConfig,
             # canopy structure, and rebuilds the HLM per-patch weights
             # (fates_set_filters!, the setFilters-equivalent) from the freshly-advanced
             # FATES patch areas — so a disturbance that splits/merges patches
-            # propagates into the per-column averaging. Fire weather is packed when
-            # SPITFIRE is on.
+            # propagates into the per-column averaging.
             fates_daily_dynamics_step!(inst; nlevsoil=varpar.nlevsoi,
                                        nlevdecomp=varpar.nlevdecomp,
                                        use_fates_bgc=config.use_fates_bgc,
-                                       fire_weather=fire_weather)
+                                       date=(year, mon, day, secs))
         end
     end
 
@@ -2816,11 +2878,22 @@ function clm_drv_core!(config::CLMDriverConfig,
              Matrix(cnf_ch4.fphr_col[:, _dl]), Matrix(nnf_ch4.pot_f_nit_vr_col[:, _dl]),
              _ch4_lakeicefr, col.lakedepth,
              Matrix(col.z[:, _sl]), Matrix(col.dz[:, _sl]),
-             Matrix(col.zi[:, (nlevsno + 1):(nlevsno + nlevsoi + 1)]),
+             # zi(1:nlevsoi): every methane kernel reads zi[c, k] as Fortran zi(c,k),
+             # the BOTTOM interface of layer k (zwt_ch4_unsat = zi(c,jwt), the
+             # ebullition hydrostatic head z(j)-zi(jwt), ch4_prod's
+             # zi(c,nlev_soildecomp_standard)), and treat jwt == 0 as the surface.
+             # The old slice started at zi(0), shifting every read up one interface:
+             # zwt_ch4_unsat came out one layer too shallow (1.1 m at Bow).
+             Matrix(col.zi[:, (nlevsno + 2):(nlevsno + nlevsoi + 1)]),
              nlevsoi, nlevsno, varpar.nlevdecomp, varpar.nlevdecomp_full,
              5, 0.01, 130.0,
              bc.endg, noveg, dtime,
-             config.use_cn, false, false,
+             # use_nitrif_denitrif adds the nitrification O2 demand (pot_f_nit_vr*2/14)
+             # to o2_decomp_depth; anoxia (== use_lch4 in CTSM controlMod.F90, so
+             # always true here) skips the seasonal-inundation `sif` scaling and
+             # divides o2_decomp_depth by o_scalar (ch4Mod.F90 ch4_prod). These were
+             # hardcoded false, contradicting the Fortran the reference runs.
+             config.use_cn, inst.bgc_vegetation.driver_config.use_nitrif_denitrif, true,
              cveg_cf.agnpp_patch, cveg_cf.bgnpp_patch, 365.0 * SECSPDAY;
              finundated_stream = (inst.ch4_varcon.finundation_mtd == FINUNDATION_MTD_H2OSFC ?
                                   nothing : inst.ch4_finundated_stream),
@@ -3047,7 +3120,11 @@ function clm_drv_core!(config::CLMDriverConfig,
                    # — fsa/fsr unset on FATES patches, ~142 W/m2 solar residual. The
                    # errors are still computed and warned; only the abort is held
                    # back. See the TODO at the top of balance_check!.
-                   use_fates=config.use_fates)
+                   use_fates=config.use_fates,
+                   # CTSM bypasses the GRIDCELL water check under FATES plant
+                   # hydraulics (BalanceCheckMod.F90:754-756, ESCOMP/CTSM#1314);
+                   # the column check, which carries the plant water storage, runs.
+                   use_fates_planthydro=(config.use_fates && hlm_use_planthydro[] == itrue))
 
     # ========================================================================
     # Diagnostics
@@ -3073,7 +3150,14 @@ function clm_drv_core!(config::CLMDriverConfig,
         # `wateratm2lndbulk_type` accumulators (PREC10/30/60/365/24, RH30/24),
         # which live on Atm2LndData in this port.
         atm2lnd_update_acc_vars!(a2l, bc_patch, pch.gridcell, pch.column;
-            bounds_c = bc_col, nstep = nstep, dtime = Int(dtime))
+            bounds_c = bc_col, nstep = nstep, dtime = Int(dtime),
+            patch_active = pch.active)
+        # clm_fates%UpdateAccVars -> fates_fire_data_method%UpdateAccVars: lnfm24
+        # (clm_driver.F90:1400; last in the accumulator order, harmless here since
+        # nothing between reads it).
+        if config.use_fates && fates_fire_data_active(inst.fates_fire_data)
+            fates_fire_update_acc_vars!(inst.fates_fire_data, bc_grc; dtime = Int(dtime))
+        end
 
         # Temperature accumulators — WIRED. The crop growing-degree-day path
         # (GDD0/8/10 runaccum + GDD020/820/1020 20-yr runmeans) activates only
@@ -3258,3 +3342,133 @@ function clm_drv_core!(config::CLMDriverConfig,
 
     return nothing
 end
+
+# --------------------------------------------------------------------------
+# Lake-column snowpack physics, called from inside lake_hydrology! over its
+# shallow-lake snow / no-snow filters (LakeHydrologyMod.F90:404-436): SnowWater,
+# SnowCapping, SnowCompaction, CombineSnowLayers, DivideSnowLayers(is_lake=.true.),
+# ZeroEmptySnowLayers. Same routines, same order and arguments as the non-lake
+# HydrologyNoDrainage sequence in clm_drv_core!, on the lake masks.
+# --------------------------------------------------------------------------
+function _lake_snow_layer_physics!(inst, mask_snow, mask_nosnow, mask_lake, bc_col, dtime, nstep)
+    any(Array(mask_snow)) || any(Array(mask_nosnow)) || return nothing
+    col = inst.column; lun = inst.landunit; temp = inst.temperature
+    wsb = inst.water.waterstatebulk_inst; wdb = inst.water.waterdiagnosticbulk_inst
+    wfb = inst.water.waterfluxbulk_inst; aer = inst.aerosol; a2l = inst.atm2lnd
+    nlevsno = varpar.nlevsno
+    nc = length(col.snl)
+    _zl(n) = fill!(similar(temp.t_grnd_col, n), zero(eltype(temp.t_grnd_col)))
+    _bl(n) = fill!(similar(mask_lake, Bool, n), false)
+
+    # ---- SnowWater ----
+    update_state_top_layer_fluxes!(
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        dtime, col.snl, wdb.frac_sno_eff_col,
+        wfb.wf.qflx_soliddew_to_top_layer_col,
+        wfb.wf.qflx_solidevap_from_top_layer_col,
+        wfb.wf.qflx_liq_grnd_col,
+        wfb.wf.qflx_liqdew_to_top_layer_col,
+        wfb.wf.qflx_liqevap_from_top_layer_col,
+        mask_snow, bc_col, nlevsno)
+    bulk_flux_snow_percolation!(
+        wfb.wf.qflx_snow_percolation_col,
+        dtime, col.snl, col.dz, wdb.frac_sno_eff_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        mask_snow, bc_col, nlevsno)
+    update_state_snow_percolation!(
+        wsb.ws.h2osoi_liq_col, dtime, col.snl,
+        wfb.wf.qflx_snow_percolation_col, mask_snow, bc_col, nlevsno)
+    calc_and_apply_aerosol_fluxes!(
+        aer, dtime, col.snl,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wfb.wf.qflx_snow_percolation_col, mask_snow, bc_col, nlevsno)
+    post_percolation_adjust_layer_thicknesses!(
+        col.dz, col.snl, wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        mask_snow, bc_col, nlevsno)
+    bulkdiag_snow_water_accumulated_snow!(
+        wsb.int_snow_col, wdb.frac_sno_col, wdb.snow_depth_col, dtime,
+        wdb.frac_sno_eff_col,
+        wfb.wf.qflx_soliddew_to_top_layer_col, wfb.wf.qflx_liqdew_to_top_layer_col,
+        wfb.wf.qflx_liq_grnd_col, wsb.ws.h2osno_no_layers_col,
+        mask_snow, mask_nosnow, bc_col)
+    qflx_snow_perc_bottom = _zl(nc)
+    @views qflx_snow_perc_bottom[bc_col] .=
+        mask_snow[bc_col] .* wfb.wf.qflx_snow_percolation_col[bc_col, nlevsno]
+    sum_flux_add_snow_percolation!(
+        wfb.wf.qflx_snow_drain_col, wfb.wf.qflx_rain_plus_snomelt_col,
+        wdb.frac_sno_eff_col, qflx_snow_perc_bottom,
+        wfb.wf.qflx_liq_grnd_col, wfb.wf.qflx_snomelt_col,
+        mask_snow, mask_nosnow, bc_col)
+
+    # ---- SnowCapping (init over the lake filter, capping over lake snow) ----
+    h2osno_total = _zl(nc)
+    waterstate_calculate_total_h2osno!(wsb.ws, mask_snow, bc_col, col.snl, h2osno_total)
+    init_flux_snow_capping!(
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        mask_lake, bc_col)
+    jj_bottom = nlevsno
+    dz_bottom_vec = col.dz[:, jj_bottom]
+    ice_bottom_vec = wsb.ws.h2osoi_ice_col[:, jj_bottom]
+    liq_bottom_vec = wsb.ws.h2osoi_liq_col[:, jj_bottom]
+    mask_capping = _bl(nc)
+    rho_orig_bottom = _zl(nc)
+    frac_adjust = _zl(nc)
+    bulk_flux_snow_capping_fluxes!(
+        mask_capping, rho_orig_bottom, frac_adjust,
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        dtime, dz_bottom_vec, inst.topo.topo_col, h2osno_total,
+        ice_bottom_vec, liq_bottom_vec,
+        col.landunit, lun.itype,
+        mask_snow, bc_col, nlevsno, nstep)
+    update_state_remove_snow_capping_fluxes!(
+        ice_bottom_vec, liq_bottom_vec, dtime,
+        wfb.wf.qflx_snwcp_ice_col, wfb.wf.qflx_snwcp_liq_col,
+        wfb.wf.qflx_snwcp_discarded_ice_col, wfb.wf.qflx_snwcp_discarded_liq_col,
+        mask_capping, bc_col)
+    @views wsb.ws.h2osoi_ice_col[bc_col, jj_bottom] .= ice_bottom_vec[bc_col]
+    @views wsb.ws.h2osoi_liq_col[bc_col, jj_bottom] .= liq_bottom_vec[bc_col]
+    snow_capping_update_dz_and_aerosols!(
+        dz_bottom_vec, aer, jj_bottom, rho_orig_bottom, ice_bottom_vec, frac_adjust,
+        mask_capping, bc_col)
+    @views col.dz[bc_col, jj_bottom] .= dz_bottom_vec[bc_col]
+
+    # ---- SnowCompaction ----
+    _scf = inst.scf_method
+    _n_melt = hasproperty(_scf, :n_melt) && length(_scf.n_melt) == nc ?
+        _scf.n_melt : fill(20.0, nc)
+    _int_snow_max = hasproperty(_scf, :int_snow_max) ? _scf.int_snow_max : 2000.0
+    snow_compaction!(
+        col.dz, dtime, col.snl, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col, temp.imelt_col,
+        wdb.frac_sno_col, wdb.frac_h2osfc_col,
+        wdb.swe_old_col, wsb.int_snow_col, wdb.frac_iceold_col,
+        a2l.forc_wind_grc, col.gridcell, col.landunit,
+        lun.lakpoi, lun.urbpoi,
+        mask_snow, bc_col, nlevsno;
+        use_subgrid_fluxes = varctl.use_subgrid_fluxes,
+        n_melt = _n_melt, int_snow_max = _int_snow_max)
+
+    # ---- Combine / Divide (is_lake) / ZeroEmpty ----
+    combine_snow_layers!(
+        col.snl, col.dz, col.zi, col.z, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col, wsb.ws.h2osno_no_layers_col,
+        wdb.snow_depth_col, wdb.frac_sno_col, wdb.frac_sno_eff_col,
+        wsb.int_snow_col, wdb.snw_rds_col,
+        aer, lun.itype, lun.urbpoi, col.landunit,
+        mask_snow, bc_col, nlevsno,
+        wfb.wf.qflx_sl_top_soil_col, dtime)
+    divide_snow_layers!(
+        col.snl, col.dz, col.zi, col.z, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        wdb.frac_sno_col, wdb.snw_rds_col,
+        aer, true,   # is_lake=.true.
+        mask_snow, bc_col, nlevsno)
+    zero_empty_snow_layers!(
+        col.snl, col.dz, col.z, col.zi, temp.t_soisno_col,
+        wsb.ws.h2osoi_ice_col, wsb.ws.h2osoi_liq_col,
+        mask_snow, bc_col, nlevsno)
+    return nothing
+end
+

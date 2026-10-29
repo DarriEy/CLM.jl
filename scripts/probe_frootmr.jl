@@ -1,7 +1,7 @@
 # Probe: decompose grass vs tree froot_mr inputs (frootn, crootfr profile, tcsoi)
 # against the Fortran dump. froot_mr = frootn*br_root_acc*sum_j(tcsoi[j]*crootfr[j]).
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const DD = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DD = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const NSTEP = 1757852
 
 inst, bounds = run_one_parity_step!(NSTEP; use_cn=true, dumpdir=DD,

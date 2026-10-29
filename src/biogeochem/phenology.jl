@@ -548,6 +548,7 @@ end
         @Const(offset_flag), @Const(offset_counter),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
+        @Const(cpool_to_frootc),
         dt, CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
@@ -556,18 +557,21 @@ end
             ivt = itype[p] + 1
             if abs(offset_counter[p] - dt) <= dt / T(2)
                 t1 = one(T) / dt
-                frootc_to_litter[p] = t1 * frootc[p]
-                # FINAL offset step. Fortran (CNPhenologyMod::CNOffsetLitterfall)
-                # sets frootc_to_litter for every PFT, but sets leafc_to_litter here
-                # ONLY inside `if (ivt(p) >= npcropmin)` -- i.e. for PROGNOSTIC CROPS.
-                # For a natural (non-crop) seasonal/stress-deciduous PFT it leaves
-                # leafc_to_litter at 0 (SetValues zeroed it), so the leaf pool keeps a
-                # small residual into dormancy rather than being dumped in one step.
-                # Setting it unconditionally shed that residual a step early (at Bow:
-                # 0.19 gC/m2, ~0.5% of peak leafc, once per year).
-                if mask_pcrop[p]
-                    leafc_to_litter[p] = t1 * leafc[p]
-                end
+                # FINAL offset step (CNPhenologyMod.F90:3502): the whole fine-root
+                # pool INCLUDING this step's allocation to it goes to litter, for every
+                # PFT -- CStateUpdate1 adds cpool_to_frootc*dt to frootc in the same
+                # step, so without the cpool term a residual is left behind.
+                frootc_to_litter[p] = t1 * frootc[p] + cpool_to_frootc[p]
+                # Fortran sets leafc_to_litter on this step ONLY inside
+                # `if (ivt(p) >= npcropmin)` -- i.e. for PROGNOSTIC CROPS -- and there
+                # it is t1*leafc_remaining + cpool_to_leafc after the biofuel and
+                # residue-removal cuts. That crop harvest branch is computed by
+                # _phen_crop_harvest_offset_kernel!, which runs BEFORE this kernel and
+                # has already written leafc_to_litter for crop patches. For a natural
+                # (non-crop) seasonal/stress-deciduous PFT leafc_to_litter stays at 0
+                # (SetValues zeroed it), so the leaf pool keeps a small residual into
+                # dormancy rather than being dumped in one step (at Bow: 0.19 gC/m2,
+                # ~0.5% of peak leafc, once per year).
             else
                 t1 = dt * T(2) / (offset_counter[p]^2)
                 leafc_to_litter[p]  = prev_leafc_to_litter[p] +
@@ -615,6 +619,7 @@ function phen_offset_litterfall!(
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
+        cpool_to_frootc,
         dt, CNratio_floating, use_fun)
     _launch!(_phen_offset_litterfall_kernel!,
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
@@ -622,7 +627,124 @@ function phen_offset_litterfall!(
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
+        cpool_to_frootc,
         eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
+end
+
+# --- crop harvest on the final offset step (CNOffsetLitterfall, ivt >= npcropmin) ---
+# Faithful port of CNPhenologyMod.F90:3504-3700 (non-matrix path), which the port was
+# missing entirely: nothing ever wrote repr_grainc_to_food / repr_grainc_to_seed (or
+# the N, biofuel, residue-removal and livestem-litter harvest fluxes), so CStateUpdate1
+# (which consumes them) never moved grain to the food pool and the grain pool was never
+# emptied at harvest. Runs BEFORE _phen_offset_litterfall_kernel!, which then derives
+# leafn_to_litter from the leafc_to_litter written here (Fortran's order).
+# Per patch; reads only own-patch state. `h` is crop%harvest_count (incremented by
+# CropPhenology at the harvest decision earlier in the same step).
+@kernel function _phen_crop_harvest_offset_kernel!(
+        leafc_to_litter, livestemc_to_litter, livestemn_to_litter,
+        leafc_to_biofuelc, livestemc_to_biofuelc, leafn_to_biofueln, livestemn_to_biofueln,
+        leafc_to_removedresiduec, livestemc_to_removedresiduec,
+        leafn_to_removedresiduen, livestemn_to_removedresiduen,
+        repr_grainc_to_food, repr_grainc_to_seed, repr_grainn_to_food, repr_grainn_to_seed,
+        repr_grainc_to_food_perharv, repr_grainc_to_food_thisyr,
+        repr_grainc_to_seed_perharv, repr_grainc_to_seed_thisyr,
+        repr_grainn_to_food_perharv, repr_grainn_to_food_thisyr,
+        repr_grainn_to_seed_perharv, repr_grainn_to_seed_thisyr,
+        repr_structurec_to_cropprod, repr_structurec_to_litter,
+        repr_structuren_to_cropprod, repr_structuren_to_litter,
+        @Const(mask), @Const(mask_pcrop), @Const(itype),
+        @Const(offset_flag), @Const(offset_counter), @Const(harvest_count),
+        @Const(leafc), @Const(livestemc), @Const(leafn), @Const(livestemn),
+        @Const(reproductivec), @Const(reproductiven),
+        @Const(cropseedc_deficit), @Const(cropseedn_deficit),
+        @Const(cpool_to_leafc), @Const(cpool_to_livestemc),
+        @Const(cpool_to_reproductivec), @Const(npool_to_reproductiven),
+        @Const(biofuel_harvfrac), @Const(repr_structure_harvfrac),
+        crop_residue_removal_frac, dt, no_seed_replenishment::Bool,
+        repr_grain_min::Int, repr_grain_max::Int,
+        repr_structure_min::Int, repr_structure_max::Int)
+    T = eltype(leafc_to_litter)
+    p = @index(Global)
+    @inbounds if mask[p] && mask_pcrop[p] && offset_flag[p] == one(T) &&
+                 abs(offset_counter[p] - dt) <= dt / T(2)
+        ivt = itype[p] + 1   # 0-based Fortran -> 1-based Julia pftcon index
+        t1 = one(T) / dt
+        h = harvest_count[p]
+
+        # Replenish the seed deficits from grain, pulling from grain pool 1, 2, ...
+        if no_seed_replenishment
+            cdef = zero(T)
+            ndef = zero(T)
+        else
+            cdef = -cropseedc_deficit[p]
+            ndef = -cropseedn_deficit[p]
+        end
+        for k in repr_grain_min:repr_grain_max
+            c_restore = min(cdef, reproductivec[p, k])
+            cdef -= c_restore
+            repr_grainc_to_seed[p, k] = t1 * c_restore
+            if c_restore > zero(T) && h >= 1
+                repr_grainc_to_seed_perharv[p, h, k] = c_restore
+                repr_grainc_to_seed_thisyr[p, k] += repr_grainc_to_seed_perharv[p, h, k]
+            end
+            n_restore = min(ndef, reproductiven[p, k])
+            ndef -= n_restore
+            repr_grainn_to_seed[p, k] = t1 * n_restore
+            if n_restore > zero(T) && h >= 1
+                repr_grainn_to_seed_perharv[p, h, k] = n_restore
+                repr_grainn_to_seed_thisyr[p, k] += repr_grainn_to_seed_perharv[p, h, k]
+            end
+
+            # Send the remaining grain to the food product pool
+            c_food_thispool = cpool_to_reproductivec[p, k] - repr_grainc_to_seed[p, k]
+            repr_grainc_to_food[p, k] = t1 * reproductivec[p, k] + c_food_thispool
+            if reproductivec[p, k] + c_food_thispool * dt > zero(T) && h >= 1
+                repr_grainc_to_food_perharv[p, h, k] = reproductivec[p, k] + c_food_thispool * dt
+                repr_grainc_to_food_thisyr[p, k] += repr_grainc_to_food_perharv[p, h, k]
+            end
+            n_food_thispool = npool_to_reproductiven[p, k] - repr_grainn_to_seed[p, k]
+            repr_grainn_to_food[p, k] = t1 * reproductiven[p, k] +
+                npool_to_reproductiven[p, k] - repr_grainn_to_seed[p, k]
+            if reproductiven[p, k] + n_food_thispool * dt > zero(T) && h >= 1
+                repr_grainn_to_food_perharv[p, h, k] = reproductiven[p, k] + n_food_thispool * dt
+                repr_grainn_to_food_thisyr[p, k] += repr_grainn_to_food_perharv[p, h, k]
+            end
+        end
+
+        for k in repr_structure_min:repr_structure_max
+            fr = repr_structure_harvfrac[ivt, k]
+            repr_structurec_to_cropprod[p, k] = (t1 * reproductivec[p, k] + cpool_to_reproductivec[p, k]) * fr
+            repr_structurec_to_litter[p, k]   = (t1 * reproductivec[p, k] + cpool_to_reproductivec[p, k]) * (one(T) - fr)
+            repr_structuren_to_cropprod[p, k] = (t1 * reproductiven[p, k] + npool_to_reproductiven[p, k]) * fr
+            repr_structuren_to_litter[p, k]   = (t1 * reproductiven[p, k] + npool_to_reproductiven[p, k]) * (one(T) - fr)
+        end
+
+        # Biofuel harvest of leaf and live stem (e.g. 70% for bioenergy crops)
+        bf = biofuel_harvfrac[ivt]
+        leafc_to_biofuelc[p] = t1 * leafc[p] * bf
+        leafc_remaining      = leafc[p] * (one(T) - bf)
+        leafn_to_biofueln[p] = t1 * leafn[p] * bf
+        leafn_remaining      = leafn[p] * (one(T) - bf)
+        livestemc_to_biofuelc[p] = t1 * livestemc[p] * bf
+        livestemn_to_biofueln[p] = t1 * livestemn[p] * bf
+        livestemc_remaining      = livestemc[p] * (one(T) - bf)
+        livestemn_remaining      = livestemn[p] * (one(T) - bf)
+
+        # Remove residues
+        rr = T(crop_residue_removal_frac)
+        leafc_to_removedresiduec[p]     = t1 * leafc_remaining * rr
+        leafn_to_removedresiduen[p]     = t1 * leafn_remaining * rr
+        livestemc_to_removedresiduec[p] = t1 * livestemc_remaining * rr
+        livestemn_to_removedresiduen[p] = t1 * livestemn_remaining * rr
+        leafc_remaining     = leafc_remaining     * (one(T) - rr)
+        livestemc_remaining = livestemc_remaining * (one(T) - rr)
+        livestemn_remaining = livestemn_remaining * (one(T) - rr)
+
+        leafc_to_litter[p]     = t1 * leafc_remaining + cpool_to_leafc[p]
+        livestemc_to_litter[p] = t1 * livestemc_remaining + cpool_to_livestemc[p]
+        livestemn_to_litter[p] = t1 * livestemn_remaining
+        # leafn_to_litter follows from leafc_to_litter in the offset kernel.
+    end
 end
 
 # --- cn_background_litterfall!: background litter fluxes ------------------
@@ -966,7 +1088,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
                               crop, patch_data; mask_pcropp=mask_pcropp,
                               use_fun=cn_params.use_fun,
                               CNratio_floating=varctl.CNratio_floating,
-                              for_testing_no_crop_seed_replenishment=varctl.for_testing_no_crop_seed_replenishment)
+                              for_testing_no_crop_seed_replenishment=varctl.for_testing_no_crop_seed_replenishment,
+                              crop_residue_removal_frac=varctl.crop_residue_removal_frac)
 
         cn_background_litterfall!(pstate, mask_soilp, pftcon,
                                   cnveg_state, cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
@@ -2392,6 +2515,13 @@ end
 
 @inline _crop_is_winter_cereal(ivt0::Int) = (ivt0 == nwwheat || ivt0 == nirrig_wwheat)
 
+# CropPhenology's vernalization call gate (CNPhenologyMod.F90:2426):
+#   t_ref2m_min(p) < 1.e30_r8 .and. vf(p) /= 1._r8 .and. (winter wheat)
+# `< 1e30` (not `isfinite`) because t_ref2m_min is SPVAL = 1e36 on every step but the
+# end-of-day one; NaN also fails `<`, as it should.
+@inline _vernalization_gate(t_ref2m_min::Real, vf::Real, ivt0::Int) =
+    t_ref2m_min < 1.0e30 && vf != 1.0 && _crop_is_winter_cereal(ivt0)
+
 @inline function _crop_is_soybean(ivt0::Int)
     return ivt0 == ntmp_soybean || ivt0 == nirrig_tmp_soybean ||
            ivt0 == ntrp_soybean || ivt0 == nirrig_trp_soybean
@@ -2627,15 +2757,16 @@ function crop_phenology!(pstate::PhenologyState, params::PhenologyParams,
         if crop.croplive_patch[p]
             crop.cphase_patch[p] = cphase_planted
 
-            # (5a) vernalization — winter cereal only.
-            # NOTE: this branch is UNVALIDATED. The crop reference carries no
-            # winter-wheat CFT (no itype 21/22 patch) and its cumvd/hdidx are NaN on
-            # every patch, so there is no ground truth for it here. It is wired
-            # because leaving the only caller absent is what kept the whole
-            # lifecycle dead, but it must not be reported as validated.
+            # (5a) vernalization — winter cereal only. Validated step-by-step against
+            # a winter-wheat Fortran reference (docs/CROP_LIFECYCLE_MAP.md §3j).
+            # The gate is Fortran's `t_ref2m_min(p) < 1.e30_r8`: t_ref2m_min holds a
+            # real daily minimum only on the end-of-day step and SPVAL (1e36) on every
+            # other step. An `isfinite` test admits SPVAL, so vernalization! ran every
+            # step with tmin = tmax = 1e36, which (cumvd - 0.5*(1e36 - ...) -> 0) reset
+            # cumvd to 0 on every non-end-of-day step: vf stuck at 0.85, the crop could
+            # never vernalize.
             vernalization_forces_harvest = false
-            if isfinite(temperature.t_ref2m_min_patch[p]) &&
-               crop.vf_patch[p] != 1.0 && _crop_is_winter_cereal(ivt0)
+            if _vernalization_gate(temperature.t_ref2m_min_patch[p], crop.vf_patch[p], ivt0)
                 vernalization_forces_harvest = vernalization!(
                     p, pstate, canopy_state, temperature, water_diag,
                     cnveg_state, crop, patch_data)
@@ -2953,13 +3084,50 @@ function cn_offset_litterfall!(pstate::PhenologyState,
                                mask_pcropp::Union{Nothing,AbstractVector{Bool}}=nothing,
                                use_fun::Bool=false,
                                CNratio_floating::Bool=false,
-                               for_testing_no_crop_seed_replenishment::Bool=false)
+                               for_testing_no_crop_seed_replenishment::Bool=false,
+                               crop_residue_removal_frac::Real=0.0,
+                               repr_grain_min::Int=1, repr_grain_max::Int=NREPR,
+                               repr_structure_min::Int=1, repr_structure_max::Int=0)
     dt = pstate.dt
     # Prognostic-crop patch mask == Fortran's `ivt(p) >= npcropmin` test. Only crops
     # get the leaf pool dumped on the final offset step (see the kernel). Default
     # (nothing) => no crops, which is the correct natural-PFT behaviour.
     mask_pcrop = mask_pcropp === nothing ?
         falses(length(mask_soilp)) : mask_pcropp
+
+    # Crop harvest branch first (it writes the crop leafc_to_litter that the offset
+    # kernel turns into leafn_to_litter). Only when a prognostic-crop patch exists, so
+    # the natural-PFT path never touches the (possibly unallocated) crop arrays.
+    if any(mask_pcrop)
+        _launch!(_phen_crop_harvest_offset_kernel!,
+            cnveg_cf.leafc_to_litter_patch, cnveg_cf.livestemc_to_litter_patch,
+            cnveg_nf.livestemn_to_litter_patch,
+            cnveg_cf.leafc_to_biofuelc_patch, cnveg_cf.livestemc_to_biofuelc_patch,
+            cnveg_nf.leafn_to_biofueln_patch, cnveg_nf.livestemn_to_biofueln_patch,
+            cnveg_cf.leafc_to_removedresiduec_patch, cnveg_cf.livestemc_to_removedresiduec_patch,
+            cnveg_nf.leafn_to_removedresiduen_patch, cnveg_nf.livestemn_to_removedresiduen_patch,
+            cnveg_cf.repr_grainc_to_food_patch, cnveg_cf.repr_grainc_to_seed_patch,
+            cnveg_nf.repr_grainn_to_food_patch, cnveg_nf.repr_grainn_to_seed_patch,
+            cnveg_cf.repr_grainc_to_food_perharv_patch, cnveg_cf.repr_grainc_to_food_thisyr_patch,
+            cnveg_cf.repr_grainc_to_seed_perharv_patch, cnveg_cf.repr_grainc_to_seed_thisyr_patch,
+            cnveg_nf.repr_grainn_to_food_perharv_patch, cnveg_nf.repr_grainn_to_food_thisyr_patch,
+            cnveg_nf.repr_grainn_to_seed_perharv_patch, cnveg_nf.repr_grainn_to_seed_thisyr_patch,
+            cnveg_cf.repr_structurec_to_cropprod_patch, cnveg_cf.repr_structurec_to_litter_patch,
+            cnveg_nf.repr_structuren_to_cropprod_patch, cnveg_nf.repr_structuren_to_litter_patch,
+            mask_soilp, mask_pcrop, patch_data.itype,
+            cnveg_state.offset_flag_patch, cnveg_state.offset_counter_patch, crop.harvest_count,
+            cnveg_cs.leafc_patch, cnveg_cs.livestemc_patch,
+            cnveg_ns.leafn_patch, cnveg_ns.livestemn_patch,
+            cnveg_cs.reproductivec_patch, cnveg_ns.reproductiven_patch,
+            cnveg_cs.cropseedc_deficit_patch, cnveg_ns.cropseedn_deficit_patch,
+            cnveg_cf.cpool_to_leafc_patch, cnveg_cf.cpool_to_livestemc_patch,
+            cnveg_cf.cpool_to_reproductivec_patch, cnveg_nf.npool_to_reproductiven_patch,
+            pftcon.biofuel_harvfrac, pftcon.repr_structure_harvfrac,
+            crop_residue_removal_frac, eltype(cnveg_cf.leafc_to_litter_patch)(dt),
+            for_testing_no_crop_seed_replenishment,
+            repr_grain_min, repr_grain_max, repr_structure_min, repr_structure_max;
+            ndrange = length(mask_soilp))
+    end
 
     # Per-patch independent: display→litter fluxes during offset.
     phen_offset_litterfall!(
@@ -2973,9 +3141,18 @@ function cn_offset_litterfall!(pstate::PhenologyState,
         cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
         pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn,
+        _cpool_to_frootc_or_zero(cnveg_cf, length(mask_soilp)),
         dt, CNratio_floating, use_fun)
 
     return nothing
+end
+
+# cpool_to_frootc for the final-offset-step litter term. Unit-test fixtures that
+# build a bare CNVegCarbonFluxData leave it unallocated; there is no allocation
+# flux in that case, so the term is zero.
+function _cpool_to_frootc_or_zero(cf, n)
+    a = cf.cpool_to_frootc_patch
+    return length(a) >= n ? a : fill!(similar(cf.leafc_to_litter_patch, n), 0)
 end
 
 # ==========================================================================
@@ -3098,7 +3275,7 @@ end
             end
 
             # crop stem litter uses leaf litter fractions
-            if ivt >= npcropmin
+            if itype[p] >= npcropmin   # 0-based compare (ivt is 1-based)
                 for i in i_litr_min:i_litr_max
                     if ncol >= c
                         _scatter_add!(phenology_c_to_litr_c_col, c, j, i,

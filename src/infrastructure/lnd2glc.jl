@@ -181,17 +181,46 @@ function update_lnd2glc!(
 )
     wf = waterflux isa WaterFluxBulkData ? waterflux.wf : waterflux
     isempty(bounds_g) && return nothing
-    FT = eltype(l2g.qice_grc)
-    nec1 = size(l2g.qice_grc, 1)
     # Fortran `t_soisno(c,1)` is the TOP GROUND layer: its second dimension runs
     # -nlevsno+1 : nlevgrnd, so Fortran index j maps to Julia column j + nlevsno.
     jtop = nlevsno + 1
+    tsoi_top = view(temperature.t_soisno_col, :, jtop)
+
+    # The fill below is a scalar host loop with a data-dependent error check (the
+    # duplicate-slot guard), so it is not a kernel. On a device backend, run it on
+    # host copies of the (small) inputs and copy the three (nec+1, ng) outputs back
+    # — scalar-indexing a GPU array here is an error (CUDA) or a per-element sync.
+    # On the host this is a straight pass-through: same loop, same arrays.
+    on_host = l2g.qice_grc isa Array && temperature.t_soisno_col isa Array &&
+              col.gridcell isa Array && filter_do_smb_c isa Union{Array, BitArray}
+    if on_host
+        _update_lnd2glc_host!(l2g.qice_grc, l2g.tsrf_grc, l2g.topo_grc,
+                              tsoi_top, topo.topo_col, wf.qflx_glcice_col,
+                              col, lun, grc, filter_do_smb_c, bounds_c, bounds_g;
+                              init, use_hillslope)
+    else
+        qice = Array(l2g.qice_grc); tsrf = Array(l2g.tsrf_grc); topog = Array(l2g.topo_grc)
+        _update_lnd2glc_host!(qice, tsrf, topog,
+                              Array(tsoi_top), Array(topo.topo_col), Array(wf.qflx_glcice_col),
+                              Adapt.adapt(Array, col), Adapt.adapt(Array, lun),
+                              Adapt.adapt(Array, grc), Array(filter_do_smb_c),
+                              bounds_c, bounds_g; init, use_hillslope)
+        copyto!(l2g.qice_grc, qice); copyto!(l2g.tsrf_grc, tsrf); copyto!(l2g.topo_grc, topog)
+    end
+    return nothing
+end
+
+function _update_lnd2glc_host!(qice_grc, tsrf_grc, topo_grc, tsoi_top, topo_col,
+                               qflx_glcice_col, col, lun, grc, filter_do_smb_c,
+                               bounds_c, bounds_g; init::Bool, use_hillslope::Bool)
+    FT = eltype(qice_grc)
+    nec1 = size(qice_grc, 1)
 
     # --- defaults (lnd2glcMod.F90:174-193) ---
     for g in bounds_g, n in 1:nec1
-        l2g.qice_grc[n, g] = zero(FT)
-        l2g.tsrf_grc[n, g] = FT(TFRZ)
-        l2g.topo_grc[n, g] = zero(FT)
+        qice_grc[n, g] = zero(FT)
+        tsrf_grc[n, g] = FT(TFRZ)
+        topo_grc[n, g] = zero(FT)
     end
 
     isempty(bounds_c) && return nothing
@@ -232,11 +261,11 @@ function update_lnd2glc!(
         # t_soisno and topo_col are valid even in initialization, so tsrf and topo
         # are set regardless of `init`. qflx_glcice is not valid until the run
         # loop, so during initialization qice keeps the default set above.
-        l2g.tsrf_grc[idx, g] = temperature.t_soisno_col[c, jtop]
-        l2g.topo_grc[idx, g] = topo.topo_col[c]
+        tsrf_grc[idx, g] = tsoi_top[c]
+        topo_grc[idx, g] = topo_col[c]
         if !init
-            qice = wf.qflx_glcice_col[c] * FT(flux_normalization)
-            l2g.qice_grc[idx, g] = qice
+            qice = qflx_glcice_col[c] * FT(flux_normalization)
+            qice_grc[idx, g] = qice
             if abs(qice) > one(FT)
                 @warn "update_lnd2glc!: qice out of bounds" gridcell=g class=n qice=qice
             end

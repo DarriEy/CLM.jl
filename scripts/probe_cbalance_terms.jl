@@ -9,7 +9,7 @@
 # ==========================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const BGC_DUMPDIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_dumps_2202"
+const BGC_DUMPDIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_dumps_2202"
 const NSTEP = 1753153
 
 function main()

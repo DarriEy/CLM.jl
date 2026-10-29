@@ -24,7 +24,7 @@ const FT = Float64
 const DT = 1800.0
 const STEPS_PER_DAY = 48
 const ROOT = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
+    "$(homedir())/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
 const DOMAIN = get(ENV, "CLM_DOMAIN", "Boreal_Krycklan_Sweden")
 const DOM_DIR = joinpath(ROOT, "domain_$DOMAIN")
 const FSURDAT = joinpath(DOM_DIR, "settings/CLM/parameters/surfdata_clm.nc")

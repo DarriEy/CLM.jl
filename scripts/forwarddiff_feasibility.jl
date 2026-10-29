@@ -18,7 +18,7 @@ const C = CLM
 const FT = Float64
 const DT = 1800.0
 const ROOT = get(ENV, "SYMFLUENCE_DATA",
-    "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
+    "$(homedir())/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/data/SYMFLUENCE_data")
 const DOMAIN = get(ENV, "CLM_DOMAIN", "Stillwater_Oklahoma")
 const NSTEPS = parse(Int, get(ENV, "CLM_NSTEPS", "48"))
 const START  = Date(get(ENV, "CLM_START", "2004-06-01"))

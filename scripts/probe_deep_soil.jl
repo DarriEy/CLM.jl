@@ -9,9 +9,9 @@
 
 using NCDatasets, Dates, Printf, CLM
 const run_clm! = getfield(CLM, Symbol("clm_run!"))
-const DATA = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
+const DATA = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))"
 _snicar(f) = let d1 = "$DATA/installs/cesm-inputdata/lnd/clm2/snicardata",
-                 d2 = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata"
+                 d2 = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata"
     isfile(joinpath(d1, f)) ? joinpath(d1, f) : joinpath(d2, f)
 end
 const DOM = get(ENV, "DOMAIN", "Krycklan")

@@ -13,9 +13,9 @@ using KernelAbstractions
 using Printf
 
 const FS = get(ENV, "CLM_FSURDAT",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/surfdata_clm.nc")
 const PF = get(ENV, "CLM_PARAMFILE",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Bow_at_Banff_lumped/settings/CLM/parameters/clm5_params.nc")
 
 # Scalar reference (the current driver loop).
 function forc_q_scalar!(forc_q_col, gridcell, forc_vp_grc, forc_pbot_col)

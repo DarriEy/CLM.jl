@@ -1,6 +1,6 @@
 # Pinpoint the photosynthesis NaN input for the veg patches in the use_cn step.
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const BGC_DUMPDIR = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_dumps_2202"
+const BGC_DUMPDIR = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_dumps_2202"
 const NSTEP = 1753153
 
 pv(name, a) = (A=Array(a); @printf("  %-26s %s\n", name, string(round.(Float64.(vec(A)), sigdigits=4))))

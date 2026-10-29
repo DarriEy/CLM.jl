@@ -71,7 +71,7 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
-const DUMPDIR_DEFO = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_firedefo"
+const DUMPDIR_DEFO = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bow_ref_firedefo"
 const FSURDAT_DEFO = joinpath(DUMPDIR_DEFO, "surfdata_defo.nc")
 const FLANDUSE     = joinpath(DUMPDIR_DEFO, "landuse_timeseries_defo.nc")
 
@@ -105,9 +105,9 @@ defo_step_date(n::Int) = DateTime(2203, 1, 1, 0) + Hour(n - NFIRST)
 const FFORCING2003 = joinpath(dirname(FFORCING), "clmforc.2003.nc")
 defo_forcing_date(n::Int) = DateTime(2003, 1, 1, 0) + Hour(n - NFIRST)
 
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
-const FIRED = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/firedata"
+const FIRED = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/firedata"
 const FLNFM = joinpath(FIRED, "clmforc.UNIFORM_lnfm_0.9x1.25_CLMjl-parity.nc")
 const FHDM  = joinpath(FIRED, "clmforc.UNIFORM_hdm_0.9x1.25_CLMjl-parity.nc")
 _dv(ds, n) = haskey(ds, n) ? Array(ds[n]) : nothing

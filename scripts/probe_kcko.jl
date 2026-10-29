@@ -1,5 +1,5 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
-const SC = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup"
+const SC = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup"
 inst,bounds = run_one_parity_step!(1757873; use_cn=true, dumpdir=SC, use_hydrstress=true, use_luna=true,
   step_date=DateTime(2002,1,1)+Hour(1757873-1753153),
   forcing_file=replace(FFORCING,"clmforc.2003.nc"=>"clmforc.2002.nc"))

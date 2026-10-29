@@ -80,7 +80,7 @@ reld(a, b) = abs(a - b) / (1.0 + abs(a))
 
 function main()
     gpu_functional() || (println("No GPU backend detected."); return 0)
-    println("="^70); println("  clm_drv! + use_fates on Metal — CPU-vs-GPU host-fallback parity"); println("="^70)
+    println("="^70); println("  clm_drv! + use_fates on $(gpu_backend_name()) — CPU-vs-GPU host-fallback parity"); println("="^70)
     nsteps = parse(Int, get(ENV, "FATES_GPU_STEPS", "144"))   # ~3 days of perpetual-noon growth
 
     # Two independent, identical cold-started insts (clm_initialize! is deterministic).
@@ -89,22 +89,22 @@ function main()
     instD    = mf(device_array_type(), instS)
     filtD    = mf(device_array_type(), filtS)
     filt_iaD = mf(device_array_type(), filt_ia)
-    println("  built CPU + Metal insts (nc=$(bounds.endc)); fates preserved through adapt: $(instD.fates === instS.fates)")
+    println("  built CPU + $(gpu_backend_name()) insts (nc=$(bounds.endc)); fates preserved through adapt: $(instD.fates === instS.fates)")
     println("  t_veg_patch device type: $(typeof(instD.temperature.t_veg_patch))")
     cold = fates_summary(instH)
     @printf("  cold start: ncoh=%d carbon=%.5g maxdbh=%.5f\n\n", cold.ncoh, cold.carbon, cold.maxdbh)
 
     println("  running $nsteps steps ($(nsteps÷48) days) on each …")
     run_steps!(instH, config, filt,  filt_ia,  bounds;  nsteps=nsteps)   # CPU (Float64)
-    run_steps!(instD, config, filtD, filt_iaD, boundsS; nsteps=nsteps)   # Metal (Float32, host-fallback)
+    run_steps!(instD, config, filtD, filt_iaD, boundsS; nsteps=nsteps)   # device (backend precision, host-fallback)
 
     sH = fates_summary(instH); sD = fates_summary(instD)
-    @printf("\n  growth: CPU carbon %.5g→%.5g dbh %.5f→%.5f | Metal carbon %.5g→%.5g dbh %.5f→%.5f\n",
+    @printf("\n  growth: CPU carbon %.5g→%.5g dbh %.5f→%.5f | device carbon %.5g→%.5g dbh %.5f→%.5f\n",
         cold.carbon, sH.carbon, cold.maxdbh, sH.maxdbh, cold.carbon, sD.carbon, cold.maxdbh, sD.maxdbh)
     grew = sH.carbon > cold.carbon*1.0001 && sH.maxdbh > cold.maxdbh
     println("  stand grew (CPU): $grew")
     println("\n  " * "-"^60)
-    @printf("  %-10s %16s %16s %10s\n", "field", "CPU (f64)", "Metal (f32)", "rel")
+    @printf("  %-10s %16s %16s %10s\n", "field", "CPU (f64)", "$(gpu_backend_name()) ($(eltype(instD.temperature.t_veg_patch)))", "rel")
     checks = Bool[]
     for k in (:ncoh, :npatch, :carbon, :maxdbh, :gpp, :btran, :elai2)
         vH = Float64(getfield(sH, k)); vD = Float64(getfield(sD, k))

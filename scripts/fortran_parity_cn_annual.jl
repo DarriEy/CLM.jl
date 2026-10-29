@@ -9,7 +9,8 @@
 #
 # Fortran reference (generated 2026-06-19, branch from bgc_spunup_final, forcing
 # clmforc.2003 via year_align, daily-avg 365 records):
-#   /Users/.../SYMFLUENCE_data/clm_cn_run/Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.nc
+#   $SYMFLUENCE_DATA/clm_cn_run/Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.nc
+#   (or $CLM_CN_RUN_DIR; the restart is clm_bgc_spinup/...clm2.r.2202-01-01-00000.nc)
 # h0 vars are (time,[lev,]lndgrid) → NCDatasets returns them reversed → f[1, day].
 # The model year is 2202 but the forcing is clmforc.2003 (year_align), so we drive
 # the Julia run with 2003 forcing while the clock runs 2202 (date mapped per step).
@@ -20,7 +21,26 @@
 # Usage: julia +1.12 --project=. scripts/fortran_parity_cn_annual.jl [NDAYS]
 #        CN_PROBE=1 julia ... scripts/fortran_parity_cn_annual.jl 1   # step-1 NaN probe
 #
-# STATUS (2026-06-20): scaffold complete + the comparison framework works, but it
+# STATUS (2026-10-28): RUNS END TO END, PHS ON, NO NaN. Reference regenerated with
+# the pristine ctsm5.3.012 cesm.exe (recipe: scripts/validation/fortran_pdump/
+# regen_parity_references.sh, "cn_annual"); point CLM_CN_RUN_DIR at the local copy.
+# CN_NANSCAN=1 scans t_grnd/t_soisno/h2osoi/smp_l/qflx_rootsoi + per-veg-patch
+# t_veg/vegwp/k_soil_root/bsun/bsha/eflx_lh/gpp after EVERY step: 0 non-finite
+# values over 8760 steps. The step-1 NaN described below was closed by 6238f44
+# (2026-06-20): the night branch of calcstress dropped getvegwp's soil flux, so
+# qflx_tran_veg stayed at its NaN init (Fortran PhotosynthesisMod.F90 4669-4676
+# sets qflx_tran_veg(p)=max(soilflux,0) there). Regression: test/test_phs_night_frozen.jl.
+# Re-tested with the sum_ksr<=1e-12 threshold and the plc x>=0 guards reverted to
+# Fortran-literal (==0 / no guard): still 0 NaN, so those guards are not load-bearing.
+# Year-1 monthly parity vs Fortran (rel = |J-F|/(1+|F|)): TOTSOMC <=9.5e-6,
+# TOTSOMN <=1.1e-5, TOTECOSYSC <=4.5e-4, TG <=2.4e-3, SMINN <=1.2e-2,
+# EFLX_LH_TOT <=0.11 (Aug), TLAI Jan-Sep <=2.7e-3; GPP Jun -6.6% (ratio).
+# AUTUMN OFFSET FIXED (2026-10-28): this loop re-ran init_daylength! every step, so
+# clm_drv!'s update_daylength! left prev_dayl == dayl, ws_flag stuck at 1, and the
+# season-deciduous grass never dropped its leaves. Seeded once now: TLAI Oct-Dec
+# <=5.8e-3 (was 7.5e-2), LEAFC <=0.14 (was 2.1), TOTVEGC <=4.8e-2 (was 8.3e-2).
+#
+# HISTORY — STATUS (2026-06-20): scaffold complete + the comparison framework works, but it
 # surfaced a BLOCKER on the first end-to-end use_cn=true annual run: the soil
 # hydrology NaNs at STEP 1 from the BGC restart. Localized (CN_PROBE):
 #   * the soil water IS injected finite (h2osoi_liq soil[1:4]=[1.72,3.42,5.26,7.03],
@@ -128,7 +148,9 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Statistics
 
-const CN_DIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_cn_run"
+# CLM_CN_RUN_DIR overrides the reference directory (e.g. a locally regenerated
+# copy under $SYMFLUENCE_DATA/runs/ — never write into the Drive-backed tree).
+const CN_DIR  = get(ENV, "CLM_CN_RUN_DIR", symfluence_path("clm_cn_run"))
 const CN_RST  = joinpath(CN_DIR, "Bow_at_Banff_lumped.clm2.r.2202-01-01-00000.nc")
 const CN_H0   = joinpath(CN_DIR, "Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.nc")
 const CN_FFORC = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2003.nc")  # 2003 forcing
@@ -142,7 +164,8 @@ _fv(x) = ismissing(x) ? NaN : Float64(x)
 
 function run_cn_annual(; ndays::Int = 365)
     isfile(CN_RST) || error("CN restart not found: $CN_RST")
-    isfile(CN_H0)  || error("CN h0 reference not found: $CN_H0")
+    have_h0 = isfile(CN_H0)
+    have_h0 || @warn "CN h0 reference not found (run continues, comparison skipped): $CN_H0"
     # Run at the FORCING year (clock=2003 matches clmforc.2003); the CN restart
     # supplies the spun-up 2202 state; compare by day-of-year to the 2202 h0.
     # FULL clm_initialize! setup (mirrors clm_run.jl) — build_bow_inst is a light
@@ -151,8 +174,8 @@ function run_cn_annual(; ndays::Int = 365)
     start_date = DateTime(FORCE_YEAR, 1, 1)
     CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
     CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
-    snowopt = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-    snowage = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+    snowopt = FSNOWOPT
+    snowage = FSNOWAGE
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat = FSURDAT, paramfile = FPARAM,
         start_date = start_date, dtime = 3600, use_cn = true, use_luna = true,
         use_bedrock = true, use_aquifer_layer = false, h2osfcflag = 0,
@@ -185,28 +208,20 @@ function run_cn_annual(; ndays::Int = 365)
         inst.photosyns.jmx25_z_patch  = fill(60.0, np, CLM.NLEVCAN)
     end
     _read_fortran_restart!(CN_RST, inst, bounds)
-    # Seed PHS leaf water potential from the restart (read_fortran_restart! leaves
-    # vegwp NaN → the use_hydrstress Newton would propagate NaN into t_veg/t_grnd).
-    let ds = NCDataset(CN_RST, "r")
-        if haskey(ds, "vegwp")
-            vw = ds["vegwp"][:, :]
-            for pd in 1:size(vw, 2), seg in 1:size(vw, 1)
-                seg <= size(inst.canopystate.vegwp_patch, 2) && pd <= np &&
-                    (inst.canopystate.vegwp_patch[pd, seg] = Float64(vw[seg, pd]))
-            end
-        else
-            fill!(inst.canopystate.vegwp_patch, -2.0e5)  # finite default [mm]
+    # PHS-read state comes straight from the restart, as in Fortran: CTSM writes
+    # SMP (SoilStateType restart) and vegwp (CanopyStateType restart), and
+    # read_fortran_restart! injects both with the patch remap. (Earlier versions of
+    # this harness re-seeded vegwp by raw pft index and recomputed smp_l from
+    # h2osoi_vol, overwriting the restart's values — neither is what Fortran does.)
+    # Fall back to a recompute only if a restart lacks them.
+    let ss = inst.soilstate, cc = findfirst(filt.nolakec)
+        if !all(isfinite, @view ss.smp_l_col[cc, 1:CLM.varpar.nlevsoi])
+            @warn "restart has no finite SMP — recomputing smp_l from h2osoi_vol"
+            CLM.update_smp_l!(ss.smp_l_col, inst.water.waterstatebulk_inst.ws.h2osoi_vol_col,
+                ss.watsat_col, ss.sucsat_col, ss.bsw_col,
+                ss.smpmin_col, filt.nolakec, 1:nc, CLM.varpar.nlevgrnd)
         end
-        close(ds)
     end
-    # Seed soil matric potential from the injected h2osoi_vol. The .clm2.r restart
-    # has no smp_l (it's derived), so it starts NaN; with use_hydrstress the PHS
-    # plant sink (canopy_fluxes) reads smp_l at step 1 BEFORE the hydrology recomputes
-    # it → k_soil_root/qflx_rootsoi NaN → soil water NaN. (The 28-step CN drift
-    # injected a pdump that included smp_l, so it never hit this.)
-    CLM.update_smp_l!(inst.soilstate.smp_l_col, inst.water.waterstatebulk_inst.ws.h2osoi_vol_col,
-        inst.soilstate.watsat_col, inst.soilstate.sucsat_col, inst.soilstate.bsw_col,
-        inst.soilstate.smpmin_col, filt.nolakec, 1:nc, CLM.varpar.nlevgrnd)
     if get(ENV, "CN_PROBE", "") != ""
         cc = findfirst(filt.nolakec)
         _chk(nm, x) = @printf("    %-16s %s\n", nm, isfinite(x) ? @sprintf("%.4g", x) : "NaN")
@@ -366,7 +381,16 @@ function run_cn_annual(; ndays::Int = 365)
             calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
             (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
             nextsw = calday + 3600.0 / CLM.SECSPDAY
-            CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+            # Seed daylength ONCE. clm_drv! (is_first_step=false here) runs
+            # update_daylength!, which shifts prev_dayl <- dayl each step
+            # (DaylengthMod.F90:192-202), so seed the step BEFORE the first one and
+            # let the update advance it. Re-seeding every step made prev_dayl == dayl,
+            # pinned ws_flag at 1, and the season-deciduous grass never dropped its
+            # leaves in autumn (CNPhenologyMod.F90:1023-1027, 1182).
+            if d == 1 && h == 1
+                (declinm2, _) = CLM.compute_orbital(calday - 2 * 3600.0 / CLM.SECSPDAY)
+                CLM.init_daylength!(inst.gridcell, declinm1, declinm2, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
+            end
             CLM.advance_timestep!(tm)
             CLM.read_forcing_step!(fr, inst.atm2lnd, _force_date(cur), ng, nc)
             CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
@@ -377,6 +401,38 @@ function run_cn_annual(; ndays::Int = 365)
                 is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
                 is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy,
                 photosyns = inst.photosyns)
+            # CN_NANSCAN=1: after every step, report the first non-finite value in the
+            # PHS-read/written state on active patches / the soil column.
+            if get(ENV, "CN_NANSCAN", "") != ""
+                nsn = CLM.varpar.nlevsno; ngr = CLM.varpar.nlevgrnd
+                ws_ = inst.water.waterstatebulk_inst.ws
+                wf_ = inst.water.waterfluxbulk_inst.wf
+                colv = [("t_grnd", inst.temperature.t_grnd_col[c_soil:c_soil]),
+                        ("t_soisno", vec(inst.temperature.t_soisno_col[c_soil, (nsn+1):(nsn+ngr)])),
+                        ("h2osoi_liq", vec(ws_.h2osoi_liq_col[c_soil, (nsn+1):(nsn+ngr)])),
+                        ("h2osoi_ice", vec(ws_.h2osoi_ice_col[c_soil, (nsn+1):(nsn+ngr)])),
+                        ("smp_l", vec(inst.soilstate.smp_l_col[c_soil, :])),
+                        ("qflx_rootsoi", vec(inst.water.waterfluxbulk_inst.qflx_rootsoi_col[c_soil, :]))]
+                pv = Tuple{String,Vector{Float64}}[]
+                for p in 1:np
+                    (inst.patch.active[p] && inst.patch.column[p] == c_soil) || continue
+                    push!(pv, ("t_veg[p$p]", [inst.temperature.t_veg_patch[p]]))
+                    push!(pv, ("vegwp[p$p]", vec(inst.canopystate.vegwp_patch[p, :])))
+                    # bare ground (ivt 0) is outside calcstress's filter: its
+                    # k_soil_root stays at the NaN init, in Fortran too.
+                    inst.patch.itype[p] == 0 ||
+                        push!(pv, ("k_soil_root[p$p]", vec(inst.soilstate.k_soil_root_patch[p, :])))
+                    push!(pv, ("bsun[p$p]", [inst.energyflux.bsun_patch[p]]))
+                    push!(pv, ("bsha[p$p]", [inst.energyflux.bsha_patch[p]]))
+                    push!(pv, ("eflx_lh_tot[p$p]", [inst.energyflux.eflx_lh_tot_patch[p]]))
+                    push!(pv, ("gpp[p$p]", [ccf().gpp_patch[p]]))
+                end
+                for (nm, v) in Iterators.flatten((colv, pv))
+                    k = findfirst(x -> !isfinite(x), v)
+                    k === nothing || (@printf("  [nanscan] day %d hour %d nstep %d: %s[%d] = %s\n",
+                        d, h, tm.nstep, nm, k, string(v[k])); nf_total += 1)
+                end
+            end
             # cn_veg_struct_update! (leafc -> tlai/elai/htop) now runs INSIDE clm_drv!
             # (wired into the global driver), so no harness-side call is needed.
             if get(ENV, "CN_PROBE", "") != "" && d == 1 && h == 1
@@ -409,7 +465,7 @@ function run_cn_annual(; ndays::Int = 365)
                 d, daily["TOTSOMC"][end], daily["TOTVEGC"][end], daily["GPP"][end],
                 daily["TLAI"][end], daily["TG"][end])
         # phenology-onset evolution probe for the season_decid grass patch (p3)
-        if get(ENV, "CN_PHENO", "") != "" && d % 15 == 0 &&
+        if get(ENV, "CN_PHENO", "") != "" && (d % 15 == 0 || (d >= 240 && d <= 330 && d % 3 == 0)) &&
            hasproperty(inst.bgc_vegetation, :cnveg_state_inst)
             cvs = inst.bgc_vegetation.cnveg_state_inst
             pd = findfirst(p -> inst.patch.active[p] &&
@@ -417,13 +473,13 @@ function run_cn_annual(; ndays::Int = 365)
                 CLM.pftcon.season_decid[inst.patch.itype[p]+1] == 1.0, 1:np)
             if pd !== nothing
                 tg = inst.gridcell.dayl
-                @printf("    [pheno d%3d p%d] dormant=%g gddflag=%g gdd=%.1f days_act=%.1f swi=%.1f onflag=%g oncnt=%.0f offflag=%g leafc=%.2f tlai=%.3f dayl=%.0f\n",
+                @printf("    [pheno d%3d p%d] dormant=%g gddflag=%g gdd=%.1f days_act=%.1f swi=%.1f onflag=%g oncnt=%.0f offflag=%g offcnt=%.0f leafc=%.2f tlai=%.3f dayl=%.0f prev_dayl=%.0f\n",
                     d, pd, cvs.dormant_flag_patch[pd], cvs.onset_gddflag_patch[pd],
                     cvs.onset_gdd_patch[pd], cvs.days_active_patch[pd], cvs.onset_swi_patch[pd],
                     cvs.onset_flag_patch[pd], cvs.onset_counter_patch[pd],
-                    cvs.offset_flag_patch[pd], ccs().leafc_patch[pd],
+                    cvs.offset_flag_patch[pd], cvs.offset_counter_patch[pd], ccs().leafc_patch[pd],
                     inst.canopystate.tlai_patch[pd],
-                    (length(tg) > 0 ? tg[1] : NaN))
+                    (length(tg) > 0 ? tg[1] : NaN), inst.gridcell.prev_dayl[1])
             end
         end
     end
@@ -431,6 +487,10 @@ function run_cn_annual(; ndays::Int = 365)
     @printf("  ran %d days in %.1fs\n\n", ndays, time() - t0)
 
     # ---- monthly comparison vs Fortran h0 ----
+    if !have_h0
+        @printf("\nfiniteness: %s\n", nf_total == 0 ? "PASS (Tg finite all days)" : "FAIL ($nf_total bad days)")
+        return inst, bounds
+    end
     fds = NCDataset(CN_H0, "r")
     mstart = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
     mend   = [31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]

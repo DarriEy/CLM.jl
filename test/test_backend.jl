@@ -2,10 +2,12 @@
 # test_backend.jl — centralized backend-selection API + multi-GPU-over-MPI
 # plumbing (src/infrastructure/backend.jl + multigpu.jl + ext/CLM{CUDA,AMDGPU}Ext).
 #
-# This machine has NO CUDA/AMD GPU, so the GPU paths are validated ONLY as far as
-# the CPU backend (the correctness proxy — the SAME kernels the GPU backends
-# dispatch through) and as far as compile/dispatch + graceful-skip. Real
-# CUDA/AMD on-device execution is hardware-unvalidated and explicitly skipped.
+# On a CPU-only box the GPU paths are validated through the CPU backend (the
+# correctness proxy — the SAME kernels the GPU backends dispatch through) and as
+# far as compile/dispatch + graceful-skip; the real-device testset skips. With a
+# GPU package loaded on real hardware (e.g. `using CUDA` on an NVIDIA box) the
+# last testset runs a kernel on the device. Validated on CUDA (RTX 5070 Ti,
+# sm_120) 2026-10 — see docs/GPU_REVALIDATION_2026-10_CUDA.md.
 # ==========================================================================
 
 using Test
@@ -52,6 +54,11 @@ Base.setindex!(a::FakeGPU, v, i...) = setindex!(a.d, v, i...)
 Adapt.adapt_storage(::Type{<:FakeGPU}, x::Array) = FakeGPU(x)
 
 @testset "Extension registration seam (fake GPU, no real device)" begin
+    # If a REAL :cuda backend is already registered (CUDA.jl loaded on an NVIDIA
+    # box), keep it: the fake registration below overwrites it, and restoring
+    # only by `delete!` would silently un-register the real device and turn the
+    # "Real GPU execution" testset into a skip on exactly the hardware it targets.
+    prior_cuda = get(CLM._BACKEND_REGISTRY, :cuda, nothing)
     # Register a fake :cuda backend exactly the way ext/CLMCUDAExt.__init__ does.
     CLM._register_backend!(:cuda,
         x -> Adapt.adapt(FakeGPU, x),
@@ -72,11 +79,18 @@ Adapt.adapt_storage(::Type{<:FakeGPU}, x::Array) = FakeGPU(x)
         @test CLM.clm_gpu_device_count() == 4
         @test CLM.clm_bind_local_gpu!() == 0
     finally
-        # Remove the fake registration so we don't leak it into other tests.
-        delete!(CLM._BACKEND_REGISTRY, :cuda)
+        # Remove the fake registration so we don't leak it into other tests,
+        # restoring a real one if it was there before.
+        if prior_cuda === nothing
+            delete!(CLM._BACKEND_REGISTRY, :cuda)
+        else
+            CLM._BACKEND_REGISTRY[:cuda] = prior_cuda
+        end
         CLM.clm_set_backend(:cpu)
     end
-    @test !CLM.clm_backend_registered(:cuda)   # clean slate restored
+    # Clean slate restored: either unregistered, or the real (non-fake) backend.
+    @test CLM.clm_backend_registered(:cuda) == (prior_cuda !== nothing)
+    prior_cuda === nothing || @test !(CLM.clm_ka_backend(backend = :cuda) isa FakeBackend)
 end
 
 @testset "Kernel parity through the backend API (CPU proxy)" begin
@@ -133,13 +147,29 @@ end
     @test res2.gathered[1] == direct              # multi-GPU gather == distributed gather on CPU
 end
 
-# ---- real GPU paths: hardware-unvalidated on this machine -> skip ----------
-@testset "Real GPU execution (skipped — no CUDA/AMD device here)" begin
+# ---- real GPU paths: run only where the backend package + device exist ------
+# Skips on a CPU-only box; on a GPU box (with CUDA.jl / AMDGPU.jl / Metal.jl
+# loaded into the session) it selects the real backend and, for the Float64
+# backends, runs a real kernel on the device against the CPU result.
+@testset "Real GPU execution (skips without a device)" begin
     for sym in (:cuda, :amdgpu, :metal)
         if CLM.clm_backend_functional(sym)
-            # Would run on real hardware; not reachable on this Metal-only/CPU box
-            # for :cuda/:amdgpu. Left as a hook for a GPU CI lane.
             @test CLM.clm_set_backend(sym; require_functional = true) == sym
+            if sym in (:cuda, :amdgpu)            # Float64 hardware (Metal is Float32-only)
+                nc = 7
+                gridcell = collect(1:nc)
+                vp_grc   = [200.0 + 3.0 * g for g in 1:nc]
+                pbot_col = [1.0e5 - 50.0 * g for g in 1:nc]
+                ref = zeros(nc)
+                CLM.compute_forc_q!(ref, gridcell, vp_grc, pbot_col)
+                out = CLM.clm_device_array(zeros(nc))
+                @test eltype(out) == Float64      # no silent Float32 demotion
+                CLM.compute_forc_q!(out, CLM.clm_device_array(gridcell),
+                                    CLM.clm_device_array(vp_grc),
+                                    CLM.clm_device_array(pbot_col))
+                @test !(KA.get_backend(out) isa KA.CPU)
+                @test Array(out) == ref           # device == CPU, bit-identical
+            end
             CLM.clm_set_backend(:cpu)
         else
             @test_skip "backend :$sym not functional on this machine (no device / package)"

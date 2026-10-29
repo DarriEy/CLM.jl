@@ -23,9 +23,9 @@
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf, Statistics
 
-const ROOT = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const ROOT = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 
 # --- per-domain config registry -------------------------------------------------
 # area_km2 / forcing / obs default to auto-detection (nothing) from the Symfluence

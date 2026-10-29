@@ -328,7 +328,8 @@ replays the step-0 call.
   the first year boundary, which is when `altmax_lastyear_indx_col` finally becomes
   non-zero and the FATES root profile stops being a single layer. That transition is
   now wired (bug 6) but is itself unvalidated.
-* **Plant hydraulics** is OFF (its 2-D solvers are FATAL-stubbed by design), so `hmort`'s
+* **Plant hydraulics** — *superseded 2026-10-29: the 1-D path is now validated, see
+  §"PLANT HYDRAULICS" at the end.* (Originally: OFF; its 2-D solvers are FATAL-stubbed by design), so `hmort`'s
   hydro branch, `FatesPlantHydraulicsMod` and the rhizosphere geometry are untested.
 * **`update_history_nutrflux`** and **`GetLUHStatedata`** (land use) are not ported.
 * The residual **HLM** difference (CLM canopy temperature ~3.7 K at the first packed
@@ -1026,3 +1027,744 @@ holds none of the three FATES domains. They live under the Drive root. This is w
 reported "Tropical Aripuana data is absent in this environment" and skipped the tropical
 arm: the domain existed all along. Now honours `SYMFLUENCE_DATA` like every other
 harness (`test/testdata.jl::symfluence_data_root`).
+
+---
+
+# SOIL-BGC COUPLING (2026-10-28): FATES litter -> CLM decomposition, validated
+
+## What was missing
+
+CTSM runs every non-SP FATES case with `use_fates_bgc = .not. use_fates_sp`
+(`controlMod.F90:474-479`) and `soil_decomp_method = 'CENTURYKoven2013'`. The archived
+`fates_parity_1pt` case (and therefore every reference dump in this directory) has the
+coupling on. The port did not. `CLMDriverConfig(use_fates=true)` defaulted
+`use_fates_bgc=false`. FATES computed `bc_out%litt_flux_{lab,cel,lig}_c_si`, but nothing
+outside `src/fates/` read them. No decomposition cascade was built for FATES columns, and
+soil HR (and so `FATES_HET_RESP`) was identically 0. The scorecards above covered FATES
+*vegetation* only.
+
+## What is connected now (Fortran reference -> port)
+
+| Fortran (ctsm5.3.012) | port |
+|---|---|
+| `controlMod` `use_fates_bgc = .not. use_fates_sp`; suplnitro must be `'ALL'` for `fates_parteh_mode=1` | `CLMDriverConfig` / `clm_initialize!(use_fates=true)` default `use_fates_bgc`; `soil_bgc_competition_init!(suplnitro=SUPLN_ALL)`, and `carbon_only` is now passed to `soil_bgc_competition!` (it never was, so fpi = 0 blocked every litter transition) |
+| `init_decomp_cascade_constants`: 6 pools / 8 transitions under FATES-BGC (no CWD) | `CLMDriverConfig.ndecomp_pools/transitions`; `init_decomp_cascade_bgc!(use_fates=true)`; the unused CWD slot of the CN-sized arrays is held at 0 |
+| `clm_varpar`: `nlevdecomp = nlevsoi`; `use_vertsoilc=1`, `decomp_method='CENTURY'` passed to FATES | `clm_fates_init!(use_vertsoilc=true, decomp_method="CENTURY")`, `bc_in.nlevdecomp = nlevsoi` |
+| `init_soil_depths` (real `zi/dz/z`, `dz_decomp_sisl`, `decomp_id(j)=j`) | `fates_init_soil_depths!` (replaces the synthetic 0.1 m layering under FATES-BGC) |
+| `CStateUpdate1` -> `UpdateCLitterFluxes` -> `FluxIntoLitterPools` -> `decomp_cpools_sourcesink` (+ `fates_litter_flux`) | `fates_update_c_litter_fluxes!`, called from `cn_driver_no_leaching!` just before `c_state_update1!` |
+| `NStateUpdate1` -> `UpdateNLitterFluxes` (zeroes N source/sink; N transfer commented out upstream) | `fates_update_n_litter_fluxes!` |
+| `wrap_update_hifrq_hist` (after EcosystemDynamicsPostDrainage: `tot_het_resp/tot_somc/tot_litc`) | `fates_wrap_update_hifrq_hist!`; the hifrq fill moved to the same point of the step |
+| `wrap_update_hlmfates_dyn` `litr_lig_c_to_n_col <- litt_flux_ligc_per_n` | `fates_update_litr_lig_c_to_n!` in the daily step |
+| `CNDriverSummarizeStates` soil C summary at end of step, also for FATES-BGC | the driver's end-of-step soil summary is now gated `use_cn || use_fates_bgc` (FATES columns carry no CN veg C). Without it the reported pools lagged by one step |
+
+The dynamics-driv `w_scalar/t_scalar` pack (already ported, gated on `use_fates_bgc`) now
+receives live decomposition scalars, so FATES litter fragmentation runs on the host's
+soil temperature and moisture, as in Fortran. Default non-FATES paths are unchanged.
+
+## Fortran reference and result
+
+`stage_soilbgc_run.sh` re-runs the archived case with the **uninstrumented**
+`installs/clm/bin/cesm.exe` (FATES is always compiled into CTSM). The setup matches
+`setup_case.sh` (Bow single point, 2002-07-01, 3600 s, `use_lch4` off), with an hourly
+h0 history of HR, pools, scalars and FATES litter fields. Two independent launches
+gave byte-identical output. The scored series are committed as
+`fates_soilbgc_fortran.csv` (240 steps = 10 days):
+
+```bash
+julia +1.12 --project=. scripts/validation/fates_fortran_parity/fates_soilbgc_parity.jl
+```
+
+| field | end (day 10) Fortran / Julia | per-step rel. error from day 2 (max / mean) |
+|---|---|---|
+| HR | 3.8352e-06 / 3.8400e-06 gC/m2/s | 5.2e-2 / 1.9e-2 |
+| LITTERC_HR | 1.5679e-09 / 1.5749e-09 | 8.6e-2 / 1.6e-2 |
+| TOTLITC | 1.6561e-02 / 1.6583e-02 gC/m2 | 2.2e-2 / 6.4e-3 |
+| LIT_MET/CEL/LIG_C | within 2.7e-2 | |
+| TOTSOMC | 910.5446 / 910.5238 gC/m2 | 2.3e-5 / 1.2e-5 |
+| FATES_LITTER_OUT (FATES litter flux into the soil) | 4.4043e-11 / 4.3978e-11 kg/m2/s | 2.7e-2 / 7.1e-3 |
+| FATES_HET_RESP | = HR x 1e-3, both sides | |
+
+Daily HR totals agree within 3.5 % (day 2), tightening to 0.3 % by day 10. Litter enters
+on the same step in both models (nstep 26, the step after the first daily fragmentation).
+**Day 1 is the one open residual.** During the cold-start thaw (nsteps 2-8) Julia's HR is
+0-85 % low, because its top-layer `W_SCALAR` on the 273.15 K melt plateau is 0.02-0.14
+against Fortran's 0.09-0.23. That is the host phase-change residual already documented
+above, not the coupling. `TSOI_1..3` and `T_SCALAR_1..3` track to < 1 % mean.
+
+### Effect on the FATES dynamics scorecard (120-step oracle, same tree +/- this change)
+
+The FATES vegetation now sees the same soil layering, decomposition layers and
+fragmentation scalars as the Fortran reference, and the oracle moves toward Fortran:
+
+| | before | after |
+|---|---|---|
+| site carbon day 1 / day 5 (Fortran 2547.884 / 2600.471) | 2548.095 / 2605.611 (8.3e-5 / 2.0e-3) | 2547.931 / 2605.458 (1.8e-5 / 1.9e-3) |
+| worst field, phases 13-14 (`dndt`) | 2.069e+02 | 2.475e+00 |
+| cohorts day 4 (Fortran 42) | 43 | 43 |
+
+### Still not validated
+* FATES N/P litter coupling: commented out upstream in ctsm5.3 too, so N litter input is 0
+  on both sides and `suplnitro='ALL'` supplements immobilization.
+* MIMICS under FATES (`clm_initialize!` refuses `decomp_method=2` with FATES-BGC).
+* FATES-BGC restarts, and windows longer than 10 days for the soil pools.
+
+---
+
+# FATES CNP (`fates_parteh_mode = 2`, 2026-10-28)
+
+## What the ctsm5.3.012 host actually couples
+
+CNP PARTEH is FATES-internal; the CTSM host connects almost nothing to it, and the port
+now mirrors that rather than inventing a coupling:
+
+| Fortran (ctsm5.3.012) | port |
+|---|---|
+| `bc_in%plant_nh4/no3/p_uptake_flux` are allocated but **never filled** by any host file (no FATES branch in `SoilBiogeochemCompetitionMod`; `plant_ndemand_col = 0` for FATES columns, `CNDriverMod.F90:466-468`) | unchanged: no host uptake. Soil mineral N is not drawn down by FATES plants on either side |
+| `check_allset` endruns CLM CNP unless some `fates_cnp_prescribed_n/puptake > 0` (`FatesInterfaceMod.F90:1728-1736`); testmod `FatesColdPRT2` sets both to 1.0 | `clm_fates_init!`: a parameter file that prescribes uptake is used as-is; the shipped default (both 0) gets the FatesColdPRT2 values instead of aborting |
+| `SetFatesGlobalElements2` uptake modes / `max_comp_per_site` / `fates_np_comp_scaling` (`:901-926`) | derived from the parameter values (previously hard-coded prescribed/trivial) |
+| `UpdateNLitterFluxes`: N litter transfer commented out; `fates_litter_flux = 0` | unchanged (`fates_update_n_litter_fluxes!`, #336) |
+| `wrap_WoodProducts` N products: commented out | nothing to port |
+| `nitrogen_spec` = 1 with nitrif/denitrif else 2, `phosphorus_spec` = 0 (`clmfates_interfaceMod.F90:453-460`) | `clm_initialize!(fates_parteh_mode=2)` -> `_fates_parteh_kwargs` |
+| `FastPRTAllometricCNP` | a no-op stub in Fortran too (`PRTAllometricCNPMod.F90:2005-2015`) |
+| `EDMainMod.F90:707-709` `fates_hist%update_history_nutrflux` | now called (history passed down as `ed_ecosystem_dynamics(...; fates_hist)`). Its never-run port had a level-1 `UndefVarError` (scpf handles only bound at level 2), fixed |
+| `update_history_dyn2` N/P scpf pools and storage fractions (`FatesHistoryInterfaceMod.F90:3338-3341, 3615-3650, 4627-4865`) | filled (`FATES_{VEG,LEAF,FROOT,SAPWOOD,STORE,REPRO}{N,P}_SZPF`, `FATES_STORE{N,P}_TF_{CANOPY,USTORY}_SZPF`) |
+
+Carbon-only runs never reach any of this (all gated on `hlm_parteh_mode == 2` or
+`fates_parteh_mode == 2`).
+
+## Fortran reference and result
+
+`stage_cnp_run.sh` (FatesColdPRT2 settings, 720 hourly steps = 30 days;
+`PARTEH=1` stages the same case carbon-only as a control). The scored series are
+committed as `fates_cnp_fortran.csv`:
+
+```bash
+julia +1.12 --project=. scripts/validation/fates_fortran_parity/fates_cnp_parity.jl
+FATES_CNP_PARTEH=1 julia ... fates_cnp_parity.jl <carbon-only h0.nc> 170   # control
+```
+
+Days 1-10 (steps 1-240), per-step relative error max / mean:
+
+| field | max | mean |
+|---|---|---|
+| FATES_VEGN / VEGP, STOREN / STOREP, LEAFN / LEAFP, FROOTN / FROOTP | 4.3e-3 | 2.9e-3 |
+| FATES_SAPWOODN / P | 9.4e-3 | 6.4e-3 |
+| FATES_STOREN_TF / STOREP_TF | 3.2e-6 | 1.5e-6 |
+| FATES_NH4UPTAKE, NO3UPTAKE, NDEMAND, PDEMAND | 4.0e-3 | 2.4e-3 |
+| FATES_PUPTAKE (net P allocated incl. storage draw-down, a difference of pools) | 1.7e-1 | 4.7e-2 |
+| FATES_VEGC / LEAFC / STOREC / FROOTC | 2.9e-3 / 4.0e-3 / 4.4e-3 / 4.0e-3 | 2.0e-3 / 2.8e-3 / 3.0e-3 / 2.8e-3 |
+| FATES_L2FR | 1.0e-6 | 5.4e-7 |
+| FATES_LAI | 5.4e-3 | 3.7e-3 |
+| FATES_NCOHORTS | 50 / 50 at day 10 | |
+| SMINN (mean), TOTSOMC | 6.4e-2, 2.2e-5 | |
+
+That is the same level as the carbon-only drift on this case, and the CNP-specific
+increment matches: at day 4 (CNP minus carbon-only) VEGC is +2.38e-7 kg/m2 in both
+models, LEAFC +4.0e-8 vs +3.9e-8, STOREC +5.4e-8 vs +5.6e-8, LAI +9.9e-7 vs +1.0e-6.
+
+**Day 11 onward is a threshold bifurcation, not a CNP divergence.** Fortran CNP drops the
+leaves of the five cold-deciduous PFTs on day 11 (COLD_STATUS 2 -> 1, LAI 0.66 -> 0.23).
+Fortran carbon-only does not, and neither does the port in either mode. The cause is
+`EDPhysiologyMod.F90:1150-1153`: leaf-off fires once `model_day > 10` if more than
+`phen_ncolddayslim` (5) of the last 10 daily TVEG24 values are below `phen_coldtemp`
+(7.5 C). Day 6 is the knife edge. Fortran carbon-only has 7.514 C, Fortran CNP has
+7.369 C, and the port has 7.700 C in both modes. The two Fortran runs agree to about
+1e-7 until nstep 139, then jump together in GPP *and soil HR* (a host-side event that
+amplifies the round-off-level CNP perturbation). The port is warmer than both by the
+known ~0.2-0.8 C host vegetation-temperature residual, so it stays on the warm side.
+Over 30 days that gives LAI 0.86 (port) vs 0.28 (Fortran CNP) vs 0.86 (Fortran
+carbon-only).
+
+Not scored: `SMIN_NH4` / `SMIN_NO3`. The port's soil-N summary never fills the column
+NH4/NO3 totals (`use_nitrif_denitrif` is not passed to `soil_bgc_nitrogen_state_summary!`,
+which is a host diagnostic gap outside CNP). The vertically resolved pools and `SMINN` are
+fine.
+
+---
+
+# REDUCED-COMPLEXITY MODES (2026-10-28): SP, nocomp, fixed biogeography
+
+`clm_initialize!(; use_fates=true, use_fates_sp, use_fates_nocomp,
+use_fates_fixed_biogeog)` now switches on the three CTSM `&clm_inparm` FATES modes
+(previously pinned off in `_fates_spike_set_ctrlparms!`). Pass the same `use_fates_sp` to
+`CLMDriverConfig`; `clm_drv!` errors if the two disagree.
+
+## What is connected (Fortran -> port)
+
+| CTSM / FATES | port |
+|---|---|
+| controlMod: `use_fates_bgc = .not. use_fates_sp`; FATES `check_allset`: SP needs nocomp + fixed biogeog | `clm_initialize!` validation; `use_fates_bgc` default |
+| `CLMFatesGlobals1` `use_nocomp` / `use_sp` | `_fates_spike_set_ctrlparms!` |
+| `SetFatesGlobalElements1` patch sizing (nocomp: primary land >= numpft; SP: `max(surf_numpft+surf_numcft, numpft+1)`) | `clm_fates_init!`, `fates_max_patches_per_site` (HLM slot reservation) |
+| `clm_varpar_init` FATES branch: `surfpft_ub = surf_numpft+surf_numcft-1`, `maxveg = maxsoil_patches-1` | `clm_initialize!` (mode paths only) |
+| clmfates_interfaceMod init: `pft_areafrac = wt_nat_patch(g, 0:surfpft_ub)`, sum-to-1 check; `fates_hlm_pft_map` from the param file | `hlm_pft_areafrac` -> `bc_in.pft_areafrac` / `baregroundfrac` |
+| initGridCellsMod: SP builds every natpft slot with `ptype = m` | `set_landunit_veg_compete!` SP branch |
+| clm_initializeMod: `interpMonthlyVeg` + `SatellitePhenology(inactive_and_active%soilp)` before `init_coldstart`; clm_driver.F90:1052 the same every `doalb` step | `_fates_sp_host_phenology!`, driver SP block |
+| `hlm_sp_tlai/tsai/htop(ft) = tlai/tsai/htop(patchi+ft)` (htop floor 0.01) in `init_coldstart` and `dynamics_driv` | `fates_pack_bcin_sp!` |
+| `wrap_update_hlmfates_dyn` SP: FATES totals -> `tlai/tsai/htop_hist_patch` | `fates_flush_hlm_canopy!`, `fates_unpack_bcout_canopy_structure!` |
+| history `FATES_NOCOMP_PATCHAREA_PF` / `_NPATCHES_PF` / `_BURNEDAREA_PF` | `update_history_dyn2!` |
+
+Two defects surfaced on the way and are fixed here: (1) the non-methane
+`decomp_rate_constants_bgc!` call never passed `use_fates`, so under FATES soil BGC the
+CWD->litter kernel stored at cascade index -1 inside `@inbounds`, corrupting the heap (it
+showed up as intermittent GC/inference segfaults; `--check-bounds=yes` finds it); (2) the
+dyn2 history handle fetch indexed `hvars[0]` for variables the registry skips in SP mode.
+The FATES clock fix of PR #341 (`fates_get_and_set_time!`) is cherry-picked; the numbers
+below include it.
+
+## Fortran reference and result
+
+`stage_fates_modes_run.sh` (`MODE=sp|nocomp|fixedbg`) runs the archived case with the
+mode's namelist overrides (SP also needs `soil_decomp_method='None'`) and an hourly h0;
+the scored series are committed as `fates_<mode>_fortran.csv`. Score with
+`fates_modes_parity.jl <mode> [ref] [nsteps]`. 240 steps (10 days from 2002-07-01),
+relative error of the window mean (|J-F|/|F|):
+
+| field | SP | nocomp + fixed | fixed only |
+|---|---|---|---|
+| patches / cohorts | 5/4 every step, = F | 6/8 vs F 6/7 at day 10 | 2/11 every step, = F |
+| patch area by PFT | 5e-9 - 2e-8 | 5e-9 - 2e-8 | (1 patch) |
+| NPLANT by PFT | 2e-9 - 2e-8 | <= 4e-7 | <= 4e-6 |
+| FATES_VEGC | 7e-9 | 3.1e-3 | 3.4e-3 |
+| FATES_LAI | 2e-8 | 4.5e-3 | 4.5e-3 |
+| TLAI | 1.2e-3 | 8.2e-3 | 5.0e-3 |
+| FATES_GPP | +9.0 % | +3.2 % | +3.7 % |
+| FSH | +2.0 % | +3.2 % | +6.0 % |
+| EFLX_LH_TOT | +2.9 % | -0.8 % | -0.5 % |
+
+* **SP** reproduces the FATES state to round-off: with prescribed LAI there is no
+  allocation feedback, so it isolates the host. The GPP and flux gaps are the same host
+  residual the default mode shows (top-layer thaw on day 1, see the soil-BGC section).
+* **nocomp**: every patch has the right PFT and area; the one-cohort difference at day 10
+  is a recruitment threshold crossed one day apart under the ~3 % GPP offset.
+* **fixed only**: identical census for all 10 days; only the 4 surfdata PFTs that survive
+  `min_nocomp_pftfrac_perlanduse` are seeded, as in Fortran.
+
+### Still not validated
+SP/nocomp restarts, LUH-driven fixed biogeography (`use_fates_luh`), dry deposition with
+FATES-SP (CTSM disables it too), and runs longer than 10 days.
+
+## The host bias behind the SP GPP gap (2026-10-29): four HLM<->FATES coupling defects
+
+The table above was taken before this fix. SP mode was the test bed: prescribed LAI, FATES
+state matched to ~1e-8, 10 days. A second SP Fortran run with `hist_dov2xy = .false.`
+(per-patch hourly h0: `TV SABV FSA FSR FSRVD/ND/VI/NI FCEV FCTR FSH_V USTAR DISPLA SNOCAN
+LIQCAN QINTR QDRIP ...`) was compared against the port patch by patch. Each diverging
+quantity in the chain, in the order found:
+
+1. **Radiation: visible reflectance 0.08 vs 0.20** (FSRVD/FSDSVD). NIR matched, so the
+   leaf/stem optics were fine. `fates_pack_bcin_radiation!` hard-coded
+   `bc_in%fcansno_pa = 0`, but Fortran `wrap_canopy_radiation`
+   (clmfates_interfaceMod.F90:2798) passes the host `fcansno(p)` (CanopyHydrologyMod
+   `BulkDiag_FracWet`), and `FatesNormanRadMod` (F90:207-212) blends `rho/tau` toward
+   the snow optics with it. Early July 2002 at Bow has snow on the canopy, so the port's
+   canopy absorbed about 7 % too much (SABV) and GPP was 9 % high. Fix: pass
+   `waterdiagnosticbulk.fcansno_patch[p]`.
+2. **Turbulence: DISPLA 1.10 vs 2.62 m.** `set_z0m_displa!` overwrote the FATES
+   `z0m/displa` of FATES patches every step with the host `z0mr/displar * htop(itype)`.
+   Fortran calls `clm_fates%TransferZ0mDisp` and then sets only `.not. patch%is_fates`
+   patches (BiogeophysPreFluxCalcsMod.F90:162-173; `patch%is_fates = patchi+1:patchf`,
+   clmfates_interfaceMod.F90:934). Fix: `fates_transfer_z0m_disp!` plus a
+   `patch_is_fates` mask passed from `clm_drv!`. Per-patch DISPLA and USTAR now match.
+   (The gridcell `USTAR` still differs because Fortran leaves the bare patch's `fv` at
+   spval, so its average skips that patch.)
+3. **Canopy water: LIQCAN 0.04 vs 0.42 mm** on the first rain step, with QINTR/RAIN at
+   23 % vs 100 %. `use_clm5_fpi` was set only inside `clm_run!`. Every harness that
+   drives `clm_initialize!` + `clm_drv!` directly (all the FATES parity scripts) ran the
+   CLM4 interception form `0.25*(1-exp(-0.5*lai))` (CanopyHydrologyMod.F90:536-538).
+   That is CTSM's code fallback; the clm5 namelist default is `.true.`. Fix:
+   `clm_initialize!(; use_clm5_fpi = true)`. This was behind FCEV -45 % and FSH_V +15 %
+   on the tree patches.
+4. **Cold start: the HLM ran on the surfdata patch layout for the first step(s).**
+   `col.is_fates` was only set by the scripts after `clm_initialize!` returned, so the
+   cold-start `wrap_update_hlmfates_dyn` transfer (FATES patch weights, elai/esai,
+   z0m/displa) never ran. Fortran `clmfates_interfaceMod::init` (F90:814) flags every
+   istsoil column before `init_coldstart`, and `clm_initialize!` now does the same.
+
+5. **Daily-step re-weighting happened mid-step.** `fates_set_filters!` wrote the new
+   FATES patch weights into `wtcol` during the daily step. Fortran
+   `wrap_update_hlmfates_dyn` writes only `patch%wt_ed`; `wtcol = wt_ed` is applied by
+   `dynSubgrid_driver -> dyn_ED` (dynEDMod.F90:30-38) at the top of the next step,
+   before `BeginWaterColumnBalance`. Re-weighting mid-step moved per-patch canopy water
+   and plant storage between `begwb` and `endwb`. Once (3) put real water on the
+   canopy, that showed up as a 1.08e-4 mm errh2o at the step-25 daily step in
+   `test_fates_planthydro_coupling.jl`. `fates_apply_deferred_activation!` now performs
+   `dyn_ED`. The SP scores are unchanged.
+
+**Default (non-FATES) path.** Items 1, 2, 4 and 5 are FATES-only. Item 3 is a real
+default-behaviour change for any caller of `clm_initialize!` + `clm_drv!` that did not
+set `use_clm5_fpi` itself. It is not a change for `clm_run!` (and so not for
+`parity_run_domain.jl`) or for `fortran_parity_common.jl`; both already set it. Bow
+2003 and Stillwater 2003 annual parity are bit-identical before and after. Of the
+direct-`clm_drv!` harnesses, Stillwater (single-step and 24-step; snow season) and
+the lake harness are identical. Aripuana changes, toward Fortran at the rain steps:
+
+| `fortran_parity_aripuana.jl` step | 3 | 4 | 5 | 6 | 18 | 20 | 22 |
+|---|---|---|---|---|---|---|---|
+| max rel, before | 1.3e-2 | 3.0e-3 | 7.7e-3 | 5.5e-3 | 5.5e-3 | 7.9e-3 | 1.0e-2 |
+| max rel, after | 5.7e-7 | 4.7e-7 | 5.5e-7 | 7.1e-7 | 4.8e-3 | 7.0e-3 | 4.9e-3 |
+
+In `fortran_parity_aripuana_coldstart.jl`, the soil-water parity (`Wtot`) gets worse
+at steps 1-5 (step 2: 4.2e-4 -> 7.5e-4) and better at steps 18-24 (step 22: 1.2e-3 ->
+6.1e-4). This is not a balance leak; the column still conserves. It comes from the
+known cold-start artifact: Fortran's veg filters are empty on the first steps, while
+the port intercepts from step 1, and with CLM5 interception the port now holds more
+of the early rain on the canopy.
+
+### After (240 steps, relative error of the window mean; before in parentheses)
+
+| field | SP | nocomp + fixed | fixed only |
+|---|---|---|---|
+| FATES_GPP | +0.69 % (+9.0 %) | +0.56 % (+3.2 %) | +0.99 % (+3.7 %) |
+| FSH | +0.15 % (+2.0 %) | +2.0 % (+3.2 %) | +2.5 % (+6.0 %) |
+| EFLX_LH_TOT | +0.75 % (+2.9 %) | -0.79 % (-0.8 %) | -0.92 % (-0.5 %) |
+| TLAI | 1.7e-8 (1.2e-3) | 4.6e-3 (8.2e-3) | 1.8e-3 (5.0e-3) |
+| FATES_VEGC | 7e-9 | 7.4e-4 (3.1e-3) | 1.0e-3 (3.4e-3) |
+| cohorts at day 10 | = F | 7 = F (was 8 vs 7) | = F |
+
+SP canopy temperature (TV, 10-day mean): +0.55 K before, +0.02 K after. Per patch, every
+patch is within 2e-5 relative.
+
+**Residual (not fixed here):** SP `SNOCAN` is still about 8 % low on the tree patches. The
+port's dew/evaporation update in `canopy_fluxes.jl` re-splits the total canopy water by
+the existing phase amounts. Fortran (CanopyFluxesMod.F90:1601-1620) takes evaporation
+from `liqcan` first when `t_veg > tfrz`, and from `snocan` first otherwise. The port's
+version is a deliberate conservation/AD choice (#214, #219), and it is on the default
+path, so it is left for a separate change. The first two SP steps also differ: Fortran
+has `SABV = 0` there.
+
+To reproduce, stage `MODE=sp` with `stage_fates_modes_run.sh`, adding
+`hist_dov2xy = .false.` and the extra `hist_fincl1` fields to the staged `lnd_in`.
+
+---
+
+
+---
+
+# PLANT HYDRAULICS (2026-10-29): `use_fates_planthydro`, 1-D Taylor solver
+
+## What was missing
+The solver, the water transfer functions and the FATES-side lifecycle were ported, but
+the host never ran them: no InitHydroGlobals / InitHydrSites / HydrSiteColdStart at init,
+`hydraulics_drive` ran without the host's `total_plant_stored_h2o_col` update, the FATES
+root uptake never reached CLM's soil (CLM kept removing `rootr x qflx_tran_veg`), and
+`UpdateH2OVeg` / `RestartHydrStates` were not called / not ported.
+
+## What is connected now (Fortran reference -> port)
+| Fortran | port |
+|---|---|
+| `SetFatesGlobalElements2` -> `InitHydroGlobals` | `clm_fates_init!(use_planthydro=true)` |
+| `clm_fates%init` -> `InitHydrSites` (after `init_soil_depths`) | `clm_fates_init!` |
+| `init_coldstart` soil pack + `HydrSiteColdStart` (before `init_patches`) | `fates_pack_bcin_hydro_soil!(coldstart=true)` + `HydrSiteColdStart` |
+| `prep_canopyfluxes`: `qflx_transp_pa = 0` | `clm_drv!` canopy-flux setup |
+| `wrap_hydraulics_drive` (CanopyFluxesMod.F90:1635) | `fates_hydraulics_step!` (pack, drive, `total_plant_stored_h2o_col`, hydraulics history) |
+| `ComputeRootSoilFlux` (HydrologyNoDrainageMod.F90:343) | `fates_compute_root_soil_flux!` between the root sink and `soil_water!` |
+| `dynamics_driv` soil hydraulic pack (:1184) | `fates_daily_dynamics_step!` |
+| `update_hlm_dynamics` -> `UpdateH2OVeg` (EDCanopyStructureMod.F90:2073) | `update_hlm_dynamics!` |
+| `wrap_update_hlmfates_dyn` plant water (:1552) | daily step + cold start |
+| `RestartHydrStates` (:312-528) | `RestartHydrStates` (shares `_hydr_set_soil_wtfs!` with the cold start) |
+| BalanceCheck gridcell bypass under planthydro (CTSM#1314) | `balance_check!(use_fates_planthydro=...)` |
+
+Two Fortran behaviours the port reproduces deliberately:
+* `call UpdateH2OVeg(sites(s),bc_out(s),bc_out(s)%plant_stored_h2o_si,1)` passes the
+  "previous" water by reference, aliased to the value UpdateH2OVeg zeroes and rewrites,
+  so its conservation check compares the new value with itself and never fires (it could
+  not hold at the cold start anyway). The port re-diagnoses without the check.
+* Grasses (`allom_smode = 2`): ctsm5.3.012's FATES `bsap_allom` never assigns its
+  intent(out) `sapw_area`, and nothing guards it (no `woody` checks in the hydraulics, no
+  conductance clamp, no `-finit-*` flags in the `-O` build), so `UpdatePlantKmax` /
+  `UpdatePlantHydrLenVol` read uninitialized stack memory. Measured by relinking the
+  stock `cesm.exe` from its own objects: an unmodified relink reproduces the stock h0
+  bit-for-bit; adding one `write` of `a_sapwood` shows 7.46 m2 in UpdatePlantKmax and
+  ~1e-314 (sometimes ~0.3) in UpdatePlantHydrLenVol, and that write alone changes the run
+  (H2OSOI by up to 0.024). The stock planthydro run is therefore not reproducible and
+  cannot be a parity target. Upstream FATES fixed it with `SapwoodAreaGrass` (basal
+  cross-section pi (d/2)^2); the port carries that fix (FatesAllometryMod.jl).
+
+## The reference is a PATCHED Fortran
+Because the stock ctsm5.3.012 result depends on uninitialized memory, the planthydro
+reference is produced by `cesm.exe` relinked with one SourceMod,
+`SourceMods_planthydro/FatesAllometryMod.F90`: the ctsm5.3.012 file plus upstream
+FATES's `SapwoodAreaGrass` copied verbatim from NGEET/fates `main` and called from the
+`case(2)` branch of `bsap_allom` (`diff` against the stock file shows only those lines).
+Woody PFTs and every non-planthydro path are unaffected (nothing else reads the grass
+`sapw_area`).
+
+```bash
+julia scripts/validation/fates_fortran_parity/build_patched_cesm.jl \
+    $SYMFLUENCE_DATA/runs/fates_hydro_patched/exeA \
+    scripts/validation/fates_fortran_parity/SourceMods_planthydro/FatesAllometryMod.F90
+EXE=$SYMFLUENCE_DATA/runs/fates_hydro_patched/exeA/cesm.exe STEPS=240 \
+    bash scripts/validation/fates_fortran_parity/stage_planthydro_run.sh
+julia --project=. scripts/validation/fates_fortran_parity/fates_planthydro_parity.jl \
+    export $RUN/fates_hydro_1pt.clm2.h0.2002-07-01-00000.nc
+```
+`build_patched_cesm.jl` recompiles the given sources with the exact commands in the stock
+case's build log and relinks a private executable; the stock build tree is only read.
+Determinism (`compare_h0_bitwise.jl`, all 591 h0 variables): two runs of the patched
+executable are bit-identical, and so is a third built with an extra `write` of
+`a_sapwood` in FatesPlantHydraulicsMod (which prints the grass area as pi (d/2)^2, e.g.
+1.644e-5 m2 at d = 0.458 cm).
+
+## Fortran reference and result (patched reference)
+`fates_planthydro_fortran.csv` is the 240-step hourly extract of the patched run. Median
+per-step relative error (ratio = sum Julia / sum Fortran over the window):
+
+| field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
+|---|---|---|---|
+| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.26 |
+| leaf psi, woody mean | 1.6e-4 | 1.7e-2 | 0.56 |
+| leaf psi, grass PFT 12 / 14 | 3.2e-4 / 5.5e-4 | 9.2e-2 / 0.20 | 0.21 / 9.0e-2 |
+| leaf / stem water content | 4e-5 / 2e-5 | 1.8e-3 / 1.6e-3 | 0.10 / 0.07 |
+| cohort hydraulic btran | 4.1e-4 | 4.5e-2 | 0.75 |
+| FATES_VEGH2O | 2.8e-5 | 1.1e-2 | 4.1e-2 |
+| QROOTSINK layer 1 (ratio) | 2.1e-2 (1.06) | 5.8e-2 (1.02) | 0.23 (1.00) |
+| SOILLIQ layer 1 / 4 | 4.4e-3 / 0.14 | 4.3e-3 / 5.5e-2 | 2.1e-3 / 2.7e-3 |
+| EFLX_LH_TOT (ratio) | 0.14 (1.19) | 2.2e-2 (0.90) | 3.6e-2 (0.96) |
+| FATES_GPP (ratio) | 2.5e-2 (1.13) | 4.7e-2 (0.90) | 0.33 (0.32) |
+| QVEGT (ratio) | 0.11 (1.11) | 0.16 (0.80) | 0.45 (0.16) |
+| BTRAN (host, ratio) | 0.60 (1.60) | 0.54 (1.44) | 0.61 (0.51) |
+
+With the patched reference the grasses track on day 1 like the woody PFTs, and plant
+water storage agrees to 3e-5. The post-day-3 GPP / transpiration shortfall remains.
+
+### Tracing the post-day-3 shortfall
+* It is not demography. Both models keep 14 cohorts / 2 patches for all 10 days (no
+  recruitment survives with hydraulics on). Per-PFT density, leaf C and storage C agree
+  to < 0.4 % (woody) and < 6 % (grass) through day 10.
+* It is none of the daily-step suspects. Cohort fusion/termination never fires; the
+  daily soil pack, `UpdateSizeDepPlantHydStates`, `UpdateSizeDepRhizVolLenCon` and
+  `UpdateH2OVeg` were re-diffed against the Fortran line by line and match.
+* The first quantities to diverge (scan of every scored field, threshold 5 %) are the
+  HOST soil liquid in layers 1-4 at nstep 2 (cold-start thaw: SOILLIQ_1 2.93 vs 3.34
+  kg/m2) together with LH / QVEGT. The FATES root uptake by layer follows at nstep 19-22
+  (first daytime uptake), then cohort btran / leaf psi at the day-2 daily step (n 26) and
+  every PFT by n 48-50. This is the documented host top-soil phase-change residual (see
+  §"SOIL-BGC COUPLING"), now propagating through the rhizosphere into the plant water.
+  From day 2 the Fortran per-PFT btran becomes erratic hour to hour (0 to 0.74), which the
+  port does not reproduce, and those bursts dominate the Fortran GPP / QVEGT sums.
+  Not yet closed.
+  **Update (host/coldstart-thaw):** the soil-liquid divergence was NOT phase change. A
+  per-step dump of the soil-temperature solve (`SoilTemperatureMod` instrumented, nsteps
+  0-4) shows tk, cv, fact and the phase-change bookkeeping identical; the first differing
+  term is the ground's absorbed solar at nstep 0, SABG 339 vs 387 W/m2 (FSDS 484), and so
+  `hs_soil`. Two cold-start radiation defects: (1) `init_surface_albedo_cold!` overwrote
+  Fortran InitCold's albgrd = albgri = 0.2 (SurfaceAlbedoType.F90:370-371) with
+  vis 0.20 / NIR 0.40; (2) the harness ran the albedo solve from nstep 0, whereas the NUOPC
+  cap skips it on nsteps 0 and 1 (lnd_comp_nuopc.F90:830-841), so Fortran radiates nsteps
+  0-2 with the InitCold albedos (SABV = 0). With both fixed (and #349's host coupling
+  fixes) SOILLIQ_1..4 match to 4 digits through nstep 5 and to < 5 % on every step; root
+  uptake first passes 5 % at nstep 21-45 instead of 2. GPP / QVEGT after day 3 are
+  unchanged (0.32x / 0.16x), so that shortfall is not the host soil water.
+* Host `BTRAN` (biomass-weighted over all cohorts) is 60 % high from step 1 while every
+  per-PFT cohort btran matches to < 1e-3, so that offset sits in the host-side
+  aggregation or in the harness's l2g weighting. Still open.
+* The site is extremely water-stressed (cold-start frozen soil; leaf psi ~ -15 MPa), so
+  transpiration is ~1e-8 mm/s and QVEGT / BTRAN relative errors are on near-zero values.
+* Column water balance with hydraulics on (plant water in the budget): |errh2o| < 6e-13 mm
+  on every non-daily step; the daily steps leave up to 6.8e-5 mm (the daily dynamics do
+  not conserve the stored plant water exactly, and Fortran's check of that is the inert
+  one above). Step 1 carries a 0.118 mm residual that is identical with hydraulics off
+  (the first daily step re-weights the cold-start patches mid-step).
+
+---
+
+# LAND USE (2026-10-29): logging, LUH2 transitions and harvest, lupft, potential veg
+
+`clm_initialize!` takes the CTSM `&clm_inparm` land-use options: `fates_harvest_mode`
+(`no_harvest` | `event_code` | `luhdata_area` | `luhdata_mass`), `use_fates_luh`,
+`use_fates_lupft`, `use_fates_potentialveg`, `fluh_timeseries`, `flandusepftdat`, plus
+`fates_paramfile` (a FATES `.cdl`). All default off; the default path is unchanged.
+
+## What is connected (Fortran -> port)
+
+| CTSM / FATES | port |
+|---|---|
+| CLMFatesGlobals1 `fates_harvest_mode` -> `use_logging` / `use_lu_harvest` / `num_lu_harvest_cats`; `use_luh2`, `num_luh2_states/transitions`, `use_fates_potentialveg` | `fates_harvest_ctrl`, `_fates_spike_set_ctrlparms!` |
+| `dynFATESLandUseChangeMod` (`dynFatesLandUseInit` / `dynFatesLandUseInterp`: 12 states, 108 transitions, 5 harvest vars, uninterpolated, END_OF_TIMESTEP year, zero before the series) | `src/fates/fates_driver_landuse.jl` (`DynFatesLandUse` in `inst.fates.luh`, on the ported `dyn_file_io.jl`) |
+| `GetLandusePFTData` (`frac_primr/secnd/pastr/range`, `frac_brgnd`) -> `bc_in%pft_areafrac_lu` / `baregroundfrac` under fixed biogeog + LUH | `get_landuse_pft_data!`, `clm_fates_init!` |
+| `init_coldstart` / `dynamics_driv` pack of `hlm_luh_*` and `hlm_harvest_*` | `fates_pack_bcin_landuse!` (cold start and every daily step) |
+| build-namelist: `use_fates_lupft` => luh + nocomp + fixed biogeog (+ flandusepftdat); LUH harvest modes and potentialveg => luh; potentialveg reads no file | `clm_initialize!` |
+
+`use_fates_lupft` has no runtime switch in CTSM either (no `hlm_use_lupft`): it only sets
+those namelist defaults. `fates_harvest_mode = 'landuse_timeseries'` (harvest from the CLM
+`flanduse_timeseries` via dynHarvestMod) is not connected and errors.
+
+## Data
+
+No LUH2 files were staged. The files `namelist_defaults_ctsm.xml` names for FATES are on
+the CESM inputdata server at 4x5: the 1850-2015 LUH2 timeseries (339 MB) and the landuse x
+PFT map (1.9 MB). Both were fetched and cut to the 4x5 cell nearest the site (50N 245E) by
+`make_luh_1pt.jl`. The 1x1 results (226 kB) are committed in `data/fates/luh_1pt/` and used
+by both models. The 2002 states of that cell are 35 % primary forest, 28 % secondary
+forest, 18 % C3 annual crop and smaller pasture / rangeland / urban / other-crop shares, so the cold
+start builds five land-use patches. Annual transitions are 1e-8 to 7e-4, and the cell has
+`primf_harv` = 3.1e-3, `primf_bioh` = 9.2e6 kgC.
+
+## Fortran reference and result
+
+`stage_fates_landuse_run.sh` (`MODE=logging|luh|luh_area|luh_mass|lupft|potveg`) runs
+the archived case. The FATES parameter file is the default with the logging event moved
+to 2002-07-04 (`fates_landuse_logging_event_code = 20020704`; the default -30 is day 30)
+and `fates_landuse_logging_dbhmin = 0.1` cm, so that the cold-start saplings qualify. The
+same `.cdl` edit is applied on the Julia side. The scored series are committed as
+`fates_lu_<mode>_fortran.csv`; score them with `fates_landuse_parity.jl <mode>`. The land-use
+diagnostics are recomputed from the port's site state with the Fortran history formulas.
+Relative error of the 10-day window mean:
+
+| field | logging | luh (= luh_area = luh_mass) | lupft | potveg |
+|---|---|---|---|---|
+| patches / secondary patches | = F every step | 7 / 2, = F | 13 / 4, = F | 2 / 0, = F |
+| patch area by land use | 1.5e-3 - 1.9e-3 | 1e-9 - 4e-9 | 2e-9 - 2e-8 | (primary only) |
+| secondary forest fraction | 1.9e-3 | 1e-9 | 2e-9 | - |
+| logging disturbance rate | 1.9e-3 | (no event) | - | - |
+| LU-transition matrix / LUC disturbance | - | 1.4e-7 / 7e-9 | 1.4e-7 / 3e-8 | - |
+| LUC wood product flux / stock | - | 1.2e-3 / 9e-4 | 1.6e-3 / 1.2e-3 | - |
+| FATES_VEGC | 1.9e-3 | 1.7e-3 | 1.2e-3 | 2.0e-3 |
+| FATES_LITTER_IN | 2.1e-3 | 4.7e-2 | 1.0e-3 | 5.9e-2 |
+| FATES_GPP | +3.9 % | +3.2 % | +3.1 % | +3.9 % |
+
+* **Logging.** The 2002-07-04 event moves 63.4 % of the site to secondary land (F
+  0.63439, J 0.63559). Its litter pulse matches to 1e-3. One fix was needed: in event-code
+  mode ctsm5.3.012's FATES gates direct logging on `cur_harvest_tag == 0` and never sets
+  the tag (an uninitialized local). The port had chosen 0, which turns direct logging on;
+  the reference `cesm.exe` behaves as "not applicable" (2), so there is no direct
+  mortality. With 0 the port lost 11 % more vegetation C and had 2.4x the logging-day
+  litter; with 2 both agree to 2e-3. Later FATES sets a bypass tag here and does log
+  directly. Harvested wood is 0 in both models: the saplings carry no trunk-size CWD.
+* **LUH2 harvest is a no-op in ctsm5.3.012.** The host passes the LUH2 names
+  (`primf_harv`, ..., `primf_bioh`, ...) as `hlm_harvest_catnames`, but FATES'
+  `get_harvest_rate_area` / `get_harvest_rate_carbon` match `HARVEST_VH1` ... `HARVEST_SH3`.
+  Every rate comes out 0, and `luhdata_area` / `luhdata_mass` give the same result as `luh`
+  in Fortran, and in the port, which keeps the names verbatim.
+* **lupft** builds 13 nocomp patches across the five land-use types from the landuse x
+  PFT map, with areas matching to ~1e-8.
+* **potveg.** Two Fortran runs of the identical potveg case differed: the first one
+  diverged from day 2 (litter -13 %, treefall -29 % by day 3), and a rerun matches the
+  no-LUH case. That is nondeterminism in the reference build, not in the port, and
+  the rerun is committed. Against the rerun, potveg matches the default mode, with one
+  primary patch and no transitions.
+
+The GPP / FSH offsets, and the 5 % day-2 litter gap in the non-logging modes, are the host
+residual that the default mode also shows (see the soil-BGC section). Not validated: restarts with land use, potential-veg -> LUH switch-on
+(`transition_landuse_from_off_to_on`), carbon-mode harvest debt with nonzero rates (they
+cannot occur in this release), and runs longer than 10 days.
+
+---
+
+# SPITFIRE FIRE (2026-10-28): host fire weather + mode 1 vs Fortran
+
+## What changed on the host
+* **24-hour fire-weather means.** SPITFIRE reads `bc_in%precip24_pa / relhumid24_pa /
+  wind24_pa` (and the FATES `tveg24` running mean). The port used to fill them from a
+  single-step stand-in in `clm_driver.jl` (this step's rain, a Tetens RH, `|u,v|`), the
+  same value for every patch. They now come from the host accumulators, as in Fortran:
+  `PREC24` / `RH24` (Wateratm2lndBulkType) and `WIND24` (atm2lndType) are accumulMod
+  `runmean`s with a 1-day period and init values 0 / 100 / 0. Only active patches update,
+  each with its own step counter (`fates24_nsteps_patch`), so a FATES patch that switches
+  on mid-run starts a fresh mean. `dynamics_driv` copies `prec24/rh24/wind24_patch(ifp +
+  patchi(c))` into `bc_in` for every vegetated FATES patch (`fates_pack_bcin_daily!`).
+  The fields are allocated only under `use_fates`.
+* **Modes 2-5 host (FATESFireDataMod).** `clm_initialize!(fates_spitfire_mode>1, flnfm,
+  fhdm)` reads the lightning / population-density streams (`FATESFireData`),
+  `FireInterp` runs every step, `lnfm24` is a 1-day runmean, and the daily pack sets
+  `lightning24 = lnfm24*24` (all modes > 1) and `pop_density = forc_hdm` (modes >= 3).
+* `clm_initialize!(fates_spitfire_mode=...)` now reaches `clm_fates_init!`.
+* The FATES clock fix from #341 (`fates_get_and_set_time!`, cherry-picked) is required:
+  without it FATES sits on 2 January and the fire-season comparison is meaningless.
+
+## Fortran reference
+`stage_spitfire_run.sh` runs the archived `fates_parity_1pt` case (Bow at Banff,
+2002-07-01, 3600 s, use_fates_bgc) with `fates_spitfire_mode=1` for 730 days and a
+daily-mean h0 of the fire fields. Variants: `CDL=<cdl>` swaps the FATES parameter file;
+`SPITFIRE_MODE=2..5` adds the synthetic uniform lightning/popdens streams (0.000457
+strikes/km2/hr). Committed extracts: `fates_spitfire_fortran.csv` (mode 1, default
+params), `fates_spitfire_thr5_fortran.csv` (mode 1, `fates_fire_threshold` 50 -> 5 kW/m,
+450 days) and `fates_spitfire_m2thr5_fortran.csv` (mode 2, same threshold).
+`fates_spitfire_parity.jl` steps the port over the same window and scores it.
+
+With default parameters the Fortran site never burns: fire intensity peaks at
+24.3 kW/m (2003-08-04..16, days 400-412, the 2003 dry spell), under the 50 kW/m
+`fates_fire_threshold`. The threshold-5 variant burns on days 402-412 and exercises
+area burnt, crown scorch, cambial kill, fire mortality and the fire carbon flux.
+
+Note on forcing alignment: DATM indexes the standard-calendar `clmforc.2004.nc` by
+elapsed time under the NO_LEAP model calendar, so from 2004-03-01 the model reads the
+previous calendar day. The parity script reproduces this (`datm_time`); aligning by
+date puts every day after 2004-02-28 one day off (TBOT ~2 K).
+
+## Result (mode 1, default parameters, 730 days)
+Host drivers (daily means): WIND, PRECIP, TBOT within 6e-8, RH within 1.1e-3.
+
+Fire weather and fuel moisture, which depend only on weather and `tveg24`, track:
+
+| window | NI mean F / J | FDI mean F / J | fuel moisture by class (mean rel) |
+|---|---|---|---|
+| days 1-40 | 275.9 / 280.1 (1.5 %) | 0.0876 / 0.0888 | 2e-5 .. 4e-3 |
+| days 380-420 (2003 fire season) | 2673 / 2672 (0.04 %) | 0.5415 / 0.5401 | |
+
+The Nesterov index rises, peaks (5611 / 5627 on day 412) and resets (day 413) on the
+same days. The day-1-10 NI gap comes from `TVEG24` (2.07 / 2.84 C on day 2), the
+cold-start canopy temperature residual, not from the fire code.
+
+Fuel **amount** and **composition** do not match, and the gap grows with the vegetation
+gap. FATES_VEGC and FATES_NPATCHES separate after about 5 weeks (Julia makes 9 patches by
+day 90, Fortran waits until day ~400; Fortran drops 0.02 kgC/m2 of live carbon into leaf
+litter on day 39, Julia does not). This happens identically with fire off (Fortran fire-on
+VEGC equals fire-off VEGC to every digit until the first burn), so it is the FATES
+demography residual tracked in `docs/FATES_MULTIYEAR_ENERGY.md`, not SPITFIRE. During the
+2003 fire season Julia carries 27 % more ground fuel (live grass +25 %), a 7 % lower
+effective wind (fewer trees), and therefore about 1.7x the ROS and 2.2x the intensity.
+It crosses the 50 kW/m threshold on days 409-412 while Fortran (24 kW/m) does not:
+
+| | Fortran | Julia |
+|---|---|---|
+| days with FI > 0 | 13 (400-412) | 13 (400-412) |
+| peak FI | 24.3 kW/m (day 411) | 46.5 kW/m (day 411) |
+| burn days (FI > 50 kW/m) | 0 | 4 (409-412), total burned fraction 1.2e-4 |
+
+SFMainMod (fire weather, ROS, fuel consumption, area burnt, scorch, crown/cambial damage,
+post-fire mortality), SFNesterovMod and SFFireWeatherMod were re-read line by line
+against the Fortran; no discrepancy was found. FatesFuelMod was not re-read, but its
+per-class fuel moisture output matches to < 0.5 %. The difference in the burn decision
+comes from the fuel load.
+
+## Burning chain (mode 1, `fates_fire_threshold` = 5 kW/m, 450 days)
+With the lowered threshold both models burn during the 2003 dry spell:
+
+| | Fortran | Julia |
+|---|---|---|
+| burn days | 11 (402-412) | 12 (401-412) |
+| total burned fraction (days 400-413) | 1.29e-4 | 3.42e-4 (2.65x) |
+| fire C loss to atmosphere | 4.6e-6 kgC/m2 | 1.8e-5 kgC/m2 (3.8x) |
+| fuel consumed (sum of daily) | 1.089 | 1.376 (1.26x) |
+| fire mortality, FATES_MORTALITY_FIRE_SZ summed | 0.0129 | 0.0495 m-2 yr-1 |
+
+The ratios follow from the fuel load. Julia carries 27 % more ground fuel, which gives
+1.6-2x the ROS. Burned area scales as (ROS x duration)^2, hence 2.65x. Higher intensity
+raises scorch height, which drives the crown and cambial kill. The fire chain switches on
+and off on the same days in both models.
+(`FATES_MORTALITY_FIRE_SZ` is a level-2 history field. The level-1 harness never reaches
+the dyn2 reset of the site `fmort_rate_*` accumulators, so the script reports the daily
+increment.)
+
+## Mode 2 (lightning from data), threshold 5 kW/m, 450 days
+Run with the synthetic uniform lightning stream (0.000457 strikes/km2/hr, so
+`lightning24` = 0.01097/km2/day).
+
+**Bug found and fixed.** The port passed the SPITFIRE mode enumeration shifted by one:
+`sf_successful_ignitions_def=2`, `sf_anthro_ignitions_def=3`. CTSM uses
+FATESFireFactoryMod: 2 = lightning_from_data, 3 = successful_ignitions,
+4 = anthro_ignitions. As a result, `fates_spitfire_mode=2` ran as "successful
+ignitions" (FDI forced to 1, cloud-to-ground fraction 1), and mode 3 ran as
+anthropogenic ignitions. With the fix, FDI matches Fortran (day 405: 0.8292 / 0.8304),
+and the mode-2 to mode-1 burned-area ratio is the same in both models:
+
+| | Fortran | Julia |
+|---|---|---|
+| burn days | 11 (402-412) | 12 (401-412) |
+| total burned fraction | 3.43e-5 | 9.10e-5 |
+| burned fraction, mode 2 / mode 1 | 0.267 | 0.266 |
+
+The absolute burned area again carries the 2.65x fuel-driven factor. The ratio isolates
+the ignition path, which is the host lightning stream -> `lnfm24` -> `lightning24` ->
+`NF`, and it agrees to 0.4 %.
+
+Not compared against Fortran: modes 3-5 (population density, anthropogenic ignitions).
+The host path is ported and unit-tested, and the enumeration fix makes the mode numbers
+correct. The real `clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc` climatology
+is not staged on this box; only the synthetic uniform stream is.
+
+---
+
+# RESEARCH MODES (2026-10-29): tree damage, ST3, prescribed physiology, cohort age, seed dispersal, inventory init
+
+These six FATES modes were ported but never run. `clm_fates_init!` forced them off.
+They are now switchable from `clm_initialize!` with CTSM's namelist names
+(`use_fates_tree_damage`, `use_fates_ed_st3`, `use_fates_ed_prescribed_phys`,
+`use_fates_cohort_age_tracking`, `fates_seeddisp_cadence`, `use_fates_inventory_init` +
+`fates_inventory_ctrl_filename`, and `fates_paramfile` for a parameter variant).
+`fates_check_niche_modes` applies CTSM's host-side rules before any state is built:
+cadence must be in 0..3, the inventory control file must be set and exist, ST3 excludes
+prescribed physiology, inventory excludes cohort age, and tree damage excludes CNP. FATES's
+own `check_allset` re-checks the FATES rules. It now runs after the parameter read, as in
+`CLMFatesGlobals2`. With every mode off, the 120-step parity dump is byte-identical to the
+tree before this change.
+
+## Recipe
+
+```bash
+# Fortran: stage a mode from the fates_bgc_1pt_v2 run dir (lnd_in override + daily
+# history) and run cesm.exe in it (~3 s for 14 days)
+python3 stage_niche_mode.py runs/fates_bgc_1pt_v2 runs/fates_niche_<mode> 14 \
+    use_fates_ed_prescribed_phys=.true. [paramfile=<.nc>] [mesh=<.nc>] [fields=A,B]
+# parameter variants (seed dispersal, damage events): edit the CDL, ncgen it for Fortran
+python3 make_param_variant.py data/fates/fates_params_default.cdl out.cdl name=value ...
+# Julia: same case, one CSV row per day
+FATES_NICHE_DAYS=14 julia --project=. scripts/fates_niche_modes.jl <mode> out.csv
+# score: Julia vs Fortran, and the mode effect (mode - base) in each model
+julia --project=. fates_niche_compare.jl jl_mode.csv f_mode.h0.nc jl_base.csv f_base.h0.nc
+```
+
+The base runs differ by the known host residual (vegc 0.3 %, FSH 11 % daily mean), so each
+mode is scored on its own state and on its effect relative to the matching base run.
+
+## Results (14 days from 2002-07-01, Bow at Banff, all 14 PFTs, FATES soil BGC)
+
+| mode | Julia runs | Fortran parity | fixes |
+|---|---|---|---|
+| prescribed physiology | yes | ncoh identical every day (14 to 95); vegc/leafc/storec/structc/seed bank within 5e-8 (the float32 history precision) | none needed |
+| inventory init | yes | day 0: 9 cohorts, 2 patches, every pool within 5e-8. 14 days: ncoh identical every day (57/57), npatch 9/9, vegc 1.6e-4, structc 1.3e-4 | NaN inventory coage blocked all fusion (Julia 335 cohorts vs 57); host coordinates passed to the proximity check |
+| seed dispersal (cadence 1) | yes | seed-bank effect −4.80e-4 vs −4.64e-4 kgC/m² (3.4 %); per-PFT daily `seed_out` and its daily reset track Fortran | host wiring was missing (`WrapUpdateFatesSeedInOut`, outgoing buffer, `WrapGlobalSeedDispersal`) |
+| cohort age tracking | yes | ncoh effect +98 vs +95 by day 9; vegc effect < 2e-7 in both | none needed |
+| ST3 | yes | Fortran writes no FATES history under ST3 (`update_history_dyn` returns). Julia holds the stand bit-static (14 cohorts, cold-start carbon); host effect at day 14: FSH +2.33 vs +2.18 W/m², HR +3.13e-8 vs +2.97e-8 gC/m²/s; the TV effect is under 0.05 K and differs in sign | none needed |
+| tree damage | yes | default `fates_damage_event_code = 1` means no events: both models are identical to their base runs on every field. With events (code 2 or 3) CTSM hangs at the first daily step (>13 min CPU at nstep 1), so there is no Fortran reference | `branch_loss_frac` was scoped inside the element loop, so the first damage event threw `UndefVarError`; Julia now runs with events (code 2 moves 0.8 % of plants to damage class 2, mass conserved) |
+
+Notes:
+
+* **Seed dispersal is single-point here.** One gridcell has no neighbours
+  (`DetermineGridCellNeighbors` loops over pairs), so the incoming seed is always 0 and
+  the mode reduces to exporting `fates_seed_dispersal_fraction` of the seed rain. The
+  inter-gridcell kernel needs a multi-gridcell run, which this case cannot provide. The
+  default parameter file leaves the four `fates_seed_dispersal_*` parameters unset, so the
+  runs use `make_param_variant.py` with fraction 0.2.
+* **Inventory init cannot run unmodified in Fortran at this site.** FATES converts negative
+  inventory longitudes to [0, 360] but compares them with the host longitude as-is, so any
+  site on a [-180, 180] mesh (Bow is at -116.01) aborts at FatesInventoryInitMod.F90:247.
+  The Fortran reference uses a copy of the site mesh with longitude +360 (`mesh=`). That
+  copy is not neutral for the host (FSH up to 45 %), which is why inventory is scored
+  against `base_lon360` and mainly on the day-0 stand. The port wraps the host longitude
+  into [0, 360) instead of aborting. The synthetic pss/css pair (2 patches, 6 cohorts of
+  PFTs 2/6/12) is in `runs/fates_niche_inputs/`.
+* **Cohort age:** after day 10 the Fortran run takes a knife-edge cold-deciduous leaf-off
+  (PFTs 3/6/11 lose ~25 % vegc in one day) that its base run does not take. The unrelated
+  `base_lon360` run takes the identical event, so it is a threshold flip, not an age-tracking
+  effect. The mode is scored on days 0-10.
+* **Tree damage hang:** reproduced with `fates_damage_event_code` 2 and 3 on this case. It
+  was not traced further (debugger runs are unreliable on this machine; see setup_case.sh).
+
+## Restart round trip
+
+`write_fates_restart` packs the FATES state (`set_restart_vectors!`) to NetCDF on the
+`cohort`/`column` dimensions. `read_fates_restart!` follows the Fortran `restart(flag='read')`
+sequence. It rebuilds fresh sites with `create_patchcohort_structure!`, which now calls
+`init_site_vars!` + `zero_site!` (the open TODO, FatesRestartInterfaceMod.F90:2856) and
+`NanValues` + `ZeroValues` on each new cohort. Then it runs `get_restart_vectors!`,
+`ed_update_site(is_restarting=true)`, the `wrap_update_hlmfates_dyn` hand-off,
+`update_3dpatch_radiation!`, the dynamics history and the restart seed-dispersal call. Plant
+hydraulics restarts (`RestartHydrStates`) are not wired and refuse.
+
+Test: base case, FATES restart written after day 7 and the sites rebuilt from the file,
+compared with the continuous run. **All 97 daily diagnostics (FATES state and host
+FSH/TV/HR) are bit-identical on all 15 rows.** The first attempt failed the day-8 mass
+balance with NaN litter fragmentation. The cause was that restarted cohorts skipped
+`ZeroValues`, leaving the fields it sets (fire mortality, the daily N/P demand/uptake
+sentinels, ...) as NaN; that is now fixed. The host CLM state is carried in memory, not through a host restart file.
+
+## Found, not fixed (outside these modes)
+
+`site.lat/lon` are never set in the port (NaN), while Fortran sets them from the host
+gridcell (clmfates_interfaceMod.F90:884-885). Phenology tests `site.lat > 0`, so at Bow
+(51°N) the port takes the southern-hemisphere branch: `gddstart = 181` resets GDD on 1 July
+and `ncdstart = 120`. Fixing it changes the default output, so it is left for the default-path
+owners.

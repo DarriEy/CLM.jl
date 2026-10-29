@@ -11,7 +11,7 @@
 # =============================================================================
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 
-const DRIFT_SUM    = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
+const DRIFT_SUM    = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bgc_ref_summer"
 const DRIFT_N0     = 1757845          # first step with BOTH before+after dump
 const DRIFT_NSTEPS = 28               # full contiguous window: 1757845..1757872
 const DRIFT_BASE   = 1753153          # nstep -> date base (DateTime(2002,1,1)+Hour(n-base))
@@ -76,7 +76,12 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
         calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
         nextsw = calday + 3600.0 / CLM.SECSPDAY
         (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
-        CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:bounds.endg)
+        # Seed once with the step BEFORE the first: clm_drv! (is_first_step=false)
+        # then advances prev_dayl <- dayl each step (DaylengthMod.F90:192-202).
+        if i == 0
+            (declinm2, _) = CLM.compute_orbital(calday - 2 * 3600.0 / CLM.SECSPDAY)
+            CLM.init_daylength!(inst.gridcell, declinm1, declinm2, CLM.ORB_OBLIQR_DEFAULT, 1:bounds.endg)
+        end
         CLM.advance_timestep!(tm)
         CLM.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)
         CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)

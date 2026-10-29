@@ -1,5 +1,11 @@
 # Crop / irrigation / fire-crop Fortran parity — status (2026-07-18)
 
+> **UPDATE 2026-10-28 — crop tails closed.** Grain-fill allocation + grain fluxes,
+> vernalization and `n_soyfix!` now have ctsm5.3.012 ground truth generated on the
+> replacement box and match the port exactly; five Julia divergences were fixed on
+> the way. Results: `docs/CROP_LIFECYCLE_MAP.md` §3i-§3k. Recipe: § "Crop tails
+> (2026-10-28)" at the end of this file.
+
 > **SUPERSEDED IN PART (2026-07-19).** The crop lifecycle is now wired and
 > validated against this document's reference — see **`docs/CROP_LIFECYCLE_MAP.md`**,
 > which is authoritative for the lifecycle. In particular:
@@ -597,3 +603,69 @@ gating written out in a comment: `topo_col = forc_topo` → "no lapse correction
 guard can be vacuous, and so can a *bug*. Reading the formula (`tbot_c = tbot_g
 - lapse_rate*(hsurf_c-hsurf_g)`) makes the error look catastrophic; reading the
 filter that decides whether the formula runs at all shows it is inert.
+
+---
+
+## Crop tails (2026-10-28) — reproducing the grain-fill / soyfix / vernalization reference
+
+Everything is scripted under `scripts/validation/crop_parity/`; outputs go to
+`$SYMFLUENCE_DATA/runs/` (never into the Drive-symlinked directories). Environment:
+`SYMFLUENCE_DATA`, `CESM_INPUTDATA` as in `docs/HANDOFF_2026-07-24.md`. Run one
+`cesm.exe` at a time (each 3-year single-point run is ~3 min wall).
+
+1. **Case + build (once).** Clone the working SP build and add the SourceMods:
+
+       CLM=$SYMFLUENCE_DATA/installs/clm
+       PATH=/usr/bin:/bin:$CLM/toolchain/bin $CLM/ctsm5.3.012/cime/scripts/create_clone \
+           --clone $CLM/cases/bow_btran_macos --case $CLM/cases/crop_parity_macos \
+           --cime-output-root $CLM/cases/crop_parity_macos/output
+       (cd $CLM/cases/crop_parity_macos && ./xmlchange EXEROOT=$PWD/bld,RUNDIR=$PWD/run && ./case.setup)
+       bash scripts/validation/crop_parity/build_crop_case.sh
+
+   Build traps on this box: CIME needs a Python with `distutils` (`/usr/bin/python3`
+   3.9), build-namelist needs `XML::LibXML` (`/usr/bin/perl`) → `/usr/bin` must precede
+   the toolchain on `PATH`; `ESMFMKFILE` and `NETCDF` must point at the toolchain;
+   `create_clone` does **not** carry the `-DNETCDF_ENABLE_LEGACY_MACROS` cmake macro
+   (PIO then fails on `_FillValue`); `cropdumpMod` must take the instances as
+   arguments (`clm_instMod → CNVegetationFacade → CNDriverMod` would be a module
+   cycle); a new SourceMods module needs the stale `Srcfiles`/`Depends` removed.
+   The script greps the exe for the hook strings (a 2-second "successful" build is
+   the stale-exe trap).
+2. **Inputs.** `julia --project=. scripts/validation/crop_parity/make_winterwheat_surfdata.jl`
+   (USplains surfdata with pft 45 → winter wheat 21; no real winter-wheat cell exists).
+3. **Reference A** (grain fill, harvest, vernalization):
+
+       RUN=$SYMFLUENCE_DATA/runs/crop_tails_refA STOP_N=3 bash scripts/validation/crop_parity/setup_crop_tails_run.sh
+       RUN=$SYMFLUENCE_DATA/runs/crop_tails_refA \
+       CROPDUMP_WINDOWS=$(julia scripts/validation/crop_parity/nstep_windows.jl \
+           2017-07-03:2017-08-15 2017-09-22:2017-09-25 2017-10-02:2017-10-31 \
+           2017-12-15:2017-12-20 2018-02-01:2018-02-05 2018-03-15:2018-04-30) \
+       bash scripts/validation/crop_parity/run_crop_tails.sh
+
+   (= `13149:14204,15093:15188,15333:16052,17109:17252,18261:18380,19269:20396`;
+   noleap calendar, start tod 14400.) Crops do not plant in 2016 (no `gdd020` yet);
+   2017 events: spring wheat grain fill 07-05 / harvest 08-07, tropical corn 07-25 /
+   09-23, corn 08-10 / 10-29, soybean 08-13 / 10-22, winter wheat planted 10-04.
+4. **Reference B** (CNSoyfix sweep): a 570-day spin-up writing a restart, then a
+   `continue` run with the in-model sweep on:
+
+       RUN=$SYMFLUENCE_DATA/runs/crop_tails_spinB STOP_OPTION=ndays STOP_N=570 \
+           RESTART_OPTION=ndays RESTART_N=570 bash scripts/validation/crop_parity/setup_crop_tails_run.sh
+       RUN=$SYMFLUENCE_DATA/runs/crop_tails_spinB bash scripts/validation/crop_parity/run_crop_tails.sh
+       SPIN=$SYMFLUENCE_DATA/runs/crop_tails_spinB STAMP=2017-07-24-14400 FLEXIBLECN=.true. \
+           EDITED=$SYMFLUENCE_DATA/runs/crop_tails_spinB/Crop_tails.clm2.r.2017-07-24-14400.nc \
+           RUN=$SYMFLUENCE_DATA/runs/crop_tails_refB_soyfix NDAYS=2 \
+           bash scripts/validation/crop_parity/setup_soyfix_continue.sh
+       RUN=$SYMFLUENCE_DATA/runs/crop_tails_refB_soyfix CROPDUMP_WINDOWS=13681:13704 \
+           CROPDUMP_SOYFIX_SWEEP=1 bash scripts/validation/crop_parity/run_crop_tails.sh
+
+   `make_nlimited_restart.jl` (+ `ORGANIC=1`) and `FLEXIBLECN=.false.` are the
+   restart-injection experiments that established why the coupled column cannot reach
+   `fpg < 1` (CROP_LIFECYCLE_MAP §3k); they are kept for the record, not needed.
+5. **Compare / refresh the CI fixture.**
+
+       julia --project=. scripts/fortran_parity_crop_tails.jl
+       julia --project=. scripts/validation/crop_parity/extract_crop_tails_fixture.jl
+
+   The fixture feeds `test/test_crop_tails_parity.jl`, so CI asserts the Fortran values
+   without the ~300 MB of dumps.

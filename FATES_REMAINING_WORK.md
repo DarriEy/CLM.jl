@@ -26,6 +26,8 @@ Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
 **Update 3 (PRs #86–#90) — real driver run + history output complete + hydraulics complete:**
 - **Multi-day `clm_drv!` integrated run (#86)** — first REAL driver loop with `use_fates=true` (2 days/96 steps); all four per-timestep hooks + the daily step fire end-to-end; flushed out 3 latent wiring bugs (coszen source, hardcoded `use_fates=false`, ungated standard photosynthesis). FATES is no longer helper-tested — it runs through `clm_drv!`.
 - **History fills H-series COMPLETE (#87 W1, #88 W2, #90 W3)** — the history interface is wired into the run (`inst.fates.hist`, Init'd in `clm_fates_init!`, `update_history_dyn!` after the daily step + `update_history_hifrq!` per-timestep). **Every `update_history_*` body is now filled**: dyn1 (core), hifrq1, dyn2 (per-class disaggregation), hifrq2 (canopy profiles), nutrflux (CNP), fire, tree-damage, hydraulics. Mode-gated groups (CNP/fire/damage/planthydro) validated with constructed state; residual = a few sub-fields needing CNP/landuse/nocomp mode state (NOT bodies). Suite → 21,190.
+- **Reduced-complexity modes ON (2026-10-28)** — `use_fates_sp` / `use_fates_nocomp` / `use_fates_fixed_biogeog` are `clm_initialize!` options (CTSM dependencies enforced; SP = host satellite phenology from surfdata MONTHLY_*, soil BGC off; fixed biogeog from surfdata PCT_NAT_PFT via `fates_hlm_pft_map`). Each validated vs a 10-day hourly Fortran CTSM run (SP FATES state ~1e-8; nocomp patch areas ~1e-8; fixed-biogeog census identical). The nocomp `FATES_NOCOMP_*_PF` history fills are now ported. See `scripts/validation/fates_fortran_parity/README.md` §REDUCED-COMPLEXITY MODES.
+- **Land use ON (2026-10-29)** — logging (`fates_harvest_mode='event_code'`), LUH2 states and transitions (`use_fates_luh`, host reader `src/fates/fates_driver_landuse.jl` = `dynFATESLandUseChangeMod` + `GetLandusePFTData`), LUH2 harvest modes, `use_fates_lupft`, `use_fates_potentialveg` are `clm_initialize!` options. Validated vs 10-day hourly Fortran CTSM runs on single-point LUH2 subsets (`data/fates/luh_1pt/`): LU patch areas ~1e-8, logging secondary fraction 2e-3. Event-code direct logging off (ctsm5.3.012 harvest-tag quirk); LUH2 harvest is a no-op in ctsm5.3.012 (category-name mismatch). See `scripts/validation/fates_fortran_parity/README.md` §LAND USE.
 - **Plant-hydraulics Tier B COMPLETE (#89)** — `Hydraulics_BC` transpiration solve + `hydraulics_drive`/`FillDrainRhizShells`/`RecruitWUptake`/`SetMaxCondConnections`/`Report1DError` + the NEW gated `hydraulics_drive` callsite. Now `ftc_*`/`btran`/`leaf_psi`/`rootuptake`/`sapflow` populate live under `hlm_use_planthydro`; the ported mortality + photosynthesis consumer branches stop reading zeros. Mass-balance closes ~1e-15.
 
 **Remaining tail (the table at the bottom is updated with ✅ markers):**
@@ -36,6 +38,14 @@ Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
 5. ✅ ~~Real FATES param-file reader~~ — DONE (#85).
 6. ✅ ~~Multi-veg-patch + multi-site~~ — DONE (#94): the full `ifp` patch-walk (`p = ifp + col.patchi[c]`) across all hooks + the daily step, `fates_set_filters!` weight rebuild, nsites>1 (nsites=2 live `clm_drv!` validated). AD/GPU for FATES columns remains explicitly out of scope.
 7. ✅ ~~Multi-day driver-integrated run + live modes~~ — DONE (#86 2-day carbon-only; #93 fire/CNP/tree-damage each run live + mass-conserving through `clm_drv!` + a 15-day carbon-only spin-up/stability run).
+
+**Update (2026-10-29) — research modes + FATES restart file.** Tree damage, ST3, prescribed
+physiology, cohort age, seed dispersal and inventory init are switchable from
+`clm_initialize!` and were each run against a 14-day Fortran reference. Item 4's in-memory
+"round-trip complete" missed that restarted cohorts were never zeroed; a restart through a
+NetCDF file (`write_fates_restart` / `read_fates_restart!`) is now bit-identical to a
+continuous run. Results, fixes and open upstream issues are in
+`scripts/validation/fates_fortran_parity/README.md` §"RESEARCH MODES".
 
 **★ ALL scoped FATES remaining-work items (1–7) are now COMPLETE (PRs #81–#94, suite → 22,128).** What's left is *deeper validation / coverage*, not implementation: numeric exercise of the W4b in-solve coupling once a column has a finite canopy `t_veg` (the carbon-only cold-start leaves it NaN), multi-year spin-ups, Fortran bit-parity comparison, and the AD/GPU-for-FATES question (explicitly out of scope by the CPU-only Union-ownership decision).
 
@@ -183,6 +193,19 @@ no `lmort_logging` (use `lmort_direct`); running means live at patch not cohort 
 ---
 
 ## 3. Plant-hydraulics stubs — ~3–4 sub-batches
+
+> **Status 2026-10-29 — the 1-D path is connected end to end** (`fates/planthydro`):
+> `clm_initialize!(use_fates_planthydro=true)` runs InitHydroGlobals / InitHydrSites /
+> HydrSiteColdStart; every step runs `wrap_hydraulics_drive` (`fates_hydraulics_step!`)
+> after AccumulateFluxes, puts the plant water in `total_plant_stored_h2o_col`, and
+> `ComputeRootSoilFlux` (`fates_compute_root_soil_flux!`) makes FATES's
+> `qflx_soil2root_sisl` the host soil sink; the daily step packs the soil hydraulic
+> properties and re-diagnoses `UpdateH2OVeg` in `update_hlm_dynamics`; hydraulic-failure
+> mortality now reads live `ftc_*`; `RestartHydrStates` is ported. Validated against an
+> hourly Fortran run (see `scripts/validation/fates_fortran_parity/README.md`
+> §"PLANT HYDRAULICS"). Still open: the 2-D solvers (`MatSolve2D`/`PicardSolve2D`, still
+> `fates_endrun`), a host-level FATES restart driver (RestartHydrStates is called by tests
+> only), and grass parity (the reference reads an uninitialized `sapw_area`; the port uses upstream FATES `SapwoodAreaGrass` — see the README).
 
 The hard math is **already ported** (1D Taylor solver core ~1,300 lines, all plant-level helpers,
 WTF/WKF retention+conductivity, mem types). ~2,700 Fortran lines / 19 routines remain (the two

@@ -124,14 +124,23 @@ function fates_flush_hlm_canopy!(inst::CLMInstances; c::Int)
         pf = npc >= 1 ? pi + npc - 1 : pi
     end
 
+    # SP: tlai/tsai/htop are the host's prescribed (satellite-phenology) values,
+    # so Fortran flushes and refills the *_hist copies instead.
+    sp = hlm_use_sp[] == itrue
     for p in pi:pf
         (1 <= p <= length(cs.elai_patch)) || continue
         cs.elai_patch[p] = 0.0
         cs.esai_patch[p] = 0.0
         cs.hbot_patch[p] = 0.0
-        cs.tlai_patch[p] = 0.0
-        cs.tsai_patch[p] = 0.0
-        cs.htop_patch[p] = 0.0
+        if sp
+            cs.tlai_hist_patch[p] = 0.0
+            cs.tsai_hist_patch[p] = 0.0
+            cs.htop_hist_patch[p] = 0.0
+        else
+            cs.tlai_patch[p] = 0.0
+            cs.tsai_patch[p] = 0.0
+            cs.htop_patch[p] = 0.0
+        end
         if !isempty(cs.frac_veg_nosno_alb_patch)
             cs.frac_veg_nosno_alb_patch[p] = 0
         end
@@ -200,7 +209,14 @@ function fates_set_filters!(inst::CLMInstances; c::Int, s::Int, set_active::Bool
     if !isempty(pch.is_bareground); pch.is_bareground[bg] = true; end
     wt_bg = max(0.0, 1.0 - sum_canopy)
     if !isempty(pch.wt_ed); pch.wt_ed[bg] = wt_bg; end
-    pch.wtcol[bg] = wt_bg
+    # The HLM weight itself (wtcol) only moves here at the cold start. On the daily
+    # step Fortran wrap_update_hlmfates_dyn writes patch%wt_ed alone; wtcol = wt_ed is
+    # applied by dynSubgrid_driver -> dyn_ED (dynEDMod.F90:34) at the top of the NEXT
+    # timestep, before BeginWaterColumnBalance. Re-weighting mid-step moved the
+    # per-patch canopy water / plant storage between begwb and endwb (an errh2o of
+    # ~1e-4 mm once the CLM5 interception put water on the canopy).
+    # fates_apply_deferred_activation! is that dyn_ED.
+    set_active && (pch.wtcol[bg] = wt_bg)
 
     # Vegetated HLM patches (+ifp): weight = canopy_fraction_pa[ifp].
     for (ifp, p) in fates_veg_patches(site, c, col)
@@ -208,16 +224,14 @@ function fates_set_filters!(inst::CLMInstances; c::Int, s::Int, set_active::Bool
              bc_out.canopy_fraction_pa[ifp] : 0.0
         if !isempty(pch.is_veg); pch.is_veg[p] = true; end
         if !isempty(pch.wt_ed);  pch.wt_ed[p] = wt;    end
-        pch.wtcol[p] = wt
-        set_active && (pch.active[p] = true)
+        set_active && (pch.wtcol[p] = wt; pch.active[p] = true)
     end
 
     # Reserved-but-unused vegetated slots (a fuse/merge can leave fewer live
     # patches than were reserved): zero them and mark inactive so the column
     # averaging skips them.
     for p in (pi + npatch + 1):pf
-        pch.wtcol[p] = 0.0
-        set_active && (pch.active[p] = false)
+        set_active && (pch.wtcol[p] = 0.0; pch.active[p] = false)
     end
 
     return inst
@@ -250,24 +264,24 @@ function fates_apply_deferred_activation!(inst::CLMInstances)
         col.is_fates[c] || continue
         pi = col.patchi[c]; pf = col.patchf[c]
         (1 <= pi && pi <= pf && pf <= length(pch.active)) || continue
+        # dyn_ED (dynEDMod.F90:30-38): wtcol = wt_ed on the FATES column's veg and
+        # bare-ground patches, 0 elsewhere -- then is_active_p.
+        if !isempty(pch.wt_ed)
+            for p in pi:pf
+                isv = !isempty(pch.is_veg) && pch.is_veg[p]
+                isb = !isempty(pch.is_bareground) && pch.is_bareground[p]
+                if isv || isb
+                    isfinite(pch.wt_ed[p]) && (pch.wtcol[p] = pch.wt_ed[p])
+                else
+                    pch.wtcol[p] = 0.0
+                end
+            end
+        end
         for p in pi:pf
             pch.active[p] = col.active[c] && pch.wtcol[p] > 0.0
         end
     end
     return inst
-end
-
-"""
-    _fates_first_fates_column(col) -> Int
-
-Return the index of the first `col.is_fates` column, or 0 if there is none.
-Convenience for the single-site MVP host glue (driver fire-weather derivation).
-"""
-function _fates_first_fates_column(col)
-    for c in 1:length(col.is_fates)
-        col.is_fates[c] && return c
-    end
-    return 0
 end
 
 """
@@ -328,8 +342,8 @@ vegetated patch `p` state:
     clobber those with its unsolved (zero) `bc_out`.
   * `albgr_dir_rb` / `albgr_dif_rb` — ground albedo per band (surfalb
     `albgrd_col` / `albgri_col`).
-  * `fcansno_pa` — fraction of canopy covered in snow (0 stand-in; no CLM source
-    on the carbon-only path).
+  * `fcansno_pa` — fraction of canopy covered in snow, from the host
+    `waterdiagnosticbulk.fcansno_patch[p]` (`BulkDiag_FracWet`).
 
 The FATES radiation solver uses `num_swb` bands (vis, nir); CLM carries `NUMRAD`
 (also 2) radiation bands in the same vis/nir order, so the band index maps directly.
@@ -360,7 +374,13 @@ function fates_pack_bcin_radiation!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     bc.coszen_pa[ifp]        = coszen
     bc.filter_vegzen_pa[ifp] = fates_in_vegsol_filter(inst, p, coszen)
-    bc.fcansno_pa[ifp]       = 0.0  # no snow-on-canopy source on the carbon-only path
+    # Snow-covered canopy fraction (CanopyHydrologyMod::BulkDiag_FracWet), as the
+    # Fortran host passes it: clmfates_interfaceMod::wrap_canopy_radiation,
+    # `bc_in(s)%fcansno_pa(ifp) = fcansno(p)` (waterdiagnosticbulk%fcansno_patch).
+    # FatesNormanRadMod blends rho/tau toward the snow optics with it.
+    wdb = inst.water.waterdiagnosticbulk_inst
+    bc.fcansno_pa[ifp] = (p <= length(wdb.fcansno_patch) && isfinite(wdb.fcansno_patch[p])) ?
+                         wdb.fcansno_patch[p] : 0.0
 
     # Ground albedo (site broadband). Default to 0 if surfalb not yet computed
     # (the very first timestep before surface_albedo! runs).
@@ -562,8 +582,12 @@ Fill the FATES *daily* demographic `bc_in` soil state for site `s` from CLM colu
     flux being live); otherwise zeroed, matching the Fortran else-branch.
   * `max_rooting_depth_index_col` — left as set by `clm_fates_init!`.
 
-Fire drivers (lightning/pop/RH24/wind24/precip24), SP-LAI streams, harvest/LUH
-arrays are intentionally NOT packed — those configs are off on this MVP path.
+  * `precip24_pa` / `relhumid24_pa` / `wind24_pa` — SPITFIRE fire weather, the
+    HLM's per-patch 24-hour running means (`prec24_patch` / `rh24_patch` /
+    `wind24_patch`) for each vegetated FATES patch, as Fortran `dynamics_driv`.
+
+Lightning / population-density streams (SPITFIRE modes 2-5), SP-LAI streams and
+harvest/LUH arrays are NOT packed — those configs are off on this path.
 
 This reuses the same soil-state slice as `fates_pack_bcin_btran!`; calling both in
 one step is harmless (idempotent on the soil fields). The decomposition scalars
@@ -619,6 +643,9 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
     _fates_set_active_suction!(bc, fates.bc_out[s], nlevsoil)
     _fates_pack_smp!(bc, fates.bc_out[s], ss, c, nlevsoil)
 
+    # SP: the host's satellite-phenology LAI/SAI/height (dynamics_driv).
+    hlm_use_sp[] == itrue && fates_pack_bcin_sp!(inst; s = s, c = c)
+
     # Soil-decomposition limitation scalars: live only under use_fates_bgc, else 0
     # (matches the Fortran w_scalar/t_scalar gate in dynamics_driv). Clamp the loop
     # to the FATES bc array length (the cold start sizes these to FATES nlevdecomp,
@@ -641,25 +668,205 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
         end
     end
 
-    # SPITFIRE fire-weather drivers (per-patch 24-hour running means the fire model
-    # reads in `update_fire_weather!` / `area_burnt_intensity!`). Packed only when
-    # SPITFIRE is on (`fire_weather` supplied); the carbon-only default leaves these
-    # zero (allocate_bcin already zeroed them), matching the no_fire path which never
-    # reads them. The fire model indexes these by patchno (1-based vegetated patch),
-    # so fill the whole allocated span with the representative site values; the
-    # bareground patch (patchno 0) is skipped inside the fire model.
+    # Fire-weather drivers: the per-patch 24-hour running means SPITFIRE reads in
+    # `update_fire_weather!` / `area_burnt_intensity!`. Fortran `dynamics_driv`
+    # (clmfates_interfaceMod.F90) fills them for every vegetated FATES patch from the
+    # HLM accumulators, unconditionally under use_fates:
+    #     do ifp = 1, sites(s)%youngest_patch%patchno
+    #        p = ifp + col%patchi(c)
+    #        bc_in(s)%precip24_pa(ifp)   = wateratm2lndbulk_inst%prec24_patch(p)
+    #        bc_in(s)%relhumid24_pa(ifp) = wateratm2lndbulk_inst%rh24_patch(p)
+    #        bc_in(s)%wind24_pa(ifp)     = atm2lnd_inst%wind24_patch(p)
+    # Only the fire model reads these, so the no-fire path is unaffected.
+    # `fire_weather` (a NamedTuple of site scalars) overrides the accumulators — a
+    # test hook for driving the fire chain without stepping the host.
+    a2l = inst.atm2lnd
+    ysite = fates.sites[s].youngest_patch
+    npatch_fates = ysite === nothing ? 0 : ysite.patchno
+    npa = min(npatch_fates, length(bc.precip24_pa))
     if fire_weather !== nothing
         fw = fire_weather
-        np_fire = length(bc.precip24_pa)
-        @inbounds for ip in 1:np_fire
+        @inbounds for ip in 1:npa
             bc.precip24_pa[ip]   = fw.precip24      # [mm/s]
             bc.relhumid24_pa[ip] = fw.relhumid24    # [%]
             bc.wind24_pa[ip]     = fw.wind24        # [m/s]
             bc.lightning24[ip]   = get(fw, :lightning24, 0.0)  # [#/km2/day]
             bc.pop_density[ip]   = get(fw, :pop_density, 0.0)  # [#/km2]
         end
+    else
+        # Ignition drivers, modes > scalar_lightning (dynamics_driv):
+        #     bc_in(s)%lightning24(ifp) = lnfm24(g) * 24._r8   ! #/km2/hr -> #/km2/day
+        #     if (fates_spitfire_mode >= anthro_ignitions) &
+        #        bc_in(s)%pop_density(ifp) = fates_fire_data_method%forc_hdm(g)
+        ffd = inst.fates_fire_data
+        if hlm_spitfire_mode[] > hlm_sf_scalar_lightning_def[] && fates_fire_data_active(ffd)
+            g = inst.column.gridcell[c]
+            @inbounds for ip in 1:min(npatch_fates, length(bc.lightning24))
+                bc.lightning24[ip] = ffd.lnfm24[g] * 24.0
+                if hlm_spitfire_mode[] >= hlm_sf_anthro_ignitions_def[]
+                    bc.pop_density[ip] = ffd.forc_hdm[g]
+                end
+            end
+        end
+    end
+    if fire_weather === nothing && length(a2l.prec24_patch) > 0 && length(a2l.wind24_patch) > 0
+        pi0 = inst.column.patchi[c]
+        @inbounds for ip in 1:npa
+            p = ip + pi0
+            p <= length(a2l.prec24_patch) || break
+            bc.precip24_pa[ip]   = a2l.prec24_patch[p]
+            bc.relhumid24_pa[ip] = a2l.rh24_patch[p]
+            bc.wind24_pa[ip]     = a2l.wind24_patch[p]
+        end
     end
 
+    return inst
+end
+
+# =====================================================================================
+# Host seed dispersal (clmfates_interfaceMod.F90). Active only when
+# fates_seeddisp_cadence /= 0; `fates.seeds === nothing` otherwise.
+# =====================================================================================
+
+"""
+    fates_seed_dispersal_init!(fates, inst)
+
+`clm_fates%init`'s dispersal block (clmfates_interfaceMod.F90:756-766): allocate the
+global seed buffers and build the gridcell neighbourhoods from the gridcell centres
+(`DetermineGridCellNeighbors`, single process). Each site's host gridcell is the
+gridcell of the site's soil column (one FATES site per column, in column order).
+
+The Fortran `fates_seed%init` sets `dispersal_date = GetCadenceDate()` while the FATES
+clock is still unset (GetAndSetTime first runs in init_coldstart, after `init`), so
+the date is the zero-initialised `hlm_current_day/month/year`. The first daily step
+is therefore a dispersal step. That is mirrored by resetting the module state to
+`dispersal_date = 0`, `dispersal_flag = false` here.
+"""
+function fates_seed_dispersal_init!(fates, inst)
+    grc = inst.gridcell
+    ng = max(length(grc.lat), 1)
+    seeds = dispersal_type()
+    init!(seeds, 1, ng, ng, numpft[])
+    dispersal_date[] = 0
+    dispersal_flag[] = false
+    latc = isempty(grc.lat) ? [0.0] : rad2deg.(grc.lat)
+    lonc = isempty(grc.lon) ? [0.0] : rad2deg.(grc.lon)
+    lneighbors[] = DetermineGridCellNeighbors(seeds, ng, latc, lonc)
+    fates.seeds = seeds
+    fates.seed_gridcell = ones(Int, fates.nsites)
+    return fates
+end
+
+"""
+    fates_wrap_update_seed_inout!(fates)
+
+`WrapUpdateFatesSeedInOut` (clmfates_interfaceMod.F90:2940-2975), called at the top
+of `dynamics_driv`: at a dispersal time each site receives its gridcell's incoming
+seed and its `seed_out` is reset; otherwise the incoming seed is zero.
+
+(The Fortran `else` branch writes `sites(s)` with `s` undefined — outside the site
+loop; every site's `seed_in` is zeroed here, which is what that branch means.)
+"""
+function fates_wrap_update_seed_inout!(fates)
+    seeds = fates.seeds
+    seeds === nothing && return fates
+    if IsItDispersalTime()
+        for s in 1:fates.nsites
+            g = fates.seed_gridcell[s]
+            fates.sites[s].seed_in .= @view seeds.incoming_global[:, g]
+            fill!(fates.sites[s].seed_out, 0.0)
+        end
+    else
+        for s in 1:fates.nsites
+            fill!(fates.sites[s].seed_in, 0.0)
+        end
+    end
+    return fates
+end
+
+"""
+    fates_wrap_seed_outgoing!(fates)
+
+The dispersal block of `wrap_update_hlmfates_dyn` (clmfates_interfaceMod.F90:1571-
+1588): zero the local outgoing buffer and, at a dispersal time, load each site's
+`seed_out` into its gridcell's slot.
+"""
+function fates_wrap_seed_outgoing!(fates)
+    seeds = fates.seeds
+    seeds === nothing && return fates
+    fill!(seeds.outgoing_local, 0.0)
+    if IsItDispersalTime()
+        for s in 1:fates.nsites
+            seeds.outgoing_local[:, fates.seed_gridcell[s]] .= fates.sites[s].seed_out
+        end
+    end
+    return fates
+end
+
+"""
+    fates_wrap_global_seed_dispersal!(fates; is_restart=false)
+
+`WrapGlobalSeedDispersal` (clmfates_interfaceMod.F90:2848-2936), run by `clm_drv` at
+the start of each day after the FATES dynamics: at a dispersal time, gather the
+outgoing seed (single process: outgoing_global = outgoing_local), zero the local
+buffer, and distribute it to each gridcell's neighbours weighted by the per-PFT
+dispersal density over the neighbour count.
+"""
+function fates_wrap_global_seed_dispersal!(fates; is_restart::Bool = false)
+    seeds = fates.seeds
+    seeds === nothing && return fates
+    if IsItDispersalTime(; setdispersedflag = !is_restart)
+        fill!(seeds.incoming_global, 0.0)
+        seeds.outgoing_global .= seeds.outgoing_local
+        fill!(seeds.outgoing_local, 0.0)
+        nbrs = lneighbors[]
+        for g in 1:size(seeds.incoming_global, 2)
+            g <= length(nbrs) || break
+            nb = nbrs[g].first_neighbor
+            while nb !== nothing
+                @views seeds.incoming_global[:, g] .+= seeds.outgoing_global[:, nb.gindex] .*
+                    nb.density_prob ./ nbrs[g].neighbor_count
+                nb = nb.next_neighbor
+            end
+        end
+    end
+    return fates
+end
+
+"""
+    fates_pack_bcin_sp!(inst; s, c)
+
+FATES satellite-phenology (SP) inputs: copy the host's prescribed LAI / SAI / canopy
+height into `bc_in[s].hlm_sp_tlai/tsai/htop`, mirroring clmfates_interfaceMod
+(`dynamics_driv` and `init_coldstart`):
+
+```fortran
+do ft = surfpft_lb,surfpft_ub
+   p = ft + col%patchi(c)
+   bc_in(s)%hlm_sp_tlai(ft) = canopystate_inst%tlai_patch(p)
+   bc_in(s)%hlm_sp_tsai(ft) = canopystate_inst%tsai_patch(p)
+   bc_in(s)%hlm_sp_htop(ft) = canopystate_inst%htop_patch(p)
+   if (canopystate_inst%htop_patch(p) < 1.0e-20) bc_in(s)%hlm_sp_htop(ft) = 0.01
+end do
+```
+
+The HLM patch at `col.patchi[c] + ft` is the one of PFT type `ft` (the SP FATES column
+is built with one patch per surface PFT, in type order; see `set_landunit_veg_compete!`),
+so this is a read in HLM-PFT space. HLM PFT 0 (bare ground) is never read by FATES and
+is not stored: `hlm_sp_*[k]` holds HLM PFT `k`.
+"""
+function fates_pack_bcin_sp!(inst::CLMInstances; s::Int, c::Int)
+    fates = inst.fates
+    fates === nothing && return inst
+    bc = fates.bc_in[s]
+    cs = inst.canopystate
+    pi = inst.column.patchi[c]
+    for ft in 1:length(bc.hlm_sp_tlai)
+        p = ft + pi
+        bc.hlm_sp_tlai[ft] = cs.tlai_patch[p]
+        bc.hlm_sp_tsai[ft] = cs.tsai_patch[p]
+        bc.hlm_sp_htop[ft] = cs.htop_patch[p] < 1.0e-20 ? 0.01 : cs.htop_patch[p]
+    end
     return inst
 end
 
@@ -689,19 +896,35 @@ The site<->column map mirrors the W3/W4 hooks: FATES site `s` maps onto the `s`-
 `col.is_fates` column; each vegetated patch maps to HLM patch
 `p = ifp + col.patchi[c]` (bare-ground at `+0`).
 
-When SPITFIRE is active (`hlm_spitfire_mode > hlm_sf_nofire_def`), pass `fire_weather`
-(a `NamedTuple` with `precip24` [mm/s], `relhumid24` [%], `wind24` [m/s], optionally
-`lightning24`/`pop_density`) — the daily pack fills the per-patch fire-weather bc_in
-the fire model reads. Omit it on the carbon-only / no_fire path (the fields stay zero).
+The SPITFIRE fire-weather bc_in (`precip24_pa` / `relhumid24_pa` / `wind24_pa`) is
+packed from the host's per-patch 24-hour running means (`inst.atm2lnd`), as Fortran
+does. `fire_weather` (a `NamedTuple` with `precip24` [mm/s], `relhumid24` [%],
+`wind24` [m/s], optionally `lightning24`/`pop_density`) overrides them with site
+scalars — a test hook for driving the fire chain without stepping the host.
 
 Returns `inst`. Gated by the caller behind `config.use_fates`.
 """
 function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
                                     nlevdecomp::Int, use_fates_bgc::Bool = false,
-                                    fire_weather::Union{NamedTuple,Nothing} = nothing)
+                                    fire_weather::Union{NamedTuple,Nothing} = nothing,
+                                    date::Union{Nothing,NTuple{4,Int}} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     col = inst.column
+
+    # Fortran `dynamics_driv` opens with `call GetAndSetTime` (clmfates_interfaceMod
+    # .F90:1068): the FATES clock (day_of_year, model_day, current date) advances every
+    # day. `date = (year, mon, day, tod)` from the host; `nothing` (unit-test fixtures
+    # driving the daily step directly) leaves the clock where it is.
+    date === nothing || fates_get_and_set_time!(date...)
+
+    # LUH2 land use: dynSubgrid_driver calls dynFatesLandUseInterp every timestep
+    # (use_fates_luh .and. .not. use_fates_potentialveg) with the get_curr_date year;
+    # the arrays are only read here, so refreshing them at the daily step is the same.
+    luh = fates.luh
+    if luh !== nothing && !luh.use_potentialveg
+        dyn_fates_landuse_interp!(luh, hlm_current_year[])
+    end
 
     # 0. CNP: parse the nutrient-acquisition boundary conditions out to the cohorts
     #    BEFORE the demographic step (sets cohort daily_n/p_demand + daily_*_uptake
@@ -714,6 +937,19 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     # Map each FATES site index s -> its CLM column c (the s-th is_fates column).
     site_col = zeros(Int, fates.nsites)
 
+    # Seeds dispersed from neighbouring gridcells into each site (no-op when off).
+    if fates.seeds !== nothing
+        let s0 = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s0 += 1
+                s0 <= fates.nsites || break
+                fates.seed_gridcell[s0] = col.gridcell[c]
+            end
+        end
+        fates_wrap_update_seed_inout!(fates)
+    end
+
     s = 0
     for c in 1:length(col.is_fates)
         col.is_fates[c] || continue
@@ -725,13 +961,20 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         fates_pack_bcin_daily!(inst; s=s, c=c, nlevsoil=nlevsoil,
                                nlevdecomp=nlevdecomp, use_fates_bgc=use_fates_bgc,
                                fire_weather=fire_weather)
+        # Plant hydraulics: the daily soil hydraulic properties + liquid water
+        # (dynamics_driv, clmfates_interfaceMod.F90:1184-1191).
+        if hlm_use_planthydro[] == itrue
+            fates_pack_bcin_hydro_soil!(fates.bc_in[s], inst; c=c, nlevsoil=nlevsoil)
+        end
+        # LUH2 harvest rates / states / transitions of the site's gridcell.
+        luh === nothing || fates_pack_bcin_landuse!(fates.bc_in[s], luh, col.gridcell[c])
 
         site = fates.sites[s]
         bc_in  = fates.bc_in[s]
         bc_out = fates.bc_out[s]
 
         # 2-3. the demographic step + site diagnostics update.
-        ed_ecosystem_dynamics(site, bc_in, bc_out)
+        ed_ecosystem_dynamics(site, bc_in, bc_out; fates_hist = fates.hist)
         ed_update_site(site, bc_in, bc_out, false)
 
         # 4. final mass-conservation audit (throws on imbalance).
@@ -750,7 +993,10 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     #    in wrap_update_hlmfates_dyn after dynamics). `fcolumn` (site->column map) is
     #    unused by the body, which indexes only by site.
     canopy_summarization!(fates.nsites, fates.sites, fates.bc_in)
+    fates_wrap_seed_outgoing!(fates)
     update_hlm_dynamics!(fates.nsites, fates.sites, site_col, fates.bc_out)
+    # wrap_update_hlmfates_dyn's litter-quality hand-off (decomp_method /= no_soil_decomp).
+    use_fates_bgc && fates_update_litr_lig_c_to_n!(inst)
 
     # 6. per FATES column: unpack the canopy structure into CLM for each vegetated
     #    patch (the ifp walk — a disturbance can split one patch into several), then
@@ -759,6 +1005,12 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     for s in 1:fates.nsites
         c = site_col[s]
         c == 0 && continue
+        # wrap_update_hlmfates_dyn (clmfates_interfaceMod.F90:1552-1558): the plant
+        # water storage the host column water balance carries.
+        if hlm_use_planthydro[] == itrue
+            inst.water.waterdiagnosticbulk_inst.total_plant_stored_h2o_col[c] =
+                fates.bc_out[s].plant_stored_h2o_si
+        end
         # Fortran flushes the canopy over the column's WHOLE patch range (bare
         # ground included) BEFORE filling the vegetated patches from bc_out, so the
         # bare-ground patch carries elai=esai=0 (not the cold-start NaN) into the
@@ -791,6 +1043,9 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
         update_history_dyn!(fates.hist, 1, fates.nsites, fates.sites, fates.bc_in)
     end
 
+    # 8. clm_drv's WrapGlobalSeedDispersal (once per day, after the clump loop).
+    fates_wrap_global_seed_dispersal!(fates)
+
     return inst
 end
 
@@ -809,33 +1064,33 @@ function fates_hifrq_history_step!(inst::CLMInstances; dt_tstep::Real)
     fates.hist === nothing && return inst
     update_history_hifrq!(fates.hist, 1, fates.nsites, fates.sites,
                           fates.bc_in, fates.bc_out, dt_tstep)
-    # plant-hydraulics history (no-op unless hlm_use_planthydro is on + si_hydr built)
-    update_history_hydraulics!(fates.hist, 1, fates.nsites, fates.sites,
-                               fates.bc_in, dt_tstep)
+    # (The plant-hydraulics history fill runs inside fates_hydraulics_step!, where
+    # the Fortran wrap_hydraulics_drive calls update_history_hydraulics.)
     return inst
 end
 
 """
-    fates_pack_bcin_hydro!(inst; s=1, c=1, p=1, nlevsoil)
+    fates_pack_bcin_hydro!(inst; s=1, c=1, nlevsoil, exposedvegp=nothing)
 
-Fill the FATES plant-hydraulics `bc_in` soil-rhizosphere fields for site `s` from
-CLM column `c` / vegetated patch `p`, packing exactly the inputs the
-`hydraulics_drive` (FillDrainRhizShells + Hydraulics_BC) solve reads:
+Fill the FATES plant-hydraulics `bc_in` for site `s` from CLM column `c`, exactly
+the "Prepare Input Boundary Conditions" block of the CTSM host
+`wrap_hydraulics_drive` (clmfates_interfaceMod.F90:3538-3577):
 
-  * `watsat_sisl` / `eff_porosity_sl` — saturated / effective porosity.
-  * `sucsat_sisl` — minimum soil suction (mm).
-  * `bsw_sisl` — Clapp-Hornberger "b".
-  * `hksat_sisl` — saturated hydraulic conductivity (mm/s).
-  * `h2o_liq_sisl` — liquid water mass in the soil layer (kg/m2).
-  * `smpmin_si` — host minimum soil matric potential (mm).
-  * `qflx_transp_pa[ifp]` — the HLM canopy-solver transpiration demand for the
-    vegetated patch (mm H2O/s, + into root). ifp = 1 for the single veg patch.
+  * `smpmin_si` <- `smpmin_col` (minimum soil matric potential, mm);
+  * per soil layer: `watsat_sisl`, `watres_sisl`, `sucsat_sisl`, `bsw_sisl`,
+    `h2o_liq_sisl` (liquid water, kg/m2) and `eff_porosity_sl`;
+  * per vegetated patch `ifp`: `swrad_net_pa` <- `fsa_patch`, `lwrad_net_pa` <-
+    `eflx_lwrad_net_patch`;
+  * `qflx_transp_pa[ifp]` <- `qflx_tran_veg_patch` for the patches in the
+    exposed-vegetation filter `exposedvegp` (the CanopyFluxes `filterp`). Patches
+    outside it keep the zero set at the start of the canopy-flux step
+    (`prep_canopyfluxes`). `exposedvegp = nothing` packs every vegetated patch.
 
-`zi_sisl`/`dz_sisl` are set once at cold-start and are not re-packed here.
-Gated by the caller behind `config.use_fates && hlm_use_planthydro==itrue`.
+`hksat_sisl` is packed at init and by the daily step, as in the Fortran.
 """
 function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
-                                p::Int = 1, nlevsoil::Int)
+                                nlevsoil::Int,
+                                exposedvegp::Union{Nothing,AbstractVector{Bool}} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     bc = fates.bc_in[s]
@@ -847,67 +1102,147 @@ function fates_pack_bcin_hydro!(inst::CLMInstances; s::Int = 1, c::Int = 1,
 
     joff = varpar.nlevsno  # snow-layer offset into h2osoi_liq_col
 
+    bc.smpmin_si = ss.smpmin_col[c]
     for j in 1:nlevsoil
         bc.watsat_sisl[j]     = ss.watsat_col[c, j]
-        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
+        # watres is not computed by the host's Clapp-Hornberger configuration (and
+        # FATES never reads it); keep the bc finite.
+        wr = isempty(ss.watres_col) ? 0.0 : ss.watres_col[c, j]
+        bc.watres_sisl[j]     = isfinite(wr) ? wr : 0.0
         bc.sucsat_sisl[j]     = ss.sucsat_col[c, j]
         bc.bsw_sisl[j]        = ss.bsw_col[c, j]
-        bc.hksat_sisl[j]      = ss.hksat_col[c, j]
         bc.h2o_liq_sisl[j]    = wsb.ws.h2osoi_liq_col[c, joff + j]
+        bc.eff_porosity_sl[j] = ss.eff_porosity_col[c, j]
     end
 
-    bc.smpmin_si = (!isempty(ss.smpmin_col) && isfinite(ss.smpmin_col[c])) ?
-                   ss.smpmin_col[c] : -1.0e8
-
-    # Patch transpiration demand per vegetated patch (ifp walk → HLM patch p).
     for (ifp, pp) in fates_veg_patches(fates.sites[s], c, col)
-        bc.qflx_transp_pa[ifp] = wfb.wf.qflx_tran_veg_patch[pp]
+        bc.swrad_net_pa[ifp] = inst.solarabs.fsa_patch[pp]
+        bc.lwrad_net_pa[ifp] = inst.energyflux.eflx_lwrad_net_patch[pp]
+        if exposedvegp === nothing || exposedvegp[pp]
+            bc.qflx_transp_pa[ifp] = wfb.wf.qflx_tran_veg_patch[pp]
+        end
     end
 
     return inst
 end
 
 """
-    fates_hydraulics_step!(inst; nlevsoil)
+    fates_pack_bcin_hydro_soil!(bc, inst; c, nlevsoil, coldstart=false)
 
-Run one FATES plant-hydraulics transpiration/uptake step for every FATES site
-attached to `inst`, mirroring the Fortran host's `hydraulics_drive` call from the
-canopy-flux/photosynthesis path:
-
-  1. pack the soil-rhizosphere + transpiration `bc_in` (`fates_pack_bcin_hydro!`)
-     for each site's CLM column / vegetated patch,
-  2. `hydraulics_drive(nsites, sites, bc_in, bc_out, dtime)` — reconcile the
-     rhizosphere shells with the host soil column then run `Hydraulics_BC`, which
-     populates `co_hydr.ftc_ag/ftc_troot/ftc_aroot`, `co_hydr.btran`, and
-     `psi_ag[1]` (leaf_psi) — the fields the mortality + photosynthesis branches
-     consume — and fills `bc_out.qflx_soil2root_sisl` / `plant_stored_h2o_si`.
-
-The site<->column<->veg-patch map mirrors the W3/W4 hooks. Returns `inst`. Gated
-by the caller behind `config.use_fates && hlm_use_planthydro[]==itrue`; a no-op
-when no site has a built `si_hydr`.
+Pack into the FATES site boundary condition `bc` the static + liquid soil fields the FATES hydraulics init / daily /
+restart paths read from CLM column `c`: `hksat_sisl`, `watsat_sisl`, `sucsat_sisl`,
+`bsw_sisl`, `h2o_liq_sisl` and (not on the cold start) `watres_sisl`. With
+`coldstart = true` it also fills `eff_porosity_sl` from the column ice, as
+`init_coldstart` does before `HydrSiteColdStart` (clmfates_interfaceMod.F90:2125-2154):
+`eff_porosity = max(0.01, watsat - min(watsat, h2osoi_ice/(dz*denice)))`.
+Mirrors the planthydro blocks of `dynamics_driv` (:1184-1191), the restart
+(:1968-1990) and `init_coldstart`.
 """
-function fates_hydraulics_step!(inst::CLMInstances; nlevsoil::Int, dtime::Real)
+function fates_pack_bcin_hydro_soil!(bc, inst::CLMInstances; c::Int,
+                                     nlevsoil::Int, coldstart::Bool = false)
+    ss  = inst.soilstate
+    ws  = inst.water.waterstatebulk_inst.ws
+    col = inst.column
+    joff = varpar.nlevsno
+    for j in 1:nlevsoil
+        bc.hksat_sisl[j]   = ss.hksat_col[c, j]
+        bc.watsat_sisl[j]  = ss.watsat_col[c, j]
+        bc.sucsat_sisl[j]  = ss.sucsat_col[c, j]
+        bc.bsw_sisl[j]     = ss.bsw_col[c, j]
+        bc.h2o_liq_sisl[j] = ws.h2osoi_liq_col[c, joff + j]
+        if coldstart
+            vol_ice = min(ss.watsat_col[c, j],
+                          ws.h2osoi_ice_col[c, joff + j] / (col.dz[c, joff + j] * DENICE))
+            bc.eff_porosity_sl[j] = max(0.01, ss.watsat_col[c, j] - vol_ice)
+        else
+            wr = isempty(ss.watres_col) ? 0.0 : ss.watres_col[c, j]
+            bc.watres_sisl[j] = isfinite(wr) ? wr : 0.0
+        end
+    end
+    return inst
+end
+
+"""
+    fates_hydraulics_step!(inst; nlevsoil, dtime, exposedvegp=nothing)
+
+One FATES plant-hydraulics step for every FATES site, the CTSM host
+`wrap_hydraulics_drive` (clmfates_interfaceMod.F90:3508-3615), called at the end
+of CanopyFluxes right after `wrap_accumulatefluxes` (CanopyFluxesMod.F90:1635):
+
+  1. pack the soil + transpiration `bc_in` (`fates_pack_bcin_hydro!`);
+  2. `hydraulics_drive` — `FillDrainRhizShells` (reconcile the rhizosphere shells
+     with the host soil water) then `Hydraulics_BC` (the 1-D Taylor solve per
+     cohort), which fills `co_hydr` (psi/ftc/btran), `bc_out.qflx_soil2root_sisl`
+     and `bc_out.plant_stored_h2o_si`;
+  3. `total_plant_stored_h2o_col(c) = bc_out.plant_stored_h2o_si` (the plant water
+     the host column water balance carries);
+  4. the plant-hydraulics history fill (`update_history_hydraulics!`).
+
+The root uptake reaches the host soil in [`fates_compute_root_soil_flux!`](@ref).
+Gated by the caller on `use_fates` and `hlm_use_planthydro`.
+"""
+function fates_hydraulics_step!(inst::CLMInstances; nlevsoil::Int, dtime::Real,
+                                exposedvegp::Union{Nothing,AbstractVector{Bool}} = nothing)
     fates = inst.fates
     fates === nothing && return inst
     hlm_use_planthydro[] == itrue || return inst
     col = inst.column
 
+    site_col = zeros(Int, fates.nsites)
     s = 0
     for c in 1:length(col.is_fates)
         col.is_fates[c] || continue
         s += 1
         s <= fates.nsites || break
-        # A site without a built hydraulics object (planthydro just toggled, or no
-        # cold-start hydro init) has nothing to solve — skip it.
-        fates.sites[s].si_hydr === nothing && continue
-        # fates_pack_bcin_hydro! walks all the site's vegetated patches internally
-        # (ifp → HLM patch p) for the per-patch transpiration demand.
-        fates_pack_bcin_hydro!(inst; s=s, c=c, nlevsoil=nlevsoil)
+        site_col[s] = c
+        fates_pack_bcin_hydro!(inst; s=s, c=c, nlevsoil=nlevsoil, exposedvegp=exposedvegp)
     end
 
-    # Only drive when at least one site is hydro-enabled.
-    any(site -> site.si_hydr !== nothing, fates.sites) || return inst
     hydraulics_drive(fates.nsites, fates.sites, fates.bc_in, fates.bc_out, dtime)
+
+    wdb = inst.water.waterdiagnosticbulk_inst
+    for s in 1:fates.nsites
+        c = site_col[s]
+        c == 0 && continue
+        wdb.total_plant_stored_h2o_col[c] = fates.bc_out[s].plant_stored_h2o_si
+    end
+
+    if fates.hist !== nothing
+        update_history_hydraulics!(fates.hist, 1, fates.nsites, fates.sites,
+                                   fates.bc_in, dtime)
+    end
+    return inst
+end
+
+"""
+    fates_compute_root_soil_flux!(inst; nlevsoil)
+
+Hand the FATES root water uptake to the host soil: for every FATES site,
+`qflx_rootsoi_col(c, 1:nlevsoil) = bc_out.qflx_soil2root_sisl(1:nlevsoil)`
+[mm H2O/s, + out of the soil]. This replaces the root-fraction x transpiration
+profile `compute_effec_rootfrac_and_vert_tran_sink!` wrote for the column, so the
+Richards solve (`soil_water!`) removes what the plant hydraulics actually took up
+(which differs from the transpiration by the change in plant water storage).
+Mirrors the CTSM host `ComputeRootSoilFlux` (clmfates_interfaceMod.F90:3446-3504),
+called from HydrologyNoDrainage between `Compute_EffecRootFrac_And_VertTranSink`
+and `SoilWater` (HydrologyNoDrainageMod.F90:342-344). Gated on `hlm_use_planthydro`.
+"""
+function fates_compute_root_soil_flux!(inst::CLMInstances; nlevsoil::Int)
+    fates = inst.fates
+    fates === nothing && return inst
+    hlm_use_planthydro[] == itrue || return inst
+    col = inst.column
+    wfb = inst.water.waterfluxbulk_inst
+    s = 0
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        s += 1
+        s <= fates.nsites || break
+        q = fates.bc_out[s].qflx_soil2root_sisl
+        for j in 1:nlevsoil
+            wfb.qflx_rootsoi_col[c, j] = q[j]
+        end
+    end
     return inst
 end
 
@@ -1040,9 +1375,17 @@ function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
 
     cs.elai_patch[p]   = bc.elai_pa[ifp]
     cs.esai_patch[p]   = bc.esai_pa[ifp]
-    cs.tlai_patch[p]   = bc.tlai_pa[ifp]
-    cs.tsai_patch[p]   = bc.tsai_pa[ifp]
-    cs.htop_patch[p]   = bc.htop_pa[ifp]
+    if hlm_use_sp[] == itrue
+        # wrap_update_hlmfates_dyn: under SP the FATES totals go to the *_hist copies;
+        # tlai/tsai/htop stay the host's satellite-phenology values.
+        cs.tlai_hist_patch[p] = bc.tlai_pa[ifp]
+        cs.tsai_hist_patch[p] = bc.tsai_pa[ifp]
+        cs.htop_hist_patch[p] = bc.htop_pa[ifp]
+    else
+        cs.tlai_patch[p]   = bc.tlai_pa[ifp]
+        cs.tsai_patch[p]   = bc.tsai_pa[ifp]
+        cs.htop_patch[p]   = bc.htop_pa[ifp]
+    end
     cs.hbot_patch[p]   = bc.hbot_pa[ifp]
     cs.z0m_patch[p]    = bc.z0m_pa[ifp]
     cs.displa_patch[p] = bc.displa_pa[ifp]
@@ -1052,4 +1395,66 @@ function fates_unpack_bcout_canopy_structure!(inst::CLMInstances; s::Int = 1,
     end
 
     return inst
+end
+
+# Last HLM patch of column c (patchf, or patchi + npatches - 1 when a hand-built
+# harness leaves patchf unset) -- the same bound fates_veg_patches uses.
+function _fates_col_patchf(col, c::Int)
+    pf = col.patchf[c]
+    pf >= col.patchi[c] && return pf
+    npc = col.npatches[c]
+    return npc >= 1 ? col.patchi[c] + npc - 1 : col.patchi[c]
+end
+
+"""
+    fates_transfer_z0m_disp!(inst)
+
+Copy the FATES momentum roughness length and displacement height into the HLM for
+every FATES column. Mirrors `clmfates_interfaceMod::TransferZ0mDisp`, which
+`BiogeophysPreFluxCalcsMod::SetZ0mDisp` calls every timestep before it sets z0m/displa
+for the non-FATES patches only: zero patches `patchi+1:patchf` of the column, then fill
+each vegetated FATES patch `p = ifp + patchi` from `bc_out%z0m_pa / displa_pa`.
+"""
+function fates_transfer_z0m_disp!(inst::CLMInstances)
+    fates = inst.fates
+    fates === nothing && return inst
+    col = inst.column
+    cs = inst.canopystate
+    s = 0
+    for c in 1:length(col.is_fates)
+        col.is_fates[c] || continue
+        s += 1
+        s <= fates.nsites || break
+        pi, pf = col.patchi[c], _fates_col_patchf(col, c)
+        for p in (pi + 1):pf
+            cs.z0m_patch[p] = 0.0
+            cs.displa_patch[p] = 0.0
+        end
+        bc = fates.bc_out[s]
+        for (ifp, p) in fates_veg_patches(fates.sites[s], c, col)
+            cs.z0m_patch[p] = bc.z0m_pa[ifp]
+            cs.displa_patch[p] = bc.displa_pa[ifp]
+        end
+    end
+    return inst
+end
+
+"""
+    fates_patch_is_fates(inst) -> Vector{Bool}
+
+Fortran `patch%is_fates`: true for the vegetated patch slots `patchi+1:patchf` of every
+FATES column (clmfates_interfaceMod::init, `patch%is_fates(pi:pf) = .true.` with
+`pi = col%patchi(c)+1`). The bare-ground patch `patchi` is NOT flagged, so the host
+`SetZ0mDisp` still sets its z0m / displa.
+"""
+function fates_patch_is_fates(inst::CLMInstances)
+    col = inst.column
+    out = fill(false, length(inst.patch.column))
+    for c in eachindex(col.is_fates)
+        col.is_fates[c] || continue
+        for p in (col.patchi[c] + 1):_fates_col_patchf(col, c)
+            out[p] = true
+        end
+    end
+    return out
 end

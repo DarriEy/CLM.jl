@@ -19,12 +19,12 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
-const DUMPDIR_CH4 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bow_ref_ch4tws"
-const INV_FILE    = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/paramdata/" *
+const DUMPDIR_CH4 = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bow_ref_ch4tws"
+const INV_FILE    = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/paramdata/" *
                     "finundated_inversiondata_0.9x1.25_c170706.nc"
 const N0    = 4720
 const DATE0 = DateTime(2003, 7, 16, 16)
-const FNDEP = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/ndepdata/" *
+const FNDEP = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
               "fndep_clm_UNIFORM1e-8_0.9x1.25_yr2000_CLMjl-parity.nc"
 const FFORCING2002 = joinpath(dirname(FFORCING), "clmforc.2002.nc")
 const FORCE_DATE0  = DateTime(2002, 7, 16, 15)

@@ -623,6 +623,10 @@ include("fates/FatesHistoryVariableType.jl")
 include("fates/FatesHistoryInterfaceMod.jl")
 include("fates/FatesRestartVariableType.jl")
 include("fates/FatesRestartInterfaceMod.jl")
+# Host side of FATES land use (dynFATESLandUseChangeMod LUH2 reader, landuse x PFT
+# data, fates_harvest_mode switches). Needs dyn_file_io.jl; before FatesInterfaceMod,
+# whose fates_interface_type holds the DynFatesLandUse.
+include("fates/fates_driver_landuse.jl")
 include("fates/FatesInterfaceMod.jl")
 # Real FATES parameter-file reader: read_fates_params! parses the official FATES
 # default parameter file (data/fates/fates_params_default.cdl) and populates every
@@ -638,6 +642,11 @@ include("fates/fates_driver_init.jl")
 # column/patch state and the FATES site boundary conditions. Depends on
 # CLMInstances + fates_driver_init.jl (the cold-start that builds inst.fates).
 include("fates/fates_driver_bc.jl")
+# use_fates_bgc host coupling: FATES litter -> CLM decomposition pools
+# (UpdateC/NLitterFluxes) and CLM HR/soil C -> FATES history (wrap_update_hifrq_hist).
+include("fates/fates_driver_soilbgc.jl")
+# Host side of a FATES restart: write the packed restart vectors / rebuild the sites.
+include("fates/fates_driver_restart.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)

@@ -10,12 +10,12 @@
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
-const BOW_CAL = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/" *
+const BOW_CAL = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/" *
                 "domain_Bow_at_Banff_lumped/settings/CLM/parameters"
 const BOW_FS  = joinpath(BOW_CAL, "surfdata_clm.nc")
 const BOW_FP  = joinpath(BOW_CAL, "clm5_params.nc")
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 
 function set_forcing!(inst, ng, nc, step)
     a = inst.atm2lnd

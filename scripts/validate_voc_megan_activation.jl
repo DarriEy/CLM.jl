@@ -104,10 +104,10 @@ function check(name, got, exp; tol=TOL)
 end
 
 # ---- locate REAL fixtures, else synthesize (and say so) ----------------------
-const _REAL_MFF = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/cesm-inputdata/atm/cam/chem/trop_mozart/emis/megan21_emis_factors_78pft_c20161108.nc"
+const _REAL_MFF = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/installs/cesm-inputdata/atm/cam/chem/trop_mozart/emis/megan21_emis_factors_78pft_c20161108.nc"
 const _REAL_SD_CANDIDATES = [
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Peatland_MerBleue_Canada/settings/CLM/parameters/surfdata_clm.nc",
-    "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_lake_run/surfdata_lake100.nc",
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Peatland_MerBleue_Canada/settings/CLM/parameters/surfdata_clm.nc",
+    "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_lake_run/surfdata_lake100.nc",
 ]
 
 function _synth_mff(path)

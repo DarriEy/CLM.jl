@@ -1,5 +1,6 @@
 # ==========================================================================
-# gpu_adapt.jl — shared Float32 down-adaptor for the gpu_validate_* harnesses.
+# gpu_adapt.jl — shared device adaptor for the gpu_validate_* harnesses
+# (Float32 down-conversion on Float32-only backends; Float64 kept otherwise).
 #
 # Consolidates the `_F32` / `_F32S` adaptor pattern that was copy-pasted into
 # ~23 harness scripts. `include` this and use `mf(MtlArray, x)` (or the curried
@@ -69,7 +70,29 @@ CLM.Adapt.adapt_storage(::_F32S, x::Float64) = Float32(x)
 # on the scalar coeff fields, so keep every scalar and adapt only the texture arrays.
 CLM.Adapt.adapt_structure(a::_F32S, x::CLM.DecompMIMICSState) = _adapt_arrays_only(a, x)
 
-# Move a host state tree to `devarray` (e.g. Metal.MtlArray) as Float32 via _F32.
-mf(devarray, x) = CLM.Adapt.adapt(devarray, CLM.Adapt.adapt(_F32(), x))
+# --- _HostPrep: precision-preserving host pre-pass (Float64 backends) ---------
+# Only unpacks BitArray/Bool masks to Vector{Bool} (device adapt cannot take packed
+# bits); every float array and scalar keeps its Float64 eltype.
+struct _HostPrep end
+CLM.Adapt.adapt_storage(::_HostPrep, x::AbstractArray{Bool}) = collect(Bool, x)
+CLM.Adapt.adapt_storage(::_HostPrep, x::AbstractArray) = x
+
+# Down-convert to Float32 only when the detected backend is Float32-only (Metal).
+# On a Float64 backend (CUDA/AMDGPU/oneAPI) `mf` used to demote the whole state tree
+# to Float32 regardless, so those harnesses printed "working precision: Float64"
+# while comparing a Float32 device run against the Float64 CPU reference — the same
+# silent demotion #263 removed from `cu()`. GPU_ADAPT_F32=1 forces the old Float32
+# path on any backend (e.g. to reproduce a Metal-precision result on CUDA).
+function _mf_f32()
+    get(ENV, "GPU_ADAPT_F32", "0") == "1" && return true
+    b = isdefined(@__MODULE__, :detect_backend) ? detect_backend() : nothing
+    return b === nothing || b[3] === Float32
+end
+
+# Move a host state tree to `devarray` (e.g. Metal.MtlArray) at the backend's
+# working precision: Float32 via _F32 on Metal, Float64 kept on CUDA/AMDGPU.
+mf(devarray, x) = _mf_f32() ? CLM.Adapt.adapt(devarray, CLM.Adapt.adapt(_F32(), x)) :
+                              CLM.Adapt.adapt(devarray, CLM.Adapt.adapt(_HostPrep(), x))
 # Variant routing scalar-FT structs through _F32S.
-mfs(devarray, x) = CLM.Adapt.adapt(devarray, CLM.Adapt.adapt(_F32S(), x))
+mfs(devarray, x) = _mf_f32() ? CLM.Adapt.adapt(devarray, CLM.Adapt.adapt(_F32S(), x)) :
+                               CLM.Adapt.adapt(devarray, CLM.Adapt.adapt(_HostPrep(), x))

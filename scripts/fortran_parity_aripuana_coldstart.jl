@@ -38,13 +38,13 @@
 # =============================================================================
 using CLM, NCDatasets, Dates, Printf
 
-const ARI   = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Aripuana_Amazon"
+const ARI   = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/domain_Aripuana_Amazon"
 const FS    = joinpath(ARI, "settings/CLM/parameters/surfdata_clm.nc")
 const FP    = joinpath(ARI, "settings/CLM/parameters/clm5_params.nc")
 const FFORC = joinpath(ARI, "data/forcing/CLM_input/clmforc.2002.nc")
-const RDIR  = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_aripuana_parity"
-const SNOWOPT = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
-const SNOWAGE = "/Users/darri.eythorsson/projects/cesm-inputdata/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
+const RDIR  = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_aripuana_parity"
+const SNOWOPT = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_optics_5bnd_c013122.nc"
+const SNOWAGE = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/snicardata/snicar_drdt_bst_fit_60_c070416.nc"
 
 restart_file(dt::DateTime) = joinpath(RDIR, @sprintf("Aripuana_Amazon.clm2.r.%04d-%02d-%02d-%05d.nc",
     year(dt), month(dt), day(dt), hour(dt)*3600 + minute(dt)*60 + second(dt)))
@@ -122,7 +122,7 @@ function main(nsteps::Int)
         end
         CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
         (yr, mon, d, tod) = CLM.get_curr_date(tm)
-        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, CLM.nuopc_doalb(tm.nstep), nextsw, declin, declin,
             CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=tm.nstep, is_first_step=(s == 1),
             is_beg_curr_day=CLM.is_beg_curr_day(tm), is_end_curr_day=CLM.is_end_curr_day(tm),

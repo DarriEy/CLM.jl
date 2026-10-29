@@ -323,6 +323,14 @@ function set_inventory_cohort_type1!(csite::ed_site_type, bc_in,
     for i_pft in 1:ncohorts_to_create
         # temp_cohort is a scratch cohort needed by the allometry funcs.
         temp_cohort = fates_cohort_type()
+        # Cohort age of an inventory cohort. The Fortran passes `temp_cohort%coage`
+        # from a bare `allocate(temp_cohort)` (FatesInventoryInitMod.F90:940, 1119):
+        # never initialised, de facto 0 (inventories carry no ages, which is why
+        # inventory init and cohort age tracking are mutually exclusive). The port's
+        # default is NaN, and `fuse_cohorts` always evaluates the coage ratio, so a
+        # NaN coage silently blocked every fusion of inventory-born cohorts and their
+        # disturbance/recruit copies (14 days: 335 cohorts vs Fortran's 57).
+        temp_cohort.coage = 0.0
 
         if c_pft != 0
             temp_cohort.pft = c_pft               # normal case
@@ -675,7 +683,8 @@ function initialize_sites_by_inventory!(nsites::Integer, sites::AbstractVector,
                                         bc_in::AbstractVector;
                                         sitelist_lines,
                                         pss_provider = read_lines_file,
-                                        css_provider = read_lines_file)
+                                        css_provider = read_lines_file,
+                                        site_coords = nothing)
 
     nfilesites = count_inventory_sites(sitelist_lines)
     if nfilesites < 1
@@ -687,12 +696,22 @@ function initialize_sites_by_inventory!(nsites::Integer, sites::AbstractVector,
 
     for s in 1:nsites
         site = sites[s]
+        # The model site's coordinates: `sites(s)%lat/lon` in Fortran (set from the
+        # host gridcell, clmfates_interfaceMod.F90:884-885). `site_coords[s] =
+        # (lat, lon)` supplies them from the host when the site fields are not set.
+        slat, slon = site_coords === nothing ? (site.lat, site.lon) : site_coords[s]
+        # The inventory list longitudes are converted to [0, 360] (assess_inventory_
+        # sites, as in Fortran), but the Fortran compares them with the host longitude
+        # as-is, so a site whose host longitude is negative (any [-180, 180] mesh, e.g.
+        # the Bow single-point mesh at -116.01) can never match and aborts below.
+        # Deliberate deviation: wrap the site longitude into [0, 360) too.
+        slon = slon < 0.0 ? slon + 360.0 : slon
 
         # Identify the most proximal PSS/CSS couplet (Fortran minloc).
         invsite = 1
         best = Inf
         for i in 1:nfilesites
-            d2 = (site.lat - inv_lat_list[i])^2 + (site.lon - inv_lon_list[i])^2
+            d2 = (slat - inv_lat_list[i])^2 + (slon - inv_lon_list[i])^2
             if d2 < best
                 best = d2
                 invsite = i
@@ -700,7 +719,7 @@ function initialize_sites_by_inventory!(nsites::Integer, sites::AbstractVector,
         end
 
         if sqrt(best) > max_site_adjacency_deg
-            fates_endrun(string("Model site at lat:", site.lat, " lon:", site.lon,
+            fates_endrun(string("Model site at lat:", slat, " lon:", slon,
                 " has no reasonably proximal site in the inventory site list. Closest is at lat:",
                 inv_lat_list[invsite], " lon:", inv_lon_list[invsite],
                 ". Separation must be less than ", max_site_adjacency_deg, " degrees."))

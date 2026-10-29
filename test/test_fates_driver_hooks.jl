@@ -149,6 +149,58 @@ using CLM
         end
 
         # ================================================================
+        # W3b — host canopy-snow fraction reaches FATES radiation
+        # (clmfates_interfaceMod::wrap_canopy_radiation passes fcansno(p)).
+        # ================================================================
+        @testset "fcansno passed to FATES Norman radiation" begin
+            if sa.coszen_col[cveg] > 0 && CLM.fates_in_vegsol_filter(inst, pveg, sa.coszen_col[cveg])
+                albd_vis = Float64[]
+                for fsno in (0.0, 0.8)
+                    wdb.fcansno_patch[pveg] = fsno
+                    CLM.fates_pack_bcin_radiation!(inst; s=1, c=cveg, p=pveg, coszen=sa.coszen_col[cveg])
+                    @test inst.fates.bc_in[1].fcansno_pa[1] == fsno
+                    CLM.FatesNormalizedCanopyRadiation(inst.fates.nsites, inst.fates.sites,
+                                                       inst.fates.bc_in, inst.fates.bc_out)
+                    push!(albd_vis, inst.fates.bc_out[1].albd_parb[1, 1])
+                end
+                # snow on the canopy (rho_snow vis = 0.8) brightens the visible albedo
+                @test albd_vis[2] > albd_vis[1]
+            end
+            # A NaN host value (cold, never computed) maps to zero snow.
+            wdb.fcansno_patch[pveg] = NaN
+            CLM.fates_pack_bcin_radiation!(inst; s=1, c=cveg, p=pveg, coszen=sa.coszen_col[cveg])
+            @test inst.fates.bc_in[1].fcansno_pa[1] == 0.0
+            wdb.fcansno_patch[pveg] = 0.0
+            CLM.fates_pack_bcin_radiation!(inst; s=1, c=cveg, p=pveg, coszen=sa.coszen_col[cveg])
+            CLM.FatesNormalizedCanopyRadiation(inst.fates.nsites, inst.fates.sites,
+                                               inst.fates.bc_in, inst.fates.bc_out)
+        end
+
+        # ================================================================
+        # TransferZ0mDisp + SetZ0mDisp: FATES patches keep FATES z0m/displa.
+        # ================================================================
+        @testset "FATES z0m/displa survive SetZ0mDisp" begin
+            bco = inst.fates.bc_out[1]
+            bco.z0m_pa[1] = 0.37; bco.displa_pa[1] = 2.6
+            CLM.fates_transfer_z0m_disp!(inst)
+            @test cs.z0m_patch[pveg] == 0.37
+            @test cs.displa_patch[pveg] == 2.6
+            pif = CLM.fates_patch_is_fates(inst)
+            @test pif == [false, true]       # bare ground (patchi) is not is_fates
+            cs.htop_patch .= 10.0
+            mask = trues(2)
+            CLM.set_z0m_displa!(cs, inst.frictionvel, inst.patch, inst.landunit,
+                                mask, 1:2; patch_is_fates = pif)
+            @test cs.z0m_patch[pveg] == 0.37         # FATES value kept
+            @test cs.displa_patch[pveg] == 2.6
+            @test isfinite(cs.displa_patch[1])       # host formula on the bare patch
+            @test cs.displa_patch[1] != 2.6
+            # Default path (no FATES mask): the host formula overwrites every patch.
+            CLM.set_z0m_displa!(cs, inst.frictionvel, inst.patch, inst.landunit, mask, 1:2)
+            @test cs.displa_patch[pveg] != 2.6
+        end
+
+        # ================================================================
         # W3a — FATES sun/shade fractions.
         # ================================================================
         CLM.fates_pack_bcin_radiation!(inst; s=1, c=cveg, p=pveg, coszen=sa.coszen_col[cveg])
