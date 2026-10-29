@@ -191,7 +191,7 @@ function canopy_rev_aux(inst, bounds, filt; use_psn::Bool = false, dtime = 1800.
     # Every array referenced by a differentiated device kernel must share its
     # backend. Adapt the complete NamedTuple so synthetic constants (`pft`,
     # `filterp`, `active`, and non-PSN placeholders) cannot remain on host.
-    return ev isa Array ? aux : Adapt.adapt(typeof(ev).name.wrapper, aux)
+    return ev isa Union{Array,BitArray} ? aux : Adapt.adapt(typeof(ev).name.wrapper, aux)
 end
 
 # --------------------------------------------------------------------------
@@ -726,6 +726,13 @@ end
 
 function soilwater_rev_phase!(b, aux)
     i = b.inst
+    soil_water!(i.column, aux.hydrologyc, aux.urbanc,
+        i.soilhydrology, i.soilstate, i.water.waterfluxbulk_inst, i.water.waterstatebulk_inst,
+        i.temperature, i.canopystate, i.energyflux, aux.swrc, aux.cfg, aux.dtime)
+    return nothing
+end
+function soilwater_dev_rev_phase!(b, aux)
+    i = b.inst
     if aux.cfg.soilwater_movement_method == MOISTURE_FORM
         use_aquifer_layer(aux.cfg) && error("CUDA reverse moisture form with aquifer recharge is not decomposed")
         ws = i.water.waterstatebulk_inst.ws
@@ -765,6 +772,15 @@ watertable_rev_aux(bounds, filt, config; dtime = 1800.0) = (;
     recompute_frost_table = config.use_aquifer_layer)
 
 function watertable_rev_phase!(b, aux)
+    i = b.inst
+    water_table!(i.soilhydrology, i.soilstate,
+        i.temperature.t_soisno_col, i.water.waterstatebulk_inst.ws, i.water.waterfluxbulk_inst,
+        i.column.dz, i.column.z, i.column.zi,
+        aux.hydrologyc, aux.bc_col, aux.nlevsoi, aux.dtime;
+        recompute_frost_table = aux.recompute_frost_table)
+    return nothing
+end
+function watertable_dev_rev_phase!(b, aux)
     i = b.inst
     ws = i.water.waterstatebulk_inst.ws
     wf = i.water.waterfluxbulk_inst.wf
@@ -899,6 +915,12 @@ function setfloodc_rev_phase!(b, aux)
 end
 function satexcess_rev_phase!(b, aux)
     i = b.inst
+    saturated_excess_runoff!(i.sat_excess_runoff, aux.hydrologyc, aux.bc_col,
+        i.column, i.landunit, i.soilhydrology, i.soilstate, i.water.waterfluxbulk_inst)
+    return nothing
+end
+function satexcess_dev_rev_phase!(b, aux)
+    i = b.inst
     ser = i.sat_excess_runoff
     wfb = i.water.waterfluxbulk_inst
     hyd = _ser_hyd_dv(i.soilhydrology, i.soilstate)
@@ -916,6 +938,13 @@ function setqflx_rev_phase!(b, aux)
     return nothing
 end
 function inflexcess_rev_phase!(b, aux)
+    i = b.inst
+    infiltration_excess_runoff!(i.infilt_excess_runoff, i.soilhydrology, i.soilstate,
+        i.sat_excess_runoff.fsat_col, i.water.waterfluxbulk_inst, i.water.waterdiagnosticbulk_inst,
+        aux.hydrologyc, aux.bc_col)
+    return nothing
+end
+function inflexcess_dev_rev_phase!(b, aux)
     i = b.inst
     ier = i.infilt_excess_runoff
     qinmax_unsat = b.surfacewater.qinmax
@@ -945,6 +974,14 @@ function routeinfl_rev_phase!(b, aux)
 end
 function updateh2osfc_rev_phase!(b, aux)
     i = b.inst
+    update_h2osfc!(i.column, i.soilhydrology, i.energyflux, i.water.waterfluxbulk_inst,
+        i.water.waterstatebulk_inst, i.water.waterdiagnosticbulk_inst,
+        aux.hydrologyc, aux.bc_col; dtime = aux.dtime,
+        qinmax = i.infilt_excess_runoff.qinmax_col)
+    return nothing
+end
+function updateh2osfc_dev_rev_phase!(b, aux)
+    i = b.inst
     wfb = i.water.waterfluxbulk_inst
     ws = i.water.waterstatebulk_inst.ws
     wd = i.water.waterdiagnosticbulk_inst
@@ -973,6 +1010,13 @@ function infil_rev_phase!(b, aux)
 end
 function totalrunoff_rev_phase!(b, aux)
     i = b.inst
+    total_surface_runoff!(i.water.waterfluxbulk_inst, i.soilhydrology, i.water.waterstatebulk_inst.ws,
+        i.column.snl, i.column.itype, i.column.landunit, i.landunit.urbpoi,
+        aux.hydrologyc, aux.urbanc, aux.bc_col, aux.dtime)
+    return nothing
+end
+function totalrunoff_dev_rev_phase!(b, aux)
+    i = b.inst
     wfb = i.water.waterfluxbulk_inst
     wf = wfb.wf
     ws = i.water.waterstatebulk_inst.ws
@@ -988,6 +1032,13 @@ function totalrunoff_rev_phase!(b, aux)
     return nothing
 end
 function rootsink_rev_phase!(b, aux)
+    i = b.inst
+    compute_effec_rootfrac_and_vert_tran_sink!(aux.bc_col, aux.nlevsoi, aux.hydrologyc,
+        i.soilstate, i.canopystate, i.water.waterfluxbulk_inst, i.energyflux,
+        i.column, i.landunit, i.patch; use_hydrstress = aux.use_hydrstress)
+    return nothing
+end
+function rootsink_dev_rev_phase!(b, aux)
     i = b.inst
     if aux.root_filters !== nothing
         wf = i.water.waterfluxbulk_inst
@@ -1067,20 +1118,31 @@ rootsink_rev_view(b) = let i=b.inst
         landunit=i.landunit))
 end
 
-# Ordered pre-soil_water surface-hydrology phase entries.
+# Ordered pre-soil_water surface-hydrology phase entries. The host list calls the
+# production routines (the CPU-validated reverse); `device = true` selects the
+# launch-level decomposition with narrow views used on CUDA (see driver_rev_phases).
 function surface_hydrology_rev_phases(bounds, filt; dtime = 1800.0,
-                                      use_hydrstress = false, inst = nothing)
+                                      use_hydrstress = false, inst = nothing,
+                                      device::Bool = false)
+    if !device
+        a = surfhydro_rev_aux(bounds, filt; dtime, use_hydrstress)
+        return Any[(setsoilfrac_rev_phase!, (a,)), (setfloodc_rev_phase!, (a,)),
+                   (satexcess_rev_phase!, (a,)),   (setqflx_rev_phase!, (a,)),
+                   (inflexcess_rev_phase!, (a,)),  (routeinfl_rev_phase!, (a,)),
+                   (updateh2osfc_rev_phase!, (a,)), (infil_rev_phase!, (a,)),
+                   (totalrunoff_rev_phase!, (a,)),  (rootsink_rev_phase!, (a,))]
+    end
     a = surfhydro_rev_aux(bounds, filt; dtime, use_hydrstress, inst)
     return Any[(setsoilfrac_rev_phase!, (a,), setsoilfrac_rev_view),
                (setfloodc_rev_phase!, (a,), setfloodc_rev_view),
-               (satexcess_rev_phase!, (a,), satexcess_rev_view),
+               (satexcess_dev_rev_phase!, (a,), satexcess_rev_view),
                (setqflx_rev_phase!, (a,), setqflx_rev_view),
-               (inflexcess_rev_phase!, (a,), inflexcess_rev_view),
+               (inflexcess_dev_rev_phase!, (a,), inflexcess_rev_view),
                (routeinfl_rev_phase!, (a,), routeinfl_rev_view),
-               (updateh2osfc_rev_phase!, (a,), updateh2osfc_rev_view),
+               (updateh2osfc_dev_rev_phase!, (a,), updateh2osfc_rev_view),
                (infil_rev_phase!, (a,), infil_rev_view),
-               (totalrunoff_rev_phase!, (a,), totalrunoff_rev_view),
-               (rootsink_rev_phase!, (a,), rootsink_rev_view)]
+               (totalrunoff_dev_rev_phase!, (a,), totalrunoff_rev_view),
+               (rootsink_dev_rev_phase!, (a,), rootsink_rev_view)]
 end
 
 # --------------------------------------------------------------------------
@@ -1395,9 +1457,29 @@ end
 # water_table → hydrology_no_drainage. `canopy_aux === nothing` skips the canopy block.
 # `include_surface=false` reverts to the soil_temp→soil_water direct jump.
 # --------------------------------------------------------------------------
+# Host (Array/BitArray) filters select the CPU-validated phase list, which calls the
+# production routines (canopy block, soil_temperature!, water_table!, ...) one Enzyme
+# call each. Device filters select the launch-level decomposition: every phase is a
+# kernel launch (or a short sequence of them) with no temporary device allocation and
+# no Float64 scalar kernel argument that runtime activity could mark Active, each
+# differentiated through a narrow aliasing view. Both lists produce the same forward
+# state (guarded in test/test_driver_reverse.jl); `device` can be forced either way.
+_rev_on_device(filt) = !(filt.hydrologyc isa Union{Array,BitArray})
+
 function driver_rev_phases(bounds, filt, config; canopy_aux = nothing, inst = nothing,
-                           n_canopy::Int = 12, dtime = 1800.0, include_surface::Bool = true)
+                           n_canopy::Int = 12, dtime = 1800.0, include_surface::Bool = true,
+                           device::Bool = _rev_on_device(filt))
     phases = Any[]
+    if !device
+        canopy_aux === nothing || push!(phases, (canopy_rev_block!, (canopy_aux, n_canopy)))
+        push!(phases, (soiltemp_rev_phase!, (soiltemp_rev_aux(bounds, filt; dtime),)))
+        include_surface && append!(phases, surface_hydrology_rev_phases(bounds, filt; dtime,
+                                              use_hydrstress = config.use_hydrstress))
+        push!(phases, (soilwater_rev_phase!,  (soilwater_rev_aux(filt, config; dtime),)))
+        push!(phases, (watertable_rev_phase!, (watertable_rev_aux(bounds, filt, config; dtime),)))
+        push!(phases, (hydnodrain_rev_phase!, (hydnodrain_rev_aux(bounds, filt; dtime),)))
+        return phases
+    end
     if canopy_aux !== nothing
         for entry in cf_rev_phases(canopy_aux, n_canopy)
             push!(phases, (entry[1], entry[2], _canopy_view))
@@ -1405,10 +1487,11 @@ function driver_rev_phases(bounds, filt, config; canopy_aux = nothing, inst = no
     end
     append!(phases, soiltemp_driver_rev_phases(bounds, filt; dtime))
     include_surface && append!(phases, surface_hydrology_rev_phases(bounds, filt; dtime,
-                                          use_hydrstress = config.use_hydrstress, inst))
-    push!(phases, (soilwater_rev_phase!,
+                                          use_hydrstress = config.use_hydrstress, inst,
+                                          device = true))
+    push!(phases, (soilwater_dev_rev_phase!,
         (soilwater_rev_aux(filt, config; dtime),), soilwater_rev_view))
-    push!(phases, (watertable_rev_phase!,
+    push!(phases, (watertable_dev_rev_phase!,
         (watertable_rev_aux(bounds, filt, config; dtime),), watertable_rev_view))
     push!(phases, (hydnodrain_rev_phase!,
         (hydnodrain_rev_aux(bounds, filt; dtime),), hydnodrain_rev_view))

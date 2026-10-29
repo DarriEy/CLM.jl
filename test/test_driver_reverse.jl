@@ -43,15 +43,23 @@ include(joinpath(@__DIR__, "testdata.jl"))
     c0 = first(c for c in bounds.begc:bounds.endc if hc[c])
     j1 = CLM.varpar.nlevsno + 1
 
-    # assembler (forward order): 13 allocation-free soil-temperature phases (setup +
-    # 12 physics) + the 10-phase surface-hydrology block + soil_water + water_table +
-    # hydrology_no_drainage = 26. Canopy is flattened too: with one energy-only
-    # iteration it adds init + friction + resistance + energy = 4. Without surface: 16.
+    # assembler (forward order): soil_temp + 10-phase surface-hydrology block +
+    # soil_water + water_table + hydrology_no_drainage = 14 (15 with a canopy block);
+    # include_surface=false reverts to the soil_temp→soil_water direct jump (4).
     ph = CLM.driver_rev_phases(bounds, filt, config)
-    @test length(ph) == 26
-    @test length(CLM.driver_rev_phases(bounds, filt, config;
+    @test length(ph) == 14
+    @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 15
+    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 4
+
+    # The device (CUDA) assembly: 13 allocation-free soil-temperature phases (setup +
+    # 12 physics) + 10 surface-hydrology + soil_water + water_table +
+    # hydrology_no_drainage = 26; the canopy is flattened too (init + friction +
+    # resistance + energy = 4 for one energy-only iteration). Without surface: 16.
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true)) == 26
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
         canopy_aux=(; use_psn=false), n_canopy=1)) == 30
-    @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 16
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
+        include_surface=false)) == 16
 
     # The decomposed soil-temperature phases reproduce production soil_temperature!
     # exactly (the CUDA reverse runs the decomposition, the CPU driver the monolith).
@@ -113,7 +121,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # validated on Julia 1.10/Enzyme in scripts/enzyme_driver_reverse_fullstep.jl).
     caux = CLM.canopy_rev_aux(inst, bounds, filt)
     full = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4)
-    @test length(full) == 39
+    @test length(full) == 15
     bf = CLM.driver_rev_bundle(deepcopy(inst))
     for entry in full
         f, cargs = entry[1], entry[2]
@@ -122,6 +130,28 @@ include(joinpath(@__DIR__, "testdata.jl"))
     end
     @test all(isfinite, bf.inst.temperature.t_veg_patch)
     @test isfinite(bf.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
+
+    # The device decomposition (forced onto the host) reproduces the host chain's
+    # forward state: the CUDA reverse differentiates the former, the CPU the latter.
+    fulld = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4,
+                                  inst=inst, device=true)
+    @test length(fulld) == 39
+    bd = CLM.driver_rev_bundle(deepcopy(inst))
+    for entry in fulld
+        entry[1](entry[3](bd), entry[2]...)
+    end
+    ws_h, ws_d = bf.inst.water.waterstatebulk_inst.ws, bd.inst.water.waterstatebulk_inst.ws
+    for (a, d) in ((bf.inst.temperature.t_soisno_col, bd.inst.temperature.t_soisno_col),
+                   (bf.inst.temperature.t_grnd_col, bd.inst.temperature.t_grnd_col),
+                   (bf.inst.temperature.t_veg_patch, bd.inst.temperature.t_veg_patch),
+                   (ws_h.h2osoi_liq_col, ws_d.h2osoi_liq_col),
+                   (ws_h.h2osoi_vol_col, ws_d.h2osoi_vol_col),
+                   (ws_h.h2osfc_col, ws_d.h2osfc_col),
+                   (bf.inst.soilhydrology.zwt_col, bd.inst.soilhydrology.zwt_col))
+        m = isfinite.(a)
+        @test isequal(m, isfinite.(d))
+        @test maximum(abs.(a[m] .- d[m]); init=0.0) <= 1e-10 * max(maximum(abs, a[m]; init=0.0), 1.0)
+    end
 
     # canopy_rev_aux(use_psn=true) sources the real LUNA/albedo arrays + the canopy block
     # with photosynthesis runs forward finite (stomatal feedback path; reverse validated on
