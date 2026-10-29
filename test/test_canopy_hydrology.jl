@@ -1,3 +1,8 @@
+# Self-contained setup: the layer counts (nlevsno, nlevgrnd, nlevurb, ...) come
+# from varpar, which starts unset after `using CLM`. This file used to rely on an
+# earlier file having called varpar_init!.
+CLM.varpar_init!(CLM.varpar, 1, 14, 2, 5)
+
 @testset "Canopy Hydrology" begin
 
     @testset "CanopyHydrologyParamsData defaults" begin

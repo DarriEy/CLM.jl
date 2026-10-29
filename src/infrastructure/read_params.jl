@@ -242,6 +242,15 @@ function _pftcon_derive_litter_fractions!(p::PftconType; decomp_method::Int=1)
     return nothing
 end
 
+# True when any array field of `p` is still empty (pftcon_allocate! sizes all of them).
+function _pftcon_needs_allocate(p::PftconType)
+    for f in fieldnames(PftconType)
+        v = getfield(p, f)
+        v isa AbstractArray && isempty(v) && return true
+    end
+    return false
+end
+
 """
     pftcon_read!(p::PftconType, ds::NCDataset; decomp_method::Int=1)
 
@@ -253,8 +262,11 @@ leaf/fine-root litter fractions are packed into `lf_f` / `fr_f` — see the bloc
 that derives them below.
 """
 function pftcon_read!(p::PftconType, ds::NCDataset; decomp_method::Int=1)
-    # Ensure pftcon is allocated
-    if isempty(p.slatop)
+    # Ensure pftcon is allocated. Fortran pftconrd always calls InitAllocate;
+    # here an already-allocated pftcon is kept, but a PARTIALLY written one (a
+    # caller that set a few fields by hand, leaving others empty) is allocated
+    # afresh — otherwise the reads below would hit the empty fields.
+    if _pftcon_needs_allocate(p)
         pftcon_allocate!(p)
     end
 

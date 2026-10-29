@@ -15,11 +15,11 @@
 # This is the carbon-only stability counterpart to test_fates_live_modes.jl (which
 # exercises the fire/CNP/damage MODES); together they cover "carbon-only spin-up +
 # the modes live". Reuses the global save/restore + census helpers from
-# test_fates_live_modes.jl (included before this file in runtests.jl).
+# test/fates_live_helpers.jl (shared with test_fates_live_modes.jl).
 
 using Test
 using CLM
-const _C = CLM
+include("fates_live_helpers.jl")
 
 @testset "FATES carbon-only spin-up / stability (15-day clm_drv!)" begin
     g = _fates_save_globals()
