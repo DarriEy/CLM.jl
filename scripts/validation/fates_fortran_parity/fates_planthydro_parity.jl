@@ -121,7 +121,15 @@ function hydro_record(inst, c)
     end
     wf = inst.water.waterfluxbulk_inst
     r["QVEGT"] = wf.wf.qflx_tran_veg_col[c]
-    # BTRAN / LH: wtcol-weighted over the column's FATES vegetated patches ('veg' l2g).
+    # BTRAN / LH: the history p2g, wtcol-weighted over EVERY active patch of the
+    # column. BTRAN's l2g_scale_type='veg' (EnergyFluxType.F90:663) selects the
+    # istsoil/istcrop LANDUNITS (subgridAveMod.F90:1077-1079), not FATES's patch%is_veg,
+    # and p2c skips only inactive / zero-weight / spval patches (subgridAveMod.F90:203-204).
+    # So the FATES bare-ground patch counts: its btran is 0, not spval, because
+    # BareGroundFluxes zeroes btran on the no-exposed-veg filter
+    # (BareGroundFluxesMod.F90:284), and wrap_btran writes only patchi+1..patchi+npatch
+    # (clmfates_interfaceMod.F90:2509-2519). Host BTRAN is therefore the vegetated
+    # patches' btran times their canopy fraction (sum of canopy_fraction_pa, ~0.62 here).
     pch = inst.patch; ef = inst.energyflux
     wb = 0.0; bt = 0.0; lh = 0.0; wl = 0.0
     for p in eachindex(pch.column)
@@ -129,8 +137,9 @@ function hydro_record(inst, c)
         pch.active[p] || continue
         w = pch.wtcol[p]
         lh += w * ef.eflx_lh_tot_patch[p]; wl += w
-        if pch.is_veg[p] && isfinite(ef.btran_patch[p])
-            bt += w * ef.btran_patch[p]; wb += w
+        b = ef.btran_patch[p]
+        if isfinite(b) && b != CLM.SPVAL
+            bt += w * b; wb += w
         end
     end
     r["BTRAN"] = wb > 0 ? bt / wb : NaN

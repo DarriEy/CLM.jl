@@ -1502,7 +1502,7 @@ differs it follows in brackets.
 | EFLX_LH_TOT (ratio) | 5e-4 (1.01) | 1.3e-3 (1.01) | 5.5e-3 (1.00) |
 | FATES_GPP (ratio) | 4.8e-4 (1.00) | 7.1e-3 (1.02) [2.8e-2 (0.88)] | 0.39 (**0.93**) [0.62 (0.31)] |
 | QVEGT (ratio) | 2.4e-3 (1.01) [(0.89)] | 2.3e-2 (0.98) [0.11 (0.71)] | 0.60 (**0.85**) [0.77 (0.15)] |
-| BTRAN (host, ratio) | 0.60 (1.60) | 0.61 (1.66) | 0.82 (1.54) |
+| BTRAN (host, ratio) | 4.6e-8 (1.00) [0.60 (1.60)] | 9.7e-6 (1.00) [0.61 (1.66)] | 0.51 (0.97) [0.82 (1.54)] |
 
 Over the whole 10 days GPP is 0.94x Fortran (was 0.33x) and transpiration 0.85x (was
 0.16x). These numbers were measured on the integrated tree, which includes #350's
@@ -1557,9 +1557,20 @@ copy semantics showed up as a 0.3x / 0.16x shortfall.
   median errors in the table), although the window sums agree. The solve is
   ill-conditioned enough that the 0.1-0.3 % host transpiration residual shifts the timing
   of individual bursts, so day-by-day GPP ratios scatter between 0.5 and 1.9.
-* **Host `BTRAN`.** It is biomass-weighted over all cohorts and runs 60 % high from step
-  1, while every per-PFT cohort btran matches to < 1e-6 on day 1. The offset sits in the
-  host-side aggregation or in the harness's l2g weighting.
+* **Host `BTRAN`: closed, it was the harness.** The bracketed BTRAN values above are the
+  old harness, which averaged `btran_patch` over the FATES `is_veg` patches only. The
+  history `BTRAN` is `l2g_scale_type='veg'` (EnergyFluxType.F90:663), which selects the
+  soil/crop landunits (subgridAveMod.F90:1077-1079), not `patch%is_veg`. p2c skips only
+  inactive, zero-weight or spval patches (subgridAveMod.F90:203-204). So the FATES
+  bare-ground patch counts. Its btran is 0, not spval: BareGroundFluxes zeroes it on the
+  no-exposed-veg filter (BareGroundFluxesMod.F90:284), and `wrap_btran` writes only
+  `patchi+1..patchi+npatch` (clmfates_interfaceMod.F90:2509-2519). Host BTRAN is
+  therefore the vegetated btran times the canopy fraction (0.625 here, = FATES_AREA_PLANTS),
+  which is the 1/0.625 = 1.60 the old harness showed. The port's host state was already
+  right (bare patch active, wtcol 0.375, btran 0; vegetated patch = `bc_out%btran_pa`,
+  the balive-weighted `BTranForHLMDiagnosticsFromCohortHydr`). With the harness fixed,
+  day 1 matches to float32 precision. The days 3-10 error is the plant-state
+  decorrelation above.
 * **2-D solvers.** `MatSolve2D` and `PicardSolve2D` are still not ported.
 * **Near-zero fluxes.** The site is extremely water-stressed (cold-start frozen soil; leaf
   psi ~ -15 MPa). Transpiration is ~1e-8 mm/s, so the QVEGT and BTRAN relative errors are
