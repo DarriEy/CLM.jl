@@ -1407,65 +1407,89 @@ executable are bit-identical, and so is a third built with an extra `write` of
 1.644e-5 m2 at d = 0.458 cm).
 
 ## Fortran reference and result (patched reference)
-`fates_planthydro_fortran.csv` is the 240-step hourly extract of the patched run. Median
-per-step relative error (ratio = sum Julia / sum Fortran over the window):
+`fates_planthydro_fortran.csv` is the 240-step hourly extract of the patched run. The
+table gives the median per-step relative error, with ratio = sum Julia / sum Fortran over
+the window in parentheses. Values are after the solver fix below; where the pre-fix value
+differs it follows in brackets.
 
 | field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
 |---|---|---|---|
-| leaf psi, PFT 1 | 1.1e-4 | 8.6e-4 | 0.26 |
-| leaf psi, woody mean | 1.6e-4 | 1.7e-2 | 0.56 |
-| leaf psi, grass PFT 12 / 14 | 3.2e-4 / 5.5e-4 | 9.2e-2 / 0.20 | 0.21 / 9.0e-2 |
-| leaf / stem water content | 4e-5 / 2e-5 | 1.8e-3 / 1.6e-3 | 0.10 / 0.07 |
-| cohort hydraulic btran | 4.1e-4 | 4.5e-2 | 0.75 |
-| FATES_VEGH2O | 2.8e-5 | 1.1e-2 | 4.1e-2 |
-| QROOTSINK layer 1 (ratio) | 2.1e-2 (1.06) | 5.8e-2 (1.02) | 0.23 (1.00) |
-| SOILLIQ layer 1 / 4 | 4.4e-3 / 0.14 | 4.3e-3 / 5.5e-2 | 2.1e-3 / 2.7e-3 |
-| EFLX_LH_TOT (ratio) | 0.14 (1.19) | 2.2e-2 (0.90) | 3.6e-2 (0.96) |
-| FATES_GPP (ratio) | 2.5e-2 (1.13) | 4.7e-2 (0.90) | 0.33 (0.32) |
-| QVEGT (ratio) | 0.11 (1.11) | 0.16 (0.80) | 0.45 (0.16) |
-| BTRAN (host, ratio) | 0.60 (1.60) | 0.54 (1.44) | 0.61 (0.51) |
+| leaf psi, PFT 1 | 1.1e-7 | 2.9e-5 [1.0e-3] | 0.37 |
+| leaf psi, woody mean | 1.9e-7 | 2.0e-3 [1.2e-2] | 0.86 [0.69] |
+| leaf psi, grass PFT 12 / 14 | 9e-7 / 1.3e-6 | 4.2e-3 / 1.8e-2 [6.2e-2 / 0.16] | 0.48 / 0.09 |
+| leaf / stem water content | 4e-8 / 2e-8 | 5.4e-4 / 3.2e-4 [2.5e-3 / 1.5e-3] | 0.09 / 0.06 |
+| cohort hydraulic btran | 4.9e-7 | 2.3e-3 [3.2e-2] | 0.57 [0.73] |
+| FATES_VEGH2O | 4.6e-8 | 1.2e-3 | 3.4e-2 |
+| QROOTSINK layer 1 (ratio) | 2.6e-3 (1.00) | 2.7e-3 (0.99) | 0.18 (1.05) [(0.97)] |
+| SOILLIQ layer 1 / 4 | 5e-5 / 1.8e-4 | 3.6e-4 / 4.7e-3 | 6e-4 / 5e-4 |
+| EFLX_LH_TOT (ratio) | 5e-4 (1.01) | 1.3e-3 (1.01) | 5.5e-3 (1.00) |
+| FATES_GPP (ratio) | 4.8e-4 (1.00) | 7.1e-3 (1.02) [2.8e-2 (0.88)] | 0.39 (**0.93**) [0.62 (0.31)] |
+| QVEGT (ratio) | 2.4e-3 (1.01) [(0.89)] | 2.3e-2 (0.98) [0.11 (0.71)] | 0.60 (**0.85**) [0.77 (0.15)] |
+| BTRAN (host, ratio) | 0.60 (1.60) | 0.61 (1.66) | 0.82 (1.54) |
 
-With the patched reference the grasses track on day 1 like the woody PFTs, and plant
-water storage agrees to 3e-5. The post-day-3 GPP / transpiration shortfall remains.
+Over the whole 10 days GPP is 0.94x Fortran (was 0.33x) and transpiration 0.85x (was
+0.16x). These numbers were measured on the integrated tree, which includes #350's
+cold-start albedo / thaw fixes, so day 1 is tighter than the numbers first published with
+#345.
 
-### Tracing the post-day-3 shortfall
-* It is not demography. Both models keep 14 cohorts / 2 patches for all 10 days (no
-  recruitment survives with hydraulics on). Per-PFT density, leaf C and storage C agree
-  to < 0.4 % (woody) and < 6 % (grass) through day 10.
-* It is none of the daily-step suspects. Cohort fusion/termination never fires; the
-  daily soil pack, `UpdateSizeDepPlantHydStates`, `UpdateSizeDepRhizVolLenCon` and
-  `UpdateH2OVeg` were re-diffed against the Fortran line by line and match.
-* The first quantities to diverge (scan of every scored field, threshold 5 %) are the
-  HOST soil liquid in layers 1-4 at nstep 2 (cold-start thaw: SOILLIQ_1 2.93 vs 3.34
-  kg/m2) together with LH / QVEGT. The FATES root uptake by layer follows at nstep 19-22
-  (first daytime uptake), then cohort btran / leaf psi at the day-2 daily step (n 26) and
-  every PFT by n 48-50. This is the documented host top-soil phase-change residual (see
-  §"SOIL-BGC COUPLING"), now propagating through the rhizosphere into the plant water.
-  From day 2 the Fortran per-PFT btran becomes erratic hour to hour (0 to 0.74), which the
-  port does not reproduce, and those bursts dominate the Fortran GPP / QVEGT sums.
-  Not yet closed.
-  **Update (host/coldstart-thaw):** the soil-liquid divergence was NOT phase change. A
-  per-step dump of the soil-temperature solve (`SoilTemperatureMod` instrumented, nsteps
-  0-4) shows tk, cv, fact and the phase-change bookkeeping identical; the first differing
-  term is the ground's absorbed solar at nstep 0, SABG 339 vs 387 W/m2 (FSDS 484), and so
-  `hs_soil`. Two cold-start radiation defects: (1) `init_surface_albedo_cold!` overwrote
-  Fortran InitCold's albgrd = albgri = 0.2 (SurfaceAlbedoType.F90:370-371) with
-  vis 0.20 / NIR 0.40; (2) the harness ran the albedo solve from nstep 0, whereas the NUOPC
-  cap skips it on nsteps 0 and 1 (lnd_comp_nuopc.F90:830-841), so Fortran radiates nsteps
-  0-2 with the InitCold albedos (SABV = 0). With both fixed (and #349's host coupling
-  fixes) SOILLIQ_1..4 match to 4 digits through nstep 5 and to < 5 % on every step; root
-  uptake first passes 5 % at nstep 21-45 instead of 2. GPP / QVEGT after day 3 are
-  unchanged (0.32x / 0.16x), so that shortfall is not the host soil water.
-* Host `BTRAN` (biomass-weighted over all cohorts) is 60 % high from step 1 while every
-  per-PFT cohort btran matches to < 1e-3, so that offset sits in the host-side
-  aggregation or in the harness's l2g weighting. Still open.
-* The site is extremely water-stressed (cold-start frozen soil; leaf psi ~ -15 MPa), so
-  transpiration is ~1e-8 mm/s and QVEGT / BTRAN relative errors are on near-zero values.
-* Column water balance with hydraulics on (plant water in the budget): |errh2o| < 6e-13 mm
-  on every non-daily step; the daily steps leave up to 6.8e-5 mm (the daily dynamics do
-  not conserve the stored plant water exactly, and Fortran's check of that is the inert
-  one above). Step 1 carries a 0.118 mm residual that is identical with hydraulics off
-  (the first daily step re-weights the cold-start patches mid-step).
+### Root cause of the post-day-3 collapse: Fortran argument aliasing
+`ImTaylorSolve1D` builds each path's Taylor terms with
+`call GetImTaylorKAB(..., dftc_dtheta_node(i_up), dftc_dtheta_node(i_dn), ...)`.
+* Those two dummies are `intent(inout)` (FatesPlantHydraulicsMod.F90:4117).
+* The upstream-K branch zeroes the downstream-side derivative in place (:4144-4152).
+* On exit the routine restores `ftc_up` / `ftc_dn` (:4181-4182), but not the derivatives.
+
+So in Fortran, when path `j` has `h_up <= h_dn`, node `j+1` enters path `j+1` (where it
+is the downstream node) with `dftc_dtheta = 0`, which changes path `j+1`'s A term. The
+port passed values, so path `j+1` saw the full derivative. `_imtaylor_kab_path!` now
+reproduces the aliasing.
+
+How it was found:
+1. `hydraulics_bc` was instrumented with a per-call, per-cohort dump
+   (`instrument_planthydro.py`). It records the
+   shells after `FillDrainRhizShells`, the host liquid, `qflx_transp_pa`, the cohort
+   pre/post water contents, psi, btran, iteration counts, geometry and kmax. The relinked
+   `cesm.exe` reproduces the reference h0 bit for bit.
+2. The port was then run as a teacher-forced replay (`fates_planthydro_replay.jl`). At every call the shells, cohort
+   water and patch transpiration were overwritten with the Fortran pre-solve values, and
+   the post-solve change in water content was compared.
+
+Results of the replay:
+* **Before the fix** the solve differs at the very first call (8.6e-5 relative in
+  d(theta)), reaches 0.29 by call 3, and reaches up to 2.6e4 by call 23.
+* **After the fix** it matches to 1e-7 to 1e-10 for calls 1-22.
+* **From call 23** the remaining differences follow the host's transpiration input. They
+  are <= 1e-3, and larger only where d(theta) is ~0. `qflx_transp_pa` is 0.1-0.3 % off
+  (a host canopy residual). `g_sb_laweight` carries a uniform 1.1e-3 offset, which cancels
+  in the cohort partition.
+
+Why one derivative term mattered so much:
+* The Fortran solve takes a single 1-hour substep on every call (`iterh1 = iterh2 = 1`).
+* Its water-balance test passes by construction, because the tridiagonal flux form
+  conserves mass. So the substep is never refined, even when a leaf's water content jumps
+  0.24 -> 0.61 in one step (PFT 3, nstep 73).
+* The grass leaves have tiny volumes and oscillate hour to hour, even at night.
+* Fortran's "erratic" per-PFT btran bursts (0 -> 0.74) are this solver's own behaviour,
+  and the port reproduces them once the A terms match.
+
+After day 3 those bursts carry most of the Fortran GPP and transpiration. That is why the
+copy semantics showed up as a 0.3x / 0.16x shortfall.
+
+### Still open
+* **Post-day-3 decorrelation.** After day 3 the per-step plant states decorrelate (the
+  median errors in the table), although the window sums agree. The solve is
+  ill-conditioned enough that the 0.1-0.3 % host transpiration residual shifts the timing
+  of individual bursts, so day-by-day GPP ratios scatter between 0.5 and 1.9.
+* **Host `BTRAN`.** It is biomass-weighted over all cohorts and runs 60 % high from step
+  1, while every per-PFT cohort btran matches to < 1e-6 on day 1. The offset sits in the
+  host-side aggregation or in the harness's l2g weighting.
+* **2-D solvers.** `MatSolve2D` and `PicardSolve2D` are still not ported.
+* **Near-zero fluxes.** The site is extremely water-stressed (cold-start frozen soil; leaf
+  psi ~ -15 MPa). Transpiration is ~1e-8 mm/s, so the QVEGT and BTRAN relative errors are
+  on near-zero values.
+* **Water balance.** With hydraulics on (plant water in the budget), the column balance
+  |errh2o| is < 1e-12 mm on every step n >= 1 of the 240-step run. Fortran's daily
+  plant-water conservation check is the inert one described above.
 
 ---
 

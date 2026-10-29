@@ -775,6 +775,36 @@ function GetImTaylorKAB(kmax_up::Real, kmax_dn::Real,
 end
 
 """
+    _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                        ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
+
+`GetImTaylorKAB` for path `j` (nodes `i_up` -> `i_dn`) of the 1-D solve, with the
+Fortran argument aliasing reproduced. ImTaylorSolve1D passes the node arrays
+`dftc_dtheta_node(i_up)` / `dftc_dtheta_node(i_dn)` to GetImTaylorKAB's
+`intent(inout)` dummies, and the upstream-K branch zeroes the downstream-side
+derivative in place (FatesPlantHydraulicsMod.F90:4117, 4144-4152). It restores `ftc_dn` /
+`ftc_up` on exit (:4181-4182) but not the derivatives. So when path `j` has
+`h_up <= h_dn`, node `j+1` enters path `j+1` (where it is the downstream node) with
+`dftc_dtheta = 0`. The tridiagonal system is built from those A/B terms.
+"""
+@inline function _imtaylor_kab_path!(k_eff, a_term, b_term, j::Integer, kmax_up, kmax_dn,
+                                     i_up::Integer, i_dn::Integer, ftc_node, h_node,
+                                     dftc_dtheta_node, dpsi_dtheta_node)
+    k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
+        ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
+        dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
+        dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+    if do_upstream_k
+        if h_node[i_up] - h_node[i_dn] > 0.0
+            dftc_dtheta_node[i_dn] = 0.0
+        else
+            dftc_dtheta_node[i_up] = 0.0
+        end
+    end
+    return nothing
+end
+
+"""
     GetKAndDKDPsi(kmax_dn, kmax_up, h_dn, h_up, ftc_dn, ftc_up, dftc_dpsi_dn, dftc_dpsi_up)
         -> (dk_dpsi_dn, dk_dpsi_up, k_eff)
 
@@ -1009,39 +1039,31 @@ function ImTaylorSolve1D(slat::Real, slon::Real, recruitflag::Bool, csite_hydr, 
                 j = 1; i_up = 2; i_dn = 1
                 kmax_dn = rootfr_scaler * cohort_hydr.kmax_petiole_to_leaf
                 kmax_up = rootfr_scaler * cohort_hydr.kmax_stem_upper[1]
-                k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
-                    ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
-                    dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
-                    dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+                _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                    ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
 
                 # Paths between stem nodes
                 for j in 2:(n_hypool_ag - 1)
                     i_up = j + 1; i_dn = j
                     kmax_dn = rootfr_scaler * cohort_hydr.kmax_stem_lower[i_dn - n_hypool_leaf]
                     kmax_up = rootfr_scaler * cohort_hydr.kmax_stem_upper[i_up - n_hypool_leaf]
-                    k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
-                        ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
-                        dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
-                        dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+                    _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                    ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
                 end
 
                 # Path: lowest stem -> transporting root
                 j = n_hypool_ag; i_up = j + 1; i_dn = j
                 kmax_dn = rootfr_scaler * cohort_hydr.kmax_stem_lower[n_hypool_stem]
                 kmax_up = rootfr_scaler * cohort_hydr.kmax_troot_upper
-                k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
-                    ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
-                    dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
-                    dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+                _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                    ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
 
                 # Path: transporting root -> absorbing root (already parallel, no scaling)
                 j = n_hypool_ag + 1; i_up = j + 1; i_dn = j
                 kmax_dn = cohort_hydr.kmax_troot_lower[ilayer]
                 kmax_up = cohort_hydr.kmax_aroot_upper[ilayer]
-                k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
-                    ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
-                    dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
-                    dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+                _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                    ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
 
                 # Path: absorbing root -> first rhizosphere shell (kmax depends on gradient)
                 j = n_hypool_ag + 2; i_up = j + 1; i_dn = j
@@ -1053,10 +1075,8 @@ function ImTaylorSolve1D(slat::Real, slon::Real, recruitflag::Bool, csite_hydr, 
                                      1.0 / cohort_hydr.kmax_aroot_radial_out[ilayer])
                 end
                 kmax_up = csite_hydr.kmax_upper_shell[ilayer, 1] * aroot_frac_plant
-                k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
-                    ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
-                    dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
-                    dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+                _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                    ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
 
                 # Paths between rhizosphere shells
                 for j in (n_hypool_ag + 3):(n_hypool_tot - 1)
@@ -1065,10 +1085,8 @@ function ImTaylorSolve1D(slat::Real, slon::Real, recruitflag::Bool, csite_hydr, 
                     ishell_dn = i_dn - (n_hypool_tot - nshell)
                     kmax_dn = csite_hydr.kmax_lower_shell[ilayer, ishell_dn] * aroot_frac_plant
                     kmax_up = csite_hydr.kmax_upper_shell[ilayer, ishell_up] * aroot_frac_plant
-                    k_eff[j], a_term[j], b_term[j] = GetImTaylorKAB(kmax_up, kmax_dn,
-                        ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
-                        dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
-                        dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+                    _imtaylor_kab_path!(k_eff, a_term, b_term, j, kmax_up, kmax_dn, i_up, i_dn,
+                    ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
                 end
 
                 # --- Build the tri-diagonal matrix ---

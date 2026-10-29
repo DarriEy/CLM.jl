@@ -16,7 +16,8 @@
 #   2. the soil sink is the FATES uptake, and it differs from transpiration by the
 #      change in plant storage (sum(qflx_rootsoi) - qflx_tran_veg = dPlant/dt);
 #   3. woody-PFT leaf water potential tracks the committed Fortran CTSM reference
-#      (fates_planthydro_fortran.csv) — the 1-D solver parity;
+#      (fates_planthydro_fortran.csv) — the 1-D solver parity; so do the grass leaf
+#      potentials and the transpiration (the solver's Fortran argument aliasing);
 #   4. hydraulic-failure mortality is computed from ftc (finite, and equal to the
 #      Fortran formula for the current ftc);
 #   5. RestartHydrStates reproduces the volumes / conductances / stored water.
@@ -99,6 +100,20 @@ include("testdata.jl")
             woody_rel = [abs(recs[k]["PSI_LEAF_pft1"] - ft["PSI_LEAF_pft1"][k]) /
                          abs(ft["PSI_LEAF_pft1"][k]) for k in 3:nsteps+1]
             @test maximum(woody_rel) < 1e-2
+            # 3b. the 1-D solver's Fortran argument aliasing (GetImTaylorKAB zeroes the
+            # caller's dftc_dtheta_node in place; see _imtaylor_kab_path!). Without it
+            # the grass leaves (tiny volumes, so the most sensitive) drifted 8-69 % from
+            # the Fortran within 1.5 days, the woody mean 2 %, and transpiration 33 %
+            # per step (sum 0.89x); with it: <= 4.5 %, 0.06 %, 3 % (sum 1.01x).
+            rel(f, k) = abs(recs[k][f] - ft[f][k]) / abs(ft[f][k])
+            @test maximum(rel("PSI_LEAF", k) for k in 3:nsteps+1) < 5e-3
+            for f in ("PSI_LEAF_pft12", "PSI_LEAF_pft13", "PSI_LEAF_pft14")
+                @test maximum(rel(f, k) for k in 3:nsteps+1) < 0.1
+            end
+            @test maximum(rel("QVEGT", k) for k in 3:nsteps+1 if ft["QVEGT"][k] > 0) < 0.1
+            qJ = sum(recs[k]["QVEGT"] for k in 3:nsteps+1)
+            qF = sum(ft["QVEGT"][k] for k in 3:nsteps+1)
+            @test abs(qJ / qF - 1) < 0.05
 
             # 4. hydraulic-failure mortality from ftc.
             site = inst.fates.sites[1]
