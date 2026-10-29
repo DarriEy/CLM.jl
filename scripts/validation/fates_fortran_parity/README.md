@@ -1208,8 +1208,35 @@ quantity in the chain, in the order found:
    z0m/displa) never ran. Fortran `clmfates_interfaceMod::init` (F90:814) flags every
    istsoil column before `init_coldstart`, and `clm_initialize!` now does the same.
 
-The default (non-FATES) path is unchanged. The new mask is `nothing` without FATES,
-and `clm_run!` / `fortran_parity_common.jl` already set `use_clm5_fpi = true`.
+5. **Daily-step re-weighting happened mid-step.** `fates_set_filters!` wrote the new
+   FATES patch weights into `wtcol` during the daily step. Fortran
+   `wrap_update_hlmfates_dyn` writes only `patch%wt_ed`; `wtcol = wt_ed` is applied by
+   `dynSubgrid_driver -> dyn_ED` (dynEDMod.F90:30-38) at the top of the next step,
+   before `BeginWaterColumnBalance`. Re-weighting mid-step moved per-patch canopy water
+   and plant storage between `begwb` and `endwb`. Once (3) put real water on the
+   canopy, that showed up as a 1.08e-4 mm errh2o at the step-25 daily step in
+   `test_fates_planthydro_coupling.jl`. `fates_apply_deferred_activation!` now performs
+   `dyn_ED`. The SP scores are unchanged.
+
+**Default (non-FATES) path.** Items 1, 2, 4 and 5 are FATES-only. Item 3 is a real
+default-behaviour change for any caller of `clm_initialize!` + `clm_drv!` that did not
+set `use_clm5_fpi` itself. It is not a change for `clm_run!` (and so not for
+`parity_run_domain.jl`) or for `fortran_parity_common.jl`; both already set it. Bow
+2003 and Stillwater 2003 annual parity are bit-identical before and after. Of the
+direct-`clm_drv!` harnesses, Stillwater (single-step and 24-step; snow season) and
+the lake harness are identical. Aripuana changes, toward Fortran at the rain steps:
+
+| `fortran_parity_aripuana.jl` step | 3 | 4 | 5 | 6 | 18 | 20 | 22 |
+|---|---|---|---|---|---|---|---|
+| max rel, before | 1.3e-2 | 3.0e-3 | 7.7e-3 | 5.5e-3 | 5.5e-3 | 7.9e-3 | 1.0e-2 |
+| max rel, after | 5.7e-7 | 4.7e-7 | 5.5e-7 | 7.1e-7 | 4.8e-3 | 7.0e-3 | 4.9e-3 |
+
+In `fortran_parity_aripuana_coldstart.jl`, the soil-water parity (`Wtot`) gets worse
+at steps 1-5 (step 2: 4.2e-4 -> 7.5e-4) and better at steps 18-24 (step 22: 1.2e-3 ->
+6.1e-4). This is not a balance leak; the column still conserves. It comes from the
+known cold-start artifact: Fortran's veg filters are empty on the first steps, while
+the port intercepts from step 1, and with CLM5 interception the port now holds more
+of the early rain on the canopy.
 
 ### After (240 steps, relative error of the window mean; before in parentheses)
 
