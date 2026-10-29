@@ -24,7 +24,10 @@ include(joinpath(@__DIR__, "testdata.jl"))
 
 @testset "CH4-as-a-source parity (gated)" begin
     script  = joinpath(@__DIR__, "..", "scripts", "fortran_parity_ch4_source.jl")
-    dumpdir = symfluence_path("clm_bgc_spinup", "bow_ref_ch4tws")
+    # bow_ref_ch4o2 (the O2-demand bgcdump rebuild, bit-identical to bow_ref_ch4tws in
+    # every shared field) is what the harness reads when present.
+    o2dir   = symfluence_path("clm_bgc_spinup", "bow_ref_ch4o2")
+    dumpdir = isdir(o2dir) ? o2dir : symfluence_path("clm_bgc_spinup", "bow_ref_ch4tws")
     nsteps  = 12
     have = isfile(script) && all(isfile(joinpath(dumpdir, "bgcdump_after_ch4_n$(4721 + i).nc")) &&
                                  isfile(joinpath(dumpdir, "pdump_before_step_n$(4721 + i).nc"))
@@ -46,11 +49,22 @@ include(joinpath(@__DIR__, "testdata.jl"))
         @test w["CH4_AERE_SAT"]      < 5e-3
         @test w["CONC_CH4_SAT"]      < 5e-3
         @test w["CONC_O2_SAT"]       < 5e-3
-        @test w["O2_DECOMP_SAT"]     < 5e-3
-        @test w["O2_DECOMP_UNSAT"]   < 5e-3
+        @test w["O2_DECOMP_SAT"]     < 4e-3   # 1.3e-3 after the rr livecroot_mr fix
+        @test w["O2_DECOMP_UNSAT"]   < 4e-3
         @test w["CH4_SURF_AERE_SAT"] < 5e-3
         @test w["CH4_SURF_FLUX_TOT"] < 5e-3
         @test w["TOTCOLCH4"]         < 5e-3
         @test w["ZWT_CH4_UNSAT"]     < 1e-6
+
+        # O2-demand components (docs/CH4_FIRE_PARITY.md §17), only in bow_ref_ch4o2.
+        if haskey(w, "O2_DEMAND_RR")
+            @test w["RR"]             < 2e-3   # root resp. incl. livecroot_mr (was ~1.7e-3 at night)
+            @test w["LIVECROOT_MR"]   < 1e-2
+            @test w["O2_DEMAND_RR"]   < 2e-3
+            @test w["O2_DEMAND_NIT"]  < 1e-4
+            @test w["POT_F_NIT_VR"]   < 1e-4
+            @test w["O_SCALAR"]       < 1e-12
+            @test w["O2_OXID_SAT"]    < 1e-2
+        end
     end
 end

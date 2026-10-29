@@ -235,6 +235,11 @@
         # NPP = GPP - AR = 15 - 4.33 = 10.67
         @test cf.npp_patch[1] ≈ 10.67
 
+        # RR = froot_mr + livecroot_mr + all root GR (CNVegCarbonFluxType.F90:5015-5026)
+        #    = 2.0 + 0.3 + (0.2+0.03+0.02) + (3*0.01) + (3*0.005) = 2.595
+        # livecroot_mr was once omitted, under-stating ch4's root O2 demand.
+        @test cf.rr_patch[1] ≈ 2.595
+
         # Patch 2 should be all zeros (was set to 0)
         @test cf.gpp_patch[2] ≈ 0.0
         @test cf.npp_patch[2] ≈ 0.0

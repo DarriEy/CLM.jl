@@ -1406,7 +1406,11 @@ Adapt.@adapt_structure _CVCFSumView
         gpp = b.psnsun_to_cpool[p] + b.psnshade_to_cpool[p]
         npp = gpp - ar
 
-        rr = b.froot_mr[p] + b.cpool_froot_gr[p] + b.cpool_livecroot_gr[p] +
+        # Root respiration (RR): fine-root + live-coarse-root MR plus all root growth
+        # respiration (CNVegCarbonFluxType.F90:5015-5026). livecroot_mr was missing
+        # here, under-stating the woody-PFT root O2 demand ch4_prod adds to
+        # o2_decomp_depth (ch4Mod.F90:2521/2684); rr feeds nothing but ch4 and rr_col.
+        rr = b.froot_mr[p] + b.livecroot_mr[p] + b.cpool_froot_gr[p] + b.cpool_livecroot_gr[p] +
              b.cpool_deadcroot_gr[p] + b.transfer_froot_gr[p] + b.transfer_livecroot_gr[p] +
              b.transfer_deadcroot_gr[p] + b.cpool_froot_storage_gr[p] +
              b.cpool_livecroot_storage_gr[p] + b.cpool_deadcroot_storage_gr[p]
