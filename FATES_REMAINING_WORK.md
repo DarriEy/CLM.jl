@@ -39,6 +39,14 @@ Done since this doc was written (suite 20,642 → 20,772; PRs #81–#84):
 6. ✅ ~~Multi-veg-patch + multi-site~~ — DONE (#94): the full `ifp` patch-walk (`p = ifp + col.patchi[c]`) across all hooks + the daily step, `fates_set_filters!` weight rebuild, nsites>1 (nsites=2 live `clm_drv!` validated). AD/GPU for FATES columns remains explicitly out of scope.
 7. ✅ ~~Multi-day driver-integrated run + live modes~~ — DONE (#86 2-day carbon-only; #93 fire/CNP/tree-damage each run live + mass-conserving through `clm_drv!` + a 15-day carbon-only spin-up/stability run).
 
+**Update (2026-10-29) — research modes + FATES restart file.** Tree damage, ST3, prescribed
+physiology, cohort age, seed dispersal and inventory init are switchable from
+`clm_initialize!` and were each run against a 14-day Fortran reference. Item 4's in-memory
+"round-trip complete" missed that restarted cohorts were never zeroed; a restart through a
+NetCDF file (`write_fates_restart` / `read_fates_restart!`) is now bit-identical to a
+continuous run. Results, fixes and open upstream issues are in
+`scripts/validation/fates_fortran_parity/README.md` §"RESEARCH MODES".
+
 **★ ALL scoped FATES remaining-work items (1–7) are now COMPLETE (PRs #81–#94, suite → 22,128).** What's left is *deeper validation / coverage*, not implementation: numeric exercise of the W4b in-solve coupling once a column has a finite canopy `t_veg` (the carbon-only cold-start leaves it NaN), multi-year spin-ups, Fortran bit-parity comparison, and the AD/GPU-for-FATES question (explicitly out of scope by the CPU-only Union-ownership decision).
 
 ---

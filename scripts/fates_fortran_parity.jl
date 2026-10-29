@@ -166,7 +166,7 @@ end
 # ==========================================================================
 # Build: the Julia FATES port on the SAME site the Fortran case runs.
 # ==========================================================================
-function build(; fates_spitfire_mode::Int = 0, init_kw...)
+function build(; fates_spitfire_mode::Int = 0, init_kw = (;), cfg_kw = (;), extra_init_kw...)
     # use_bedrock=false MATCHES the Fortran case's lnd_in (`use_bedrock = .false.`,
     # from CLM build-namelist for I2000Clm50FatesRs — see setup_case.sh / the run dir).
     # clm_initialize! DEFAULTS use_bedrock=true; leaving it unset ran the port with a
@@ -180,7 +180,7 @@ function build(; fates_spitfire_mode::Int = 0, init_kw...)
     # this was a harness↔reference namelist mismatch (the #233/#240/#248 trap).
     inst, bounds, filt, tm = _C.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false,
-        fates_spitfire_mode=fates_spitfire_mode, init_kw...)
+        fates_spitfire_mode=fates_spitfire_mode, init_kw..., extra_init_kw...)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
         isfinite(inst.gridcell.londeg[g]) || (inst.gridcell.londeg[g] = inst.gridcell.lon[g]*180/π)
@@ -201,7 +201,7 @@ function build(; fates_spitfire_mode::Int = 0, init_kw...)
     # scripts/fates_longhorizon.jl). The Fortran case cold-starts CLM from the same
     # surfdata with all 14 FATES PFTs; a hand-tweaked initial soil profile or a
     # screened PFT set would compare the port against a DIFFERENT model.
-    config = _C.CLMDriverConfig(use_fates=true)
+    config = _C.CLMDriverConfig(; use_fates=true, cfg_kw...)
     return inst, bounds, filt, _C.clump_filter_inactive_and_active, config, tm
 end
 

@@ -358,6 +358,10 @@ using CLM
     # W1+W2 live-driver wiring spike: cold-start a single FATES site + attach to
     # CLMInstances + prove the AD-dual-copy / GPU-adapt ownership-model skip.
     include("test_fates_coldstart_spike.jl")
+    # FATES research modes (tree damage / ST3 / prescribed physiology / cohort age /
+    # seed dispersal / inventory init): namelist checks, host seed-dispersal wiring,
+    # inventory init through clm_fates_init!, and the FATES restart-file round trip.
+    include("test_fates_niche_modes.jl")
 
     # W3+W4 live-driver hooks: bc pack -> FATES driver -> bc unpack round-trip for
     # radiation (sun/shade + canopy albedo), btran, and photosynthesis, plus the

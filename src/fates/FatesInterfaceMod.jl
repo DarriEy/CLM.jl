@@ -95,6 +95,10 @@ Base.@kwdef mutable struct fates_interface_type <: AbstractFatesInterface
     # Host LUH2 land-use data (dynFATESLandUseChangeMod module state; the CTSM
     # side, not FATES). `nothing` unless use_fates_luh (fates_driver_landuse.jl).
     luh::Union{DynFatesLandUse,Nothing} = nothing
+    # Host seed-dispersal buffers (Fortran `clm_fates%fates_seed`, a dispersal_type)
+    # and each site's host gridcell. Allocated only when fates_seeddisp_cadence /= 0.
+    seeds::Union{dispersal_type,Nothing} = nothing
+    seed_gridcell::Vector{Int} = Int[]
 end
 
 # ===========================================================================

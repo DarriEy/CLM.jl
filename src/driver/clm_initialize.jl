@@ -161,6 +161,16 @@ function clm_initialize!(;
     # FATES SPITFIRE mode (namelist fates_spitfire_mode): 0 no fire, 1 scalar
     # lightning (constant ignitions, no streams), 2-5 need lightning/popdens streams.
     fates_spitfire_mode::Int = 0,
+    # FATES research modes (CTSM &clm_inparm, all .false./0 by default — see
+    # scripts/validation/fates_fortran_parity/README.md "RESEARCH MODES"). Validated by `fates_check_niche_modes`, which
+    # mirrors CTSM's build-namelist + FATES check_allset rules.
+    use_fates_tree_damage::Bool = false,
+    use_fates_ed_st3::Bool = false,
+    use_fates_ed_prescribed_phys::Bool = false,
+    use_fates_cohort_age_tracking::Bool = false,
+    fates_seeddisp_cadence::Int = 0,
+    use_fates_inventory_init::Bool = false,
+    fates_inventory_ctrl_filename::AbstractString = "",
     # CTSM's use_bedrock default is CONDITIONAL (bld/namelist_files/namelist_defaults_ctsm.xml
     # 178-181): .false. under use_fates / vichydro / phys=clm4_5, .true. otherwise (CLM5).
     # `nothing` reproduces that conditional; pass an explicit Bool to override it. Getting
@@ -328,6 +338,21 @@ function clm_initialize!(;
     use_fates_planthydro && !use_fates &&
         error("clm_initialize!: use_fates_planthydro requires use_fates")
     varctl.use_fates_planthydro = use_fates_planthydro
+    if use_fates
+        fates_check_niche_modes(; use_fates_tree_damage, use_fates_ed_st3,
+                                  use_fates_ed_prescribed_phys,
+                                  use_fates_cohort_age_tracking, fates_seeddisp_cadence,
+                                  use_fates_inventory_init, fates_inventory_ctrl_filename)
+    end
+    let on = use_fates   # the switches are "Only relevant if FATES is on"
+        varctl.use_fates_tree_damage         = on && use_fates_tree_damage
+        varctl.use_fates_ed_st3              = on && use_fates_ed_st3
+        varctl.use_fates_ed_prescribed_phys  = on && use_fates_ed_prescribed_phys
+        varctl.use_fates_cohort_age_tracking = on && use_fates_cohort_age_tracking
+        varctl.fates_seeddisp_cadence        = on ? fates_seeddisp_cadence : 0
+        varctl.use_fates_inventory_init      = on && use_fates_inventory_init
+        varctl.fates_inventory_ctrl_filename = on ? String(fates_inventory_ctrl_filename) : ""
+    end
     # The soil-BGC cascade (pools/transitions, decomp params, competition) runs for
     # use_cn OR use_fates_bgc (clm_instMod.F90 / CNDriverInit gate on both).
     _soil_bgc = use_cn || _fates_bgc
@@ -939,6 +964,14 @@ function clm_initialize!(;
                         fates_biogeog_screen = fates_biogeog_screen,
                         use_vertsoilc = _fates_bgc,
                         decomp_method = _fates_bgc ? "CENTURY" : "CTC",
+                        use_tree_damage = use_fates_tree_damage,
+                        use_ed_st3 = use_fates_ed_st3,
+                        use_ed_prescribed_phys = use_fates_ed_prescribed_phys,
+                        use_cohort_age_tracking = use_fates_cohort_age_tracking,
+                        seeddisp_cadence = fates_seeddisp_cadence,
+                        use_inventory_init = use_fates_inventory_init,
+                        inventory_ctrl_file = use_fates_inventory_init ?
+                            fates_inventory_ctrl_filename : "none",
                         spitfire_mode = fates_spitfire_mode,
                         params_path = fates_paramfile,
                         harvest_mode = fates_harvest_mode,

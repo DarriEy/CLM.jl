@@ -705,6 +705,116 @@ function fates_pack_bcin_daily!(inst::CLMInstances; s::Int = 1, c::Int = 1,
     return inst
 end
 
+# =====================================================================================
+# Host seed dispersal (clmfates_interfaceMod.F90). Active only when
+# fates_seeddisp_cadence /= 0; `fates.seeds === nothing` otherwise.
+# =====================================================================================
+
+"""
+    fates_seed_dispersal_init!(fates, inst)
+
+`clm_fates%init`'s dispersal block (clmfates_interfaceMod.F90:756-766): allocate the
+global seed buffers and build the gridcell neighbourhoods from the gridcell centres
+(`DetermineGridCellNeighbors`, single process). Each site's host gridcell is the
+gridcell of the site's soil column (one FATES site per column, in column order).
+
+The Fortran `fates_seed%init` sets `dispersal_date = GetCadenceDate()` while the FATES
+clock is still unset (GetAndSetTime first runs in init_coldstart, after `init`), so
+the date is the zero-initialised `hlm_current_day/month/year`. The first daily step
+is therefore a dispersal step. That is mirrored by resetting the module state to
+`dispersal_date = 0`, `dispersal_flag = false` here.
+"""
+function fates_seed_dispersal_init!(fates, inst)
+    grc = inst.gridcell
+    ng = max(length(grc.lat), 1)
+    seeds = dispersal_type()
+    init!(seeds, 1, ng, ng, numpft[])
+    dispersal_date[] = 0
+    dispersal_flag[] = false
+    latc = isempty(grc.lat) ? [0.0] : rad2deg.(grc.lat)
+    lonc = isempty(grc.lon) ? [0.0] : rad2deg.(grc.lon)
+    lneighbors[] = DetermineGridCellNeighbors(seeds, ng, latc, lonc)
+    fates.seeds = seeds
+    fates.seed_gridcell = ones(Int, fates.nsites)
+    return fates
+end
+
+"""
+    fates_wrap_update_seed_inout!(fates)
+
+`WrapUpdateFatesSeedInOut` (clmfates_interfaceMod.F90:2940-2975), called at the top
+of `dynamics_driv`: at a dispersal time each site receives its gridcell's incoming
+seed and its `seed_out` is reset; otherwise the incoming seed is zero.
+
+(The Fortran `else` branch writes `sites(s)` with `s` undefined — outside the site
+loop; every site's `seed_in` is zeroed here, which is what that branch means.)
+"""
+function fates_wrap_update_seed_inout!(fates)
+    seeds = fates.seeds
+    seeds === nothing && return fates
+    if IsItDispersalTime()
+        for s in 1:fates.nsites
+            g = fates.seed_gridcell[s]
+            fates.sites[s].seed_in .= @view seeds.incoming_global[:, g]
+            fill!(fates.sites[s].seed_out, 0.0)
+        end
+    else
+        for s in 1:fates.nsites
+            fill!(fates.sites[s].seed_in, 0.0)
+        end
+    end
+    return fates
+end
+
+"""
+    fates_wrap_seed_outgoing!(fates)
+
+The dispersal block of `wrap_update_hlmfates_dyn` (clmfates_interfaceMod.F90:1571-
+1588): zero the local outgoing buffer and, at a dispersal time, load each site's
+`seed_out` into its gridcell's slot.
+"""
+function fates_wrap_seed_outgoing!(fates)
+    seeds = fates.seeds
+    seeds === nothing && return fates
+    fill!(seeds.outgoing_local, 0.0)
+    if IsItDispersalTime()
+        for s in 1:fates.nsites
+            seeds.outgoing_local[:, fates.seed_gridcell[s]] .= fates.sites[s].seed_out
+        end
+    end
+    return fates
+end
+
+"""
+    fates_wrap_global_seed_dispersal!(fates; is_restart=false)
+
+`WrapGlobalSeedDispersal` (clmfates_interfaceMod.F90:2848-2936), run by `clm_drv` at
+the start of each day after the FATES dynamics: at a dispersal time, gather the
+outgoing seed (single process: outgoing_global = outgoing_local), zero the local
+buffer, and distribute it to each gridcell's neighbours weighted by the per-PFT
+dispersal density over the neighbour count.
+"""
+function fates_wrap_global_seed_dispersal!(fates; is_restart::Bool = false)
+    seeds = fates.seeds
+    seeds === nothing && return fates
+    if IsItDispersalTime(; setdispersedflag = !is_restart)
+        fill!(seeds.incoming_global, 0.0)
+        seeds.outgoing_global .= seeds.outgoing_local
+        fill!(seeds.outgoing_local, 0.0)
+        nbrs = lneighbors[]
+        for g in 1:size(seeds.incoming_global, 2)
+            g <= length(nbrs) || break
+            nb = nbrs[g].first_neighbor
+            while nb !== nothing
+                @views seeds.incoming_global[:, g] .+= seeds.outgoing_global[:, nb.gindex] .*
+                    nb.density_prob ./ nbrs[g].neighbor_count
+                nb = nb.next_neighbor
+            end
+        end
+    end
+    return fates
+end
+
 """
     fates_pack_bcin_sp!(inst; s, c)
 
@@ -809,6 +919,19 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     # Map each FATES site index s -> its CLM column c (the s-th is_fates column).
     site_col = zeros(Int, fates.nsites)
 
+    # Seeds dispersed from neighbouring gridcells into each site (no-op when off).
+    if fates.seeds !== nothing
+        let s0 = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s0 += 1
+                s0 <= fates.nsites || break
+                fates.seed_gridcell[s0] = col.gridcell[c]
+            end
+        end
+        fates_wrap_update_seed_inout!(fates)
+    end
+
     s = 0
     for c in 1:length(col.is_fates)
         col.is_fates[c] || continue
@@ -852,6 +975,7 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     #    in wrap_update_hlmfates_dyn after dynamics). `fcolumn` (site->column map) is
     #    unused by the body, which indexes only by site.
     canopy_summarization!(fates.nsites, fates.sites, fates.bc_in)
+    fates_wrap_seed_outgoing!(fates)
     update_hlm_dynamics!(fates.nsites, fates.sites, site_col, fates.bc_out)
     # wrap_update_hlmfates_dyn's litter-quality hand-off (decomp_method /= no_soil_decomp).
     use_fates_bgc && fates_update_litr_lig_c_to_n!(inst)
@@ -900,6 +1024,9 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     if fates.hist !== nothing
         update_history_dyn!(fates.hist, 1, fates.nsites, fates.sites, fates.bc_in)
     end
+
+    # 8. clm_drv's WrapGlobalSeedDispersal (once per day, after the clump loop).
+    fates_wrap_global_seed_dispersal!(fates)
 
     return inst
 end

@@ -280,6 +280,15 @@ are unchanged):
     (the nutrient-acquisition specs; nonzero for an active N/P cycle).
   * `use_tree_damage` — enable the tree-damage disturbance class state.
   * `use_planthydro` — enable plant hydraulics (Tier B BC solve).
+  * `use_ed_st3` — static stand structure (no growth / mortality / recruitment /
+    disturbance; only the fast physiology runs).
+  * `use_ed_prescribed_phys` — prescribed NPP / mortality / recruitment from the
+    `fates_prescribed_*` parameters (incompatible with ST3).
+  * `use_cohort_age_tracking` — track cohort age (coage) and use it in fusion.
+  * `seeddisp_cadence` — inter-gridcell seed dispersal cadence (0 off, 1 daily,
+    2 monthly, 3 yearly).
+  * `use_inventory_init` / `inventory_ctrl_file` — initialize the sites from
+    pss/css inventory files listed in the control file.
 """
 function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimlevel::Int = 1,
                                        spitfire_mode::Int = 0,
@@ -295,6 +304,12 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
                                        harvest_mode::AbstractString = fates_harvest_no_logging,
                                        use_luh::Bool = false,
                                        use_potentialveg::Bool = false,
+                                       use_ed_st3::Bool = false,
+                                       use_ed_prescribed_phys::Bool = false,
+                                       use_cohort_age_tracking::Bool = false,
+                                       seeddisp_cadence::Int = 0,
+                                       use_inventory_init::Bool = false,
+                                       inventory_ctrl_file::AbstractString = "none",
                                        do_check::Bool = true)
     set_fates_ctrlparms("flush_to_unset")
 
@@ -321,7 +336,7 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     # PARTEH mode (carbon-only by default; prt_cnp_flex_allom_hyp for CNP) +
     # seed-dispersal cadence + history levels.
     set_fates_ctrlparms("parteh_mode";       ival = parteh_mode)
-    set_fates_ctrlparms("seeddisp_cadence";  ival = 0)
+    set_fates_ctrlparms("seeddisp_cadence";  ival = seeddisp_cadence)
     set_fates_ctrlparms("hist_hifrq_dimlevel"; ival = hist_dimlevel)
     set_fates_ctrlparms("hist_dynam_dimlevel"; ival = hist_dimlevel)
 
@@ -354,10 +369,12 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     # CTSM always passes use_vertsoilc=1 (clmfates_interfaceMod.F90:486-488) with
     # nlevdecomp = nlevsoi under FATES soil BGC; the legacy one-layer path passes 0.
     set_fates_ctrlparms("use_vertsoilc";  ival = use_vertsoilc ? itrue : ifalse)
-    set_fates_ctrlparms("use_ed_st3";     ival = ifalse)
-    set_fates_ctrlparms("use_ed_prescribed_phys"; ival = ifalse)
+    # clmfates_interfaceMod.F90:490-516 (pass_ed_st3 / pass_ed_prescribed_phys /
+    # pass_cohort_age_tracking).
+    set_fates_ctrlparms("use_ed_st3";     ival = use_ed_st3 ? itrue : ifalse)
+    set_fates_ctrlparms("use_ed_prescribed_phys"; ival = use_ed_prescribed_phys ? itrue : ifalse)
     set_fates_ctrlparms("use_planthydro"; ival = use_planthydro ? itrue : ifalse)
-    set_fates_ctrlparms("use_cohort_age_tracking"; ival = ifalse)
+    set_fates_ctrlparms("use_cohort_age_tracking"; ival = use_cohort_age_tracking ? itrue : ifalse)
 
     # Land-use harvest / logging / LUH (CLMFatesGlobals1, clmfates_interfaceMod.F90
     # 518-561). All off for the default `no_harvest` / no-LUH configuration.
@@ -371,10 +388,11 @@ function _fates_spike_set_ctrlparms!(; numpft_in::Int, nlevsoil::Int, hist_dimle
     set_fates_ctrlparms("num_luh2_transitions"; ival = use_luh ? num_landuse_transition_vars : 0)
     set_fates_ctrlparms("use_fates_potentialveg"; ival = use_potentialveg ? itrue : ifalse)
 
-    # Inventory-init OFF (so cold-start NBG path runs).  The control file must be
-    # "set" to a non-"unset" string to pass check_allset even though it's unused.
-    set_fates_ctrlparms("use_inventory_init"; ival = ifalse)
-    set_fates_ctrlparms("inventory_ctrl_file"; cval = "none")
+    # Inventory init (clmfates_interfaceMod.F90:563-570). OFF by default, so the
+    # cold-start NBG path runs. The control file must be "set" to a non-"unset" string
+    # to pass check_allset even when it's unused.
+    set_fates_ctrlparms("use_inventory_init"; ival = use_inventory_init ? itrue : ifalse)
+    set_fates_ctrlparms("inventory_ctrl_file"; cval = inventory_ctrl_file)
 
     # The `check_allset` validation reads `edpftvarcon_inst().prescribed_*uptake`
     # for the CNP (parteh mode 2) "forced uptake" gate. Those PFT arrays are only
@@ -446,6 +464,89 @@ to match the case being reproduced.
 const FATES_HLM_CALENDAR = Ref(:noleap)
 
 """
+    fates_check_niche_modes(; use_fates_tree_damage=false, use_fates_ed_st3=false,
+                              use_fates_ed_prescribed_phys=false,
+                              use_fates_cohort_age_tracking=false,
+                              fates_seeddisp_cadence=0, use_fates_inventory_init=false,
+                              fates_inventory_ctrl_filename="", fates_parteh_mode=1)
+
+Host-side validity checks on the FATES research-mode namelist switches, mirroring
+CTSM. FATES's own `check_allset` repeats the FATES-side rules after the parameter
+read (FatesInterfaceMod.F90:1550-1590, 1644-1655); they are checked here too so a
+bad combination fails before any state is built:
+
+* `fates_seeddisp_cadence` ∈ {0,1,2,3} (namelist_definition_ctsm.xml valid_values);
+* `use_fates_inventory_init` needs `fates_inventory_ctrl_filename` set and pointing
+  at an existing file (CLMBuildNamelist.pm `setup_logic_fates`);
+* ST3 and prescribed physiology cannot both be on (FatesInterfaceMod.F90:1570);
+* inventory init cannot be combined with cohort age tracking (:1576);
+* tree damage is not compatible with CNP allocation, parteh mode 2 (:1648).
+"""
+function fates_check_niche_modes(; use_fates_tree_damage::Bool = false,
+                                   use_fates_ed_st3::Bool = false,
+                                   use_fates_ed_prescribed_phys::Bool = false,
+                                   use_fates_cohort_age_tracking::Bool = false,
+                                   fates_seeddisp_cadence::Integer = 0,
+                                   use_fates_inventory_init::Bool = false,
+                                   fates_inventory_ctrl_filename::AbstractString = "",
+                                   fates_parteh_mode::Integer = prt_carbon_allom_hyp)
+    fates_seeddisp_cadence in 0:3 ||
+        error("fates_seeddisp_cadence = $fates_seeddisp_cadence: valid values are " *
+              "0 (off), 1 (daily), 2 (monthly), 3 (yearly)")
+    if use_fates_inventory_init
+        isempty(strip(fates_inventory_ctrl_filename)) &&
+            error("fates_inventory_ctrl_filename is required when use_fates_inventory_init is set")
+        isfile(fates_inventory_ctrl_filename) ||
+            error("$fates_inventory_ctrl_filename does NOT point to a valid filename")
+        use_fates_cohort_age_tracking &&
+            error("Fates inventory init cannot be used with age dependent mortality: " *
+                  "set use_fates_cohort_age_tracking to false or turn off inventory init")
+    end
+    (use_fates_ed_st3 && use_fates_ed_prescribed_phys) &&
+        error("FATES ST3 and prescribed physiology cannot both be turned on")
+    (use_fates_tree_damage && fates_parteh_mode == prt_cnp_flex_allom_hyp) &&
+        error("FATES tree damage (use_fates_tree_damage) is not (yet) compatible with " *
+              "CNP allocation (fates_parteh_mode = 2)")
+    return nothing
+end
+
+# Cumulative NOLEAP days before each month (CTSM's default calendar).
+const _FATES_NOLEAP_CUMDAYS = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+_fates_noleap_doy0(mon::Integer, day::Integer) = _FATES_NOLEAP_CUMDAYS[mon] + min(day, mon == 2 ? 28 : 31) - 1
+_fates_yyyymmdd_split(d::Integer) = (d ÷ 10000, (d ÷ 100) % 100, d % 100)
+
+"""
+    fates_get_and_set_time!(year, mon, day, tod)
+
+Set the FATES clock module-globals from the host date. Mirrors the CTSM host
+routine `GetAndSetTime` (clmfates_interfaceMod.F90:3730-3786), which runs at FATES
+init and at the top of every daily `dynamics_driv` (line 1068):
+
+* `day_of_year = floor(timemgr_datediff(jan01_curr_year, now))` — 0-based, NOLEAP;
+* `model_day   = timemgr_datediff(reference_date, now)` [days, fractional];
+* `days_per_year = 365`, `freq_day = 1/365` (the NOLEAP calendar).
+
+`hlm_reference_date[]` (YYYYMMDD) must be set first (`clm_fates_init!` sets it to
+the run start date, CTSM's `ref_ymd` default). A `year <= 0` means "the caller does
+not track the year": the year is then carried forward from the previous call and
+advanced when the day of year wraps (`clm_drv!`'s `year` kwarg defaults to 0).
+"""
+function fates_get_and_set_time!(year::Integer, mon::Integer, day::Integer, tod::Integer)
+    doy = _fates_noleap_doy0(mon, day)
+    if year <= 0
+        year = hlm_current_year[]
+        if hlm_day_of_year[] != fates_unset_int && doy < hlm_day_of_year[]
+            year += 1
+        end
+    end
+    ry, rm, rd = _fates_yyyymmdd_split(hlm_reference_date[])
+    model_day = 365.0 * (year - ry) + (doy - _fates_noleap_doy0(rm, rd)) + tod / sec_per_day
+    SetFatesTime(year, mon, day, tod, year * 10000 + mon * 100 + day,
+                 hlm_reference_date[], model_day, doy, 365, 1.0 / 365.0)
+    return nothing
+end
+
+"""
     clm_fates_init!(inst::CLMInstances; nsites=1, numpft_in=nothing, nlevsoil,
                     nlevdecomp, params_path=FATES_PARAMS_DEFAULT_CDL,
                     current_year=1, current_month=1, current_day=1)
@@ -498,6 +599,12 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          use_potentialveg::Bool = false,
                          fluh_timeseries::AbstractString = "",
                          flandusepftdat::AbstractString = "",
+                         use_ed_st3::Bool = false,
+                         use_ed_prescribed_phys::Bool = false,
+                         use_cohort_age_tracking::Bool = false,
+                         seeddisp_cadence::Int = 0,
+                         use_inventory_init::Bool = false,
+                         inventory_ctrl_file::AbstractString = "none",
                          dtime::Real = 1800.0)
 
     # ---- Fixed-biogeography (climate-appropriate PFT screening) config ----------
@@ -572,7 +679,16 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                   harvest_mode = harvest_mode,
                                   use_luh = use_luh,
                                   use_potentialveg = use_potentialveg,
-                                  do_check = !is_cnp)   # CNP: check after the param read
+                                  use_ed_st3 = use_ed_st3,
+                                  use_ed_prescribed_phys = use_ed_prescribed_phys,
+                                  use_cohort_age_tracking = use_cohort_age_tracking,
+                                  seeddisp_cadence = seeddisp_cadence,
+                                  use_inventory_init = use_inventory_init,
+                                  inventory_ctrl_file = inventory_ctrl_file,
+                                  # check_allset reads PFT parameters (the CNP forced-
+                                  # uptake gate, the age-senescence/coage gate), so it
+                                  # runs after the parameter read, as in CLMFatesGlobals2.
+                                  do_check = false)
 
     # Read the REAL FATES default parameter file (replaces _fates_spike_setup_pft!).
     # This populates prt_params / EDParams / EDPftvarcon_inst / SFParams /
@@ -606,9 +722,9 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                                 prescribed_n_uptake : coupled_n_uptake
         edp_cnp.p_uptake_mode = any(x -> abs(x) > nearzero, evcon.prescribed_puptake) ?
                                 prescribed_p_uptake : coupled_p_uptake
-        # Now run the deferred validation (params + prescribed uptake are in place).
-        set_fates_ctrlparms("check_allset")
     end
+    # The deferred validation (params + any CNP prescribed uptake are in place).
+    set_fates_ctrlparms("check_allset")
     numpft_resolved = numpft[]
     if numpft_in !== nothing && numpft_in != numpft_resolved
         error("clm_fates_init!: numpft_in=$numpft_in does not match the parameter " *
@@ -699,7 +815,13 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # SetFatesGlobalElements2 derived dims the cold-start chain + bc allocators read.
     # The full SetFatesGlobalElements2 (InitHydroGlobals / fates_history_maps / VAI
     # bins) is not needed for the cold start, so set just these directly.
-    fates_maxElementsPerSite[] = max(fates_maxPatchesPerSite[] * num_swb,
+    # Restart-vector sizing (SetFatesGlobalElements2, non-SP branch); only the
+    # restart interface reads these.
+    fates_maxElementsPerPatch[] = max(num_swb, p.max_cohort_per_patch,
+                                      ndcmpy * nlevsoil, ncwd * nlevsoil)
+    fates_maxElementsPerSite[] = max(fates_maxPatchesPerSite[] * fates_maxElementsPerPatch[],
+                                     numWaterMem * numpft[], num_vegtemp_mem, num_elements[],
+                                     fates_maxPatchesPerSite[] * num_swb,
                                      nlevsclass[] * numpft[] * n_term_mort_types)
     # Nutrient competitors (FatesInterfaceMod.F90:913-926): one / trivial scaling
     # except CNP with a coupled (non-prescribed) N or P uptake mode.
@@ -888,7 +1010,22 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
             fates_pack_bcin_landuse!(bc_in[s], fates.luh, site_g[s] == 0 ? 1 : site_g[s])
         end
     end
-    init_patches!(nsites, sites, bc_in)
+    if use_inventory_init
+        # Inventory cold start (EDInitMod init_patches -> initialize_sites_by_inventory).
+        # The Fortran matches the inventory list against sites(s)%lat/lon, set from the
+        # host gridcell (clmfates_interfaceMod.F90:884-885); the port's site lat/lon
+        # are not set on the default path, so the host coordinates are passed in.
+        grc = inst.gridcell
+        site_coords = map(1:nsites) do s
+            g = s <= length(inst.column.gridcell) ? inst.column.gridcell[s] : 1
+            isempty(grc.lat) ? (NaN, NaN) : (rad2deg(grc.lat[g]), rad2deg(grc.lon[g]))
+        end
+        init_patches!(nsites, sites, bc_in;
+                      sitelist_lines = read_lines_file(inventory_ctrl_file),
+                      site_coords = site_coords)
+    else
+        init_patches!(nsites, sites, bc_in)
+    end
     for s in 1:nsites
         # CLM has not computed last year's maximum rooting depth yet (it will at the
         # start of the timestep loop), so the litter-flux boundary starts trivial.
@@ -915,6 +1052,10 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
         sites[s].h_gid = s
     end
     fates.hist = _build_fates_history_interface(nsites)
+
+    # ---- Seed dispersal (clm_fates%init, clmfates_interfaceMod.F90:756-766) ----
+    seeddisp_cadence != fates_dispersal_cadence_none &&
+        fates_seed_dispersal_init!(fates, inst)
 
     inst.fates = fates
 

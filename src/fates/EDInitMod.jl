@@ -545,7 +545,8 @@ providers); the default cold-start needs none.
 """
 function init_patches!(nsites::Integer, sites::AbstractVector, bc_in::AbstractVector;
                        sitelist_lines=nothing,
-                       pss_provider=nothing, css_provider=nothing)
+                       pss_provider=nothing, css_provider=nothing,
+                       site_coords=nothing)
 
     age = 0.0   # notional age of a cold-start patch
 
@@ -557,10 +558,13 @@ function init_patches!(nsites::Integer, sites::AbstractVector, bc_in::AbstractVe
             sites[s].spread = init_spread_inventory
         end
 
+        sitelist_lines === nothing &&
+            fates_endrun("init_patches!: inventory init needs the inventory site list")
         initialize_sites_by_inventory!(nsites, sites, bc_in;
                                        sitelist_lines = sitelist_lines,
-                                       pss_provider = pss_provider,
-                                       css_provider = css_provider)
+                                       pss_provider = something(pss_provider, read_lines_file),
+                                       css_provider = something(css_provider, read_lines_file),
+                                       site_coords = site_coords)
 
         # Initialize the total carbon stock for mass-balance checks.
         for s in 1:nsites

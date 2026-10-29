@@ -1451,13 +1451,15 @@ height-ordered cohort list (first created = tallest, last = shortest). Mirrors
 the Fortran `create_patchcohort_structure` skeleton-build. Each freshly-created
 cohort gets its PRT (PARTEH) object re-created via `InitPRTObject!`, and — when
 `hlm_use_planthydro` is on — its hydraulics object via `InitHydrCohort`, so the
-R7/R8 pools have somewhere to land on unpack. (The HLM `init_site_vars` /
-`zero_site` boundary-condition setup has no standalone equivalent yet — `# TODO:`
-below.)
+R7/R8 pools have somewhere to land on unpack. With `bc_in`/`bc_out` supplied (a
+restart run), each site is first re-initialised by `init_site_vars!` + `zero_site!`
+(FatesRestartInterfaceMod.F90:2856-2857), as the Fortran always does; the unit tests
+that build a bare skeleton omit them.
 """
 function create_patchcohort_structure!(this::fates_restart_interface_type, nc::Integer,
                                        nsites::Integer, sites::AbstractVector{<:ed_site_type};
-                                       n_swb::Integer = num_swb, current_tod::Integer = 0)
+                                       n_swb::Integer = num_swb, current_tod::Integer = 0,
+                                       bc_in = nothing, bc_out = nothing)
     maxperpatch = fates_maxElementsPerPatch[]
     regen = ed_params().regeneration_model
 
@@ -1466,7 +1468,10 @@ function create_patchcohort_structure!(this::fates_restart_interface_type, nc::I
         io_idx_si     = this.restart_map[nc].site_index[s]
         io_idx_co_1st = this.restart_map[nc].cohort1_index[s]
 
-        # TODO: init_site_vars(site, bc_in, bc_out); zero_site(site) — HLM BC setup.
+        if bc_in !== nothing
+            init_site_vars!(site, bc_in[s], bc_out === nothing ? nothing : bc_out[s])
+            zero_site!(site)
+        end
 
         npatches = _geti(this, :ir_npatch_si, io_idx_si)
         if npatches < 0 || npatches > 10000
@@ -1492,7 +1497,13 @@ function create_patchcohort_structure!(this::fates_restart_interface_type, nc::I
             ncohorts = _geti(this, :ir_ncohort_pa, io_idx_co_1st)
             for fto in 1:ncohorts
                 new_cohort_node = fates_cohort_type()
-                # NanValues / ZeroValues equivalent: a fresh cohort defaults NaN/unset.
+                # FatesRestartInterfaceMod.F90:2911-2912. The ZeroValues call matters:
+                # a fresh cohort defaults to NaN, and the fields ZeroValues sets that are
+                # not in the restart (fire mortality, the daily N/P demand/uptake
+                # sentinels, ...) would otherwise carry NaN into the first daily step's
+                # litter fluxes and fail the mass-balance check after a restart.
+                NanValues(new_cohort_node)
+                ZeroValues(new_cohort_node)
                 if newp.tallest === nothing
                     newp.tallest = new_cohort_node     # 1st created = tallest
                 end
