@@ -61,6 +61,11 @@ function site_summary(site)
     ncoh = 0; npatch = 0; carbon = 0.0; structc = 0.0; leafc = 0.0
     maxdbh = 0.0; maxdbh_pft = 0; nplant = zeros(np); maxdbh_pf = zeros(np)
     npp = 0.0; gpp = 0.0
+    # per PFT, in FATES history units (FatesHistoryInterfaceMod.F90:3686-3687,
+    # FATES_NPP_PF = sum npp_acc_hold * n/area / (days_per_year*sec_per_day); FATES_LEAFC_PF,
+    # FATES_STOREC_PF kgC m-2; repro = the cohort reproductive pool, kgC m-2)
+    npp_pf = zeros(np); leafc_pf = zeros(np); storec_pf = zeros(np); repro_pf = zeros(np)
+    secs_yr = _C.hlm_days_per_year[] * 86400.0
     cp = site.oldest_patch
     while cp !== nothing
         npatch += 1
@@ -78,12 +83,17 @@ function site_summary(site)
             structc += _pool(cc, _C.struct_organ) * cc.n
             leafc   += _pool(cc, _C.leaf_organ) * cc.n
             isfinite(cc.npp_acc_hold) && (npp += cc.npp_acc_hold * cc.n)
+            isfinite(cc.npp_acc_hold) && (npp_pf[ft] += cc.npp_acc_hold * cc.n * _C.area_inv / secs_yr)
+            leafc_pf[ft]  += _pool(cc, _C.leaf_organ) * cc.n * _C.area_inv
+            storec_pf[ft] += _pool(cc, _C.store_organ) * cc.n * _C.area_inv
+            repro_pf[ft]  += _pool(cc, _C.repro_organ) * cc.n * _C.area_inv
             isfinite(cc.gpp_acc_hold) && (gpp += cc.gpp_acc_hold * cc.n)
             cc = cc.shorter
         end
         cp = cp.younger
     end
-    return (; ncoh, npatch, carbon, structc, leafc, maxdbh, maxdbh_pft, nplant, maxdbh_pf, npp, gpp)
+    return (; ncoh, npatch, carbon, structc, leafc, maxdbh, maxdbh_pft, nplant, maxdbh_pf, npp, gpp,
+            npp_pf, leafc_pf, storec_pf, repro_pf)
 end
 
 function cohort_trace(io, site, d)
@@ -149,7 +159,10 @@ function main_multiyear()
             ",", join(["maxdbh_$f" for f in 1:np], ","),
             ",cstatus,ncolddays,nchilldays,gdd,tveg24C,cndaysleafon,cndaysleafoff,doy,",
             join(["dstatus_$f" for f in 1:np], ","), ",", join(["elong_$f" for f in 1:np], ","),
-            ",altmax_ly_indx,maxroot_indx,seed_bank,seed_germ")
+            ",altmax_ly_indx,maxroot_indx,seed_bank,seed_germ,",
+            join(["npp_$f" for f in 1:np], ","), ",", join(["leafc_$f" for f in 1:np], ","), ",",
+            join(["storec_$f" for f in 1:np], ","), ",", join(["repro_$f" for f in 1:np], ","), ",",
+            join(["seed_$f" for f in 1:np], ","))
 
     fr = _C.ForcingReader(); fyear = year(START)
     _C.forcing_reader_init!(fr, joinpath(FORCDIR, "clmforc.$(fyear).nc"))
@@ -199,16 +212,21 @@ function main_multiyear()
                 join((@sprintf("%.4g", x) for x in site.elong_factor[1:np]), ","))
         # rooting depth FATES sees (last year's active layer) and the site seed pools
         # [kg C / m2 site], comparable with FATES_SEED_BANK.
-        sbank = 0.0; sgerm = 0.0
+        sbank = 0.0; sgerm = 0.0; seed_pf = zeros(np)
         cp = site.oldest_patch
         while cp !== nothing
             lt = cp.litter[1]
             sbank += sum(lt.seed[1:np]) * cp.area * _C.area_inv
             sgerm += sum(lt.seed_germ[1:np]) * cp.area * _C.area_inv
+            seed_pf .+= (lt.seed[1:np] .+ lt.seed_germ[1:np]) .* (cp.area * _C.area_inv)
             cp = cp.younger
         end
-        @printf(io, ",%d,%d,%.8g,%.8g\n", inst.active_layer.altmax_lastyear_indx_col[1],
+        @printf(io, ",%d,%d,%.8g,%.8g", inst.active_layer.altmax_lastyear_indx_col[1],
                 inst.fates.bc_in[1].max_rooting_depth_index_col, sbank, sgerm)
+        for v in (sm.npp_pf, sm.leafc_pf, sm.storec_pf, sm.repro_pf, seed_pf)
+            print(io, ",", join((@sprintf("%.6g", x) for x in v), ","))
+        end
+        println(io)
         flush(io)
         (d + 1) in MY_TRACE && tio !== nothing && (cohort_trace(tio, site, d + 1); flush(tio))
         if (d + 1) % 30 == 0

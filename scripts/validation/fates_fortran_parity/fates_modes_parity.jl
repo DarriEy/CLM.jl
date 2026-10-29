@@ -34,6 +34,7 @@ const ALL_FIELDS = (SCALARS..., (f * "_" * string(k) for f in PF_FIELDS for k in
 
 function build_mode(mode)
     fl = MODE_FLAGS[mode]
+    fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, fl..., fates_history_dimlevel=2, start_date=START, dtime=Int(DTIME), use_bedrock=false)

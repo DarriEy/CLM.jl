@@ -82,6 +82,35 @@ const FSNOWOPTICS = _fates_snicar("snicar_optics_5bnd_c013122.nc")
 const FSNOWAGING  = _fates_snicar("snicar_drdt_bst_fit_60_c070416.nc")
 const NSTEPS    = parse(Int, get(ENV, "FATES_PARITY_STEPS", "120"))
 
+"""
+    fates_case_snow_namelist!() -> NamedTuple
+
+Set the snow-hydrology namelist of every Fortran FATES reference case
+(`&clm_snowhydrology_inparm` in the lnd_in of fates_parity_1pt, fates_fire_1pt,
+fates_cnp_*, fates_bgc_1pt_v2, canopy_gpp_sp_1pt, fates_recruit_multiyear):
+
+    snow_overburden_compaction_method = 'Vionnet2012'
+    wind_dependent_snow_density       = .true.
+    lotmp_snowdensity_method          = 'Slater2017'
+
+The port defaults to Anderson1976 overburden compaction and no wind term (the smoother
+AD path; see snow_hydrology.jl), and the non-FATES parity harnesses already set the
+Fortran values (parity_run_domain.jl). Without this the FATES harnesses compacted the
+Bow snowpack too fast: same SWE, 6-15 % shallower snow from December to May, so FATES
+buried less of the canopy (`elai` +60-80 % on the tree patch in March-May), the
+canopy absorbed more SW and the melt-season leaf ran warm. Module-global state:
+returns the previous values so in-process callers can restore them.
+"""
+function fates_case_snow_namelist!()
+    old = (wind_dep_snow_density = _C.WIND_DEPENDENT_SNOW_DENSITY[],
+           overburden_compaction_method = _C.OVERBURDEN_COMPACTION_METHOD[],
+           new_snow_density_method = _C.NEW_SNOW_DENSITY[])
+    _C.snow_hydrology_set_control_for_testing!(; wind_dep_snow_density = true,
+        overburden_compaction_method = _C.OVERBURDEN_COMPACTION_VIONNET2012,
+        new_snow_density_method = _C.LO_TMP_DNS_SLATER2017)
+    return old
+end
+
 # ==========================================================================
 # Record extraction — the Julia side of the schema-v2 writer. Field names, field
 # order and traversal order MUST mirror scripts/validation/fates_fortran_parity/
@@ -185,6 +214,8 @@ function build(; fates_spitfire_mode::Int = 0, init_kw = (;), cfg_kw = (;), extr
     # nbedrock=nlevsoi, zwt stays 8.6 m, qflx_drain≡0 like Fortran, and h2ovol1 tracks
     # the Fortran ground truth to ~0.01–0.02. The soil-hydrology port itself is faithful;
     # this was a harness↔reference namelist mismatch (the #233/#240/#248 trap).
+    # FATES_CASE_SNOW=0 keeps the port's snow defaults (diagnostic A/B only).
+    get(ENV, "FATES_CASE_SNOW", "1") == "1" && fates_case_snow_namelist!()
     inst, bounds, filt, tm = _C.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false,

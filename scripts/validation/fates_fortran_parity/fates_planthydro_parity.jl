@@ -53,6 +53,7 @@ const ALL_FIELDS = (PLANT..., SCALARS...,
                     PERPFT_DEMOG...)
 
 function build_hydro()
+    fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, use_fates_planthydro=true, start_date=START, dtime=Int(DTIME),
