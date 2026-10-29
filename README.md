@@ -333,6 +333,11 @@ The original Julia contributions in this repository are licensed under the
 copyright and BSD 3-Clause terms retained in [`NOTICE`](NOTICE) continue to apply
 to derived portions of the work.
 
+Data files under [`data/`](data) keep their original licenses, which are
+documented in the README of each subdirectory. In particular, the single-point
+LUH2 land-use extracts in [`data/fates/luh_1pt/`](data/fates/luh_1pt/README.md)
+are derived from the CMIP6 LUH2 dataset and distributed under CC BY-SA 4.0.
+
 CLM.jl is based on the Community Land Model developed by NCAR and the broader
 CESM community. It is not affiliated with or endorsed by NCAR, CESM, or the CTSM
 development team.
