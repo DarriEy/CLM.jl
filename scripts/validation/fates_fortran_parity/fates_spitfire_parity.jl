@@ -37,7 +37,11 @@ const HOST_FIELDS = ("WIND", "RH", "PRECIP", "TBOT")
 # summed from the patches exactly as update_history_dyn2 does).
 const NFC = 6
 const FC_FIELDS = Tuple(vcat(["FUEL_FC$k" for k in 1:NFC], ["MOIST_FC$k" for k in 1:NFC]))
-const ALL_FIELDS = (FIRE_FIELDS..., HOST_FIELDS..., FC_FIELDS...)
+# Aboveground litter the fuel is built from (SFMainMod UpdateFuelCharacteristics:
+# dead leaves = sum(leaf_fines), twigs/branches/trunks = ag_cwd(1:4)). Scoring these
+# beside FUEL_FC* separates a litter (vegetation) gap from a fuel-summation gap.
+const LITTER_FIELDS = ("FATES_LITTER_AG_FINE_EL", "FATES_LITTER_AG_CWD_EL")
+const ALL_FIELDS = (FIRE_FIELDS..., HOST_FIELDS..., FC_FIELDS..., LITTER_FIELDS...)
 
 "Value of a Julia FATES history variable (site 1; multi-dim variables summed)."
 function _jhist(h, name)
@@ -83,7 +87,7 @@ Run the port `ndays` days and return one record per model day: the FATES fire hi
 after that day's daily step, plus the day-mean host forcing over the day's steps.
 Record d (1-based) <-> the Fortran h0 record covering model day d.
 """
-function run_julia(ndays::Int)
+function run_julia(ndays::Int; tveg24_ref = nothing)
     # SPITFIRE_MODE=2..5 (default 1) reads the same synthetic uniform lightning /
     # population-density streams stage_spitfire_run.sh gives the Fortran case.
     mode = parse(Int, get(ENV, "SPITFIRE_MODE", "1"))
@@ -137,7 +141,7 @@ function run_julia(ndays::Int)
                 CLM.init_daylength!(inst.gridcell, declin, declinm1, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
                 CLM.read_forcing_step!(fr, a2l, datm_time(cur), ng, nc)
                 CLM.downscale_forcings!(bounds, a2l, inst.column, inst.landunit, inst.topo)
-                CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true,
+                CLM.clm_drv!(config, inst, filt, filt_ia, bounds, CLM.nuopc_doalb(i),
                     calday + DTIME / CLM.SECSPDAY, declin, declin, CLM.ORB_OBLIQR_DEFAULT,
                     false, false, "", false;
                     nstep=i, is_first_step=(i <= 1),
@@ -155,6 +159,14 @@ function run_julia(ndays::Int)
                     nacc += 1
                 end
             end
+        end
+        # Diagnostic (PHEN_TMEM_FROM_FORTRAN=1): overwrite the day's entry of the
+        # cold-phenology temperature memory (EDPhysiologyMod phenology:
+        # vegtemp_memory(1) = site tveg24 mean) with the Fortran FATES_TVEG24 of the
+        # same day. Isolates the host canopy-temperature residual from the leaf-off
+        # decision (> ncolddayslim days below phen_coldtemp in the last 10).
+        if tveg24_ref !== nothing
+            inst.fates.sites[1].vegtemp_memory[1] = tveg24_ref[d + 1]
         end
         r = Dict{String,Float64}(f => _jhist(inst.fates.hist, f) for f in FIRE_FIELDS)
         # FATES_MORTALITY_FIRE_SZ is a level-2 (group_dyna_complx) history field the
@@ -179,6 +191,16 @@ function run_julia(ndays::Int)
                 cp = cp.younger
             end
             for k in 1:NFC; r["FUEL_FC$k"] = fc[k]; r["MOIST_FC$k"] = mc[k]; end
+            # aboveground litter pools, patch-area weighted over the whole site
+            lf = 0.0; lc = 0.0
+            cp = st.oldest_patch
+            while cp !== nothing
+                L = cp.litter[CLM.element_pos[CLM.carbon12_element]]
+                lf += sum(L.leaf_fines) * cp.area / CLM.area
+                lc += sum(L.ag_cwd) * cp.area / CLM.area
+                cp = cp.younger
+            end
+            r["FATES_LITTER_AG_FINE_EL"] = lf; r["FATES_LITTER_AG_CWD_EL"] = lc
         end
         for f in HOST_FIELDS; r[f] = acc[f] / max(nacc, 1); end
         push!(recs, r)
@@ -218,6 +240,9 @@ function read_fortran(path)
             haskey(ds, hv) || continue
             a = Array(ds[hv])                                  # (lnd, fuel, time)
             for k in 1:NFC; out[pre * string(k)] = Float64.(vec(a[1, k, :])); end
+        end
+        for f in LITTER_FIELDS                                 # (lnd, elem, time)
+            haskey(ds, f) && (out[f] = Float64.(vec(Array(ds[f])[1, 1, :])))
         end
         out["WIND"] = Float64.(vec(ds["WIND"][1, :]))
         out["RH"]   = Float64.(vec(ds["RH"][1, :]))
@@ -293,7 +318,8 @@ function spitfire_main(args)
     ref = isempty(args) ? FORTRAN_CSV : args[1]
     ft = read_fortran(ref)
     ndays = length(args) >= 2 ? parse(Int, args[2]) : length(first(values(ft)))
-    jl = run_julia(ndays)
+    jl = run_julia(ndays; tveg24_ref = get(ENV, "PHEN_TMEM_FROM_FORTRAN", "0") == "1" ?
+                                       ft["FATES_TVEG24"] : nothing)
     println("\n=== FATES SPITFIRE (mode 1): Julia vs Fortran (", ndays, " days) ===")
     score(jl, ft)
     # The FATES vegetation trajectories separate after ~5 weeks (patch spawning and

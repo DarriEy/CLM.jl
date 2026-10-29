@@ -54,6 +54,7 @@ const ALL_FIELDS = (PLANT..., SCALARS...,
 
 function build_hydro()
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
+        fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, use_fates_planthydro=true, start_date=START, dtime=Int(DTIME),
         use_bedrock=false)
     for g in 1:bounds.endg

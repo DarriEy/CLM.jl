@@ -73,6 +73,13 @@ const FORCDIR   = get(ENV, "FATES_FORCDIR",
 # Must match START_YMD / lnd_cpl_dt in the Fortran case.
 const START     = DateTime(2002, 7, 1)
 const DTIME     = 3600.0
+# SNICAR snow optics / aging, as the Fortran case's lnd_in (fsnowoptics, fsnowaging).
+# Without them clm_initialize! leaves the SNICAR Mie tables at zero and the snow
+# albedo is wrong: the Bow winter ground then absorbs 12-34 W/m2 more SW (SABG,
+# Oct-Mar), +1-3 K TG/TV. Empty string if the inputdata copy is absent.
+_fates_snicar(f) = (p = "$DATA/installs/cesm-inputdata/lnd/clm2/snicardata/$f"; isfile(p) ? p : "")
+const FSNOWOPTICS = _fates_snicar("snicar_optics_5bnd_c013122.nc")
+const FSNOWAGING  = _fates_snicar("snicar_drdt_bst_fit_60_c070416.nc")
 const NSTEPS    = parse(Int, get(ENV, "FATES_PARITY_STEPS", "120"))
 
 # ==========================================================================
@@ -179,6 +186,7 @@ function build(; fates_spitfire_mode::Int = 0, init_kw = (;), cfg_kw = (;), extr
     # the Fortran ground truth to ~0.01–0.02. The soil-hydrology port itself is faithful;
     # this was a harness↔reference namelist mismatch (the #233/#240/#248 trap).
     inst, bounds, filt, tm = _C.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
+        fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, start_date=START, dtime=Int(DTIME), use_bedrock=false,
         fates_spitfire_mode=fates_spitfire_mode, init_kw..., extra_init_kw...)
     for g in 1:bounds.endg

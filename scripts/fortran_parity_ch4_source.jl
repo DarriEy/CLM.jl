@@ -43,7 +43,14 @@
 include(joinpath(@__DIR__, "fortran_parity_common.jl"))
 using Printf
 
-const DUMPDIR_SRC = "$(get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data"))/clm_bgc_spinup/bow_ref_ch4tws"
+# bow_ref_ch4o2 is the O2-demand ("bgcdump O2") rebuild of bow_ref_ch4tws: same case, same
+# window, bit-identical in every field the two share, plus the O2-demand components
+# (docs/CH4_FIRE_PARITY.md §17). Preferred when present; CH4_SOURCE_REFDIR overrides.
+const _SD_SRC = get(ENV, "SYMFLUENCE_DATA", "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data")
+const DUMPDIR_SRC = get(ENV, "CH4_SOURCE_REFDIR",
+    isdir(joinpath(_SD_SRC, "clm_bgc_spinup", "bow_ref_ch4o2")) ?
+        joinpath(_SD_SRC, "clm_bgc_spinup", "bow_ref_ch4o2") :
+        joinpath(_SD_SRC, "clm_bgc_spinup", "bow_ref_ch4tws"))
 const INV_FILE_SRC = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/paramdata/" *
                      "finundated_inversiondata_0.9x1.25_c170706.nc"
 const FNDEP_SRC = "$(get(ENV, "CESM_INPUTDATA", "/Users/darri.eythorsson/projects/cesm-inputdata"))/lnd/clm2/ndepdata/" *
@@ -184,6 +191,44 @@ const SRC_LEV = [
     ("O2_DECOMP_SAT",  i -> i.ch4.o2_decomp_depth_sat_col),
     ("O2_DECOMP_UNSAT",i -> i.ch4.o2_decomp_depth_unsat_col),
 ]
+# O2-demand components and their inputs. Only the "bgcdump O2-demand" rebuild
+# (scripts/validation/fortran_sourcemods/bgcdumpMod.F90, O2 block) writes these;
+# older references simply lack them and the rows are skipped.
+function _o2_rr_demand(inst, nlev)
+    nlevsno = CLM.varpar.nlevsno
+    pch = inst.patch; ss = inst.soilstate
+    rr = inst.bgc_vegetation.cnveg_carbonflux_inst.rr_patch
+    out = zeros(nlev)
+    for p in eachindex(pch.column)
+        pch.column[p] == 1 || continue
+        (pch.wtcol[p] > 0 && pch.itype[p] != CLM.noveg) || continue
+        for j in 1:nlev
+            out[j] += rr[p] * ss.crootfr_patch[p, j] * pch.wtcol[p]
+        end
+    end
+    for j in 1:nlev
+        out[j] /= CLM.CATOMW * inst.column.dz[1, nlevsno + j]
+    end
+    return out
+end
+const SRC_O2DEM = [
+    ("O2_DEMAND_RR",   (i, n) -> _o2_rr_demand(i, n)),
+    ("O2_DEMAND_NIT",  (i, n) -> i.soilbiogeochem_nitrogenflux.pot_f_nit_vr_col[1, 1:n] .* (2 / 14)),
+    ("POT_F_NIT_VR",   (i, n) -> i.soilbiogeochem_nitrogenflux.pot_f_nit_vr_col[1, 1:n]),
+    ("ANAEROBIC_FRAC", (i, n) -> i.soilbiogeochem_nitrogenflux.anaerobic_frac_col[1, 1:n]),
+    ("K_NITR_VR",      (i, n) -> i.soilbiogeochem_nitrogenflux.k_nitr_vr_col[1, 1:n]),
+    ("DIFFUS",         (i, n) -> i.soilbiogeochem_nitrogenflux.diffus_col[1, 1:n]),
+    ("R_PSI",          (i, n) -> i.soilbiogeochem_nitrogenflux.r_psi_col[1, 1:n]),
+    ("O_SCALAR",       (i, n) -> i.soilbiogeochem_carbonflux.o_scalar_col[1, 1:n]),
+    ("HR_VR",          (i, n) -> i.soilbiogeochem_carbonflux.hr_vr_col[1, 1:n]),
+    ("O2_OXID_SAT",    (i, n) -> i.ch4.o2_oxid_depth_sat_col[1, 1:n]),
+    ("O2_OXID_UNSAT",  (i, n) -> i.ch4.o2_oxid_depth_unsat_col[1, 1:n]),
+    ("O2_AERE_SAT",    (i, n) -> i.ch4.o2_aere_depth_sat_col[1, 1:n]),
+    ("O2_AERE_UNSAT",  (i, n) -> i.ch4.o2_aere_depth_unsat_col[1, 1:n]),
+    ("RR",             (i, n) -> i.bgc_vegetation.cnveg_carbonflux_inst.rr_patch),   # patch vector
+    ("FROOT_MR",       (i, n) -> i.bgc_vegetation.cnveg_carbonflux_inst.froot_mr_patch),
+    ("LIVECROOT_MR",   (i, n) -> i.bgc_vegetation.cnveg_carbonflux_inst.livecroot_mr_patch),
+]
 const SRC_COL = [
     ("CH4_SURF_DIFF_SAT",   i -> i.ch4.ch4_surf_diff_sat_col),
     ("CH4_SURF_DIFF_UNSAT", i -> i.ch4.ch4_surf_diff_unsat_col),
@@ -299,6 +344,14 @@ function run_source(; nsteps::Int = NLASTS - N0S, mode::Symbol = :locked, report
                 worst[nm] = max(get(worst, nm, 0.0), e); scale[nm] = max(get(scale, nm, 0.0), s)
                 rowerr[nm] = e
             end
+            for (nm, g) in SRC_O2DEM
+                f = _dvs(ds, nm); f === nothing && continue
+                fv = ndims(f) == 1 ? Float64.(f) : Float64.(f[1:nlev, 1])
+                jv = g(inst, nlev); m = min(length(jv), length(fv))
+                (e, s) = _relerr(jv[1:m], fv[1:m])
+                worst[nm] = max(get(worst, nm, 0.0), e); scale[nm] = max(get(scale, nm, 0.0), s)
+                rowerr[nm] = e
+            end
             for (nm, g) in SRC_COL
                 f = _dvs(ds, nm); f === nothing && continue
                 (e, s) = _relerr([g(inst)[1]], [Float64(f[1])])
@@ -312,6 +365,12 @@ function run_source(; nsteps::Int = NLASTS - N0S, mode::Symbol = :locked, report
             t = traj[end]
             @printf("n%d | %9.2e | %12.2e | %12.2e | %.6e / %.6e | %.5e / %.5e\n",
                     n, ehr, rowerr["CH4_PROD_SAT"], rowerr["CONC_CH4_SAT"], t[2], t[3], t[4], t[5])
+            if haskey(rowerr, "O2_DEMAND_RR")
+                @printf("      O2: conc_sat %.2e  decomp_sat %.2e  rr %.2e  nit %.2e  anfr %.2e  o_scalar %.2e  oxid_sat %.2e  aere_sat %.2e  RR %.2e\n",
+                        rowerr["CONC_O2_SAT"], rowerr["O2_DECOMP_SAT"], rowerr["O2_DEMAND_RR"],
+                        rowerr["O2_DEMAND_NIT"], rowerr["ANAEROBIC_FRAC"], rowerr["O_SCALAR"],
+                        rowerr["O2_OXID_SAT"], rowerr["O2_AERE_SAT"], rowerr["RR"])
+            end
             flush(stdout)
         end
     end
@@ -324,7 +383,7 @@ function run_source(; nsteps::Int = NLASTS - N0S, mode::Symbol = :locked, report
             nonhr_worst[])
     @printf("%-22s %14s %14s\n", "FIELD", "worst rel.err", "|F| scale")
     println("-"^54)
-    for (nm, _) in vcat(SRC_LEV, SRC_COL)
+    for (nm, _) in vcat(SRC_LEV, SRC_O2DEM, SRC_COL)
         haskey(worst, nm) || continue
         @printf("%-22s %14.3e %14.3e%s\n", nm, worst[nm], scale[nm], scale[nm] == 0 ? "  (F≡0)" : "")
     end

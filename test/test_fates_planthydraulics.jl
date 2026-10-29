@@ -279,4 +279,37 @@ const FPH = CLM   # all FATES symbols live in the CLM module
         @test r_dry.ch.btran < r_wet.ch.btran
     end
 
+    # ----------------------------------------------------------------------------------
+    # Test 4: Fortran argument aliasing in the 1-D path loop. ImTaylorSolve1D passes
+    # dftc_dtheta_node(i_up/i_dn) to GetImTaylorKAB's intent(inout) dummies, and the
+    # upstream-K branch zeroes one of them in place without restoring it
+    # (FatesPlantHydraulicsMod.F90:4117, 4144-4152; only ftc is restored, :4181-4182).
+    # With h_up <= h_dn on path j, node j+1 therefore carries dftc_dtheta = 0 into
+    # path j+1. The port used to pass copies, so path j+1 saw the full derivative.
+    # ----------------------------------------------------------------------------------
+    @testset "GetImTaylorKAB intent(inout) aliasing (1-D path loop)" begin
+        h    = [0.0, -1.0, -2.5]          # h_up < h_dn on both paths (flow toward soil)
+        ftc  = [0.8, 0.5, 0.3]
+        dftc = [0.7, 0.9, 1.1]
+        dpsi = [3.0, 4.0, 5.0]
+        kup, kdn = 2.0e-3, 3.0e-3
+        k = zeros(2); A = zeros(2); B = zeros(2)
+        dftc_node = copy(dftc)
+        CLM._imtaylor_kab_path!(k, A, B, 1, kup, kdn, 2, 1, ftc, h, dftc_node, dpsi)
+        @test dftc_node == [0.7, 0.0, 1.1]   # node 2 (upstream side of path 1) zeroed
+        CLM._imtaylor_kab_path!(k, A, B, 2, kup, kdn, 3, 2, ftc, h, dftc_node, dpsi)
+        # Path 2 uses node 2's zeroed derivative: A = -k_eff * dpsi_dtheta_dn exactly.
+        @test (k[2], A[2], B[2]) == CLM.GetImTaylorKAB(kup, kdn, ftc[3], ftc[2], h[3], h[2],
+                                                       dftc[3], 0.0, dpsi[3], dpsi[2])
+        @test A[2] == -k[2] * dpsi[2]
+        # ... which differs from the copy semantics (the pre-fix port).
+        @test A[2] != CLM.GetImTaylorKAB(kup, kdn, ftc[3], ftc[2], h[3], h[2],
+                                         dftc[3], dftc[2], dpsi[3], dpsi[2])[2]
+        # With h_up > h_dn the downstream derivative is zeroed instead (and that node
+        # is not used by a later path).
+        h2 = [0.0, 1.0, 2.0]; d2 = copy(dftc)
+        CLM._imtaylor_kab_path!(k, A, B, 1, kup, kdn, 2, 1, ftc, h2, d2, dpsi)
+        @test d2 == [0.0, 0.9, 1.1]
+    end
+
 end

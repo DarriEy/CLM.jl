@@ -269,6 +269,62 @@
         @test p_dry.ros_front >= p_wet.ros_front   # drier fuel -> faster (or equal) spread
 
         # ==================================================================
+        # Fuel load = litter pools + live grass, with the Fortran class map
+        # (SFMainMod.F90:179-197 UpdateFuelCharacteristics, FatesPatchMod.F90:
+        # 784-812 UpdateLiveGrass, FatesFuelClassesMod.F90:14-19 indices) and the
+        # mineral reduction rate_of_spread applies before history reads it
+        # (SFMainMod rate_of_spread, FatesHistoryInterfaceMod.F90:2691). This
+        # pins the summation the fates_spitfire_parity residual was traced
+        # through: the Julia fuel equals (litter + live grass) x (1-miner_total)
+        # class by class, so a fuel-load gap vs Fortran is a litter/vegetation gap.
+        # ==================================================================
+        let leaf = [0.011, 0.007], cwd = [0.021, 0.033, 0.0047, 0.25]
+            site_m = CLM.ed_site_type(); site_m.wind = 120.0
+            nw_m = CLM.nesterov_index(); nw_m.fire_weather_index = 5000.0
+            nw_m.effective_windspeed = 100.0
+            site_m.fireWeather = nw_m
+            p_m = make_patch(leaf_litter = 0.0, twig = 0.0, smb = 0.0, lgb = 0.0,
+                             trunk = 0.0, grass = 0.0)
+            p_m.litter[1].ag_cwd     = copy(cwd)
+            p_m.litter[1].leaf_fines = copy(leaf)
+            gcoh = CLM.fates_cohort_type(height = 0.5, pft = 1)
+            gcoh.n = 0.1
+            gprt = CLM.prt_vartypes(); CLM.InitPRTVartype!(gprt)
+            CLM.SetState!(gprt, CLM.leaf_organ,   el, 2.0)
+            CLM.SetState!(gprt, CLM.sapw_organ,   el, 10.0)
+            CLM.SetState!(gprt, CLM.struct_organ, el, 20.0)
+            gcoh.prt = gprt
+            p_m.tallest = gcoh; p_m.shortest = gcoh
+            site_m.oldest_patch = p_m; site_m.youngest_patch = p_m
+
+            CLM.prt_params.woody = [CLM.ifalse]          # the cohort is a grass
+            CLM.update_fuel_characteristics!(site_m)
+            CLM.prt_params.woody = [CLM.itrue]
+            grass = (2.0 + 10.0 + 20.0) * 0.1 / p_m.area
+            fu = p_m.fuel
+            @test p_m.livegrass ≈ grass rtol = 1e-14
+            @test fu.loading[CLM.twigs(fc)]          == cwd[1]
+            @test fu.loading[CLM.small_branches(fc)] == cwd[2]
+            @test fu.loading[CLM.large_branches(fc)] == cwd[3]
+            @test fu.loading[CLM.trunks(fc)]         == cwd[4]
+            @test fu.loading[CLM.dead_leaves(fc)]    ≈ sum(leaf) rtol = 1e-15
+            @test fu.loading[CLM.live_grass(fc)]     ≈ grass rtol = 1e-14
+            nontrunk = sum(cwd[1:3]) + sum(leaf) + grass   # trunks excluded
+            @test fu.non_trunk_loading ≈ nontrunk rtol = 1e-14
+            @test fu.frac_loading[CLM.trunks(fc)] == 0.0
+            @test sum(fu.frac_loading) ≈ 1.0 rtol = 1e-14
+
+            CLM.rate_of_spread!(site_m)
+            @test fu.non_trunk_loading ≈ nontrunk * (1.0 - sfp.SF_val_miner_total) rtol = 1e-14
+            # FATES_FUEL_AMOUNT_FC (frac_loading x non_trunk_loading): each class is
+            # its litter pool reduced by the mineral fraction, trunks zero.
+            fcl = fu.frac_loading .* fu.non_trunk_loading
+            @test fcl[CLM.twigs(fc)] ≈ cwd[1] * (1.0 - sfp.SF_val_miner_total) rtol = 1e-13
+            @test fcl[CLM.dead_leaves(fc)] ≈ sum(leaf) * (1.0 - sfp.SF_val_miner_total) rtol = 1e-13
+            @test fcl[CLM.trunks(fc)] == 0.0
+        end
+
+        # ==================================================================
         # No-fire mode: fire_model! leaves frac_burnt zeroed, runs no physics.
         # ==================================================================
         CLM.hlm_spitfire_mode[] = 0   # == nofire_def -> not > nofire

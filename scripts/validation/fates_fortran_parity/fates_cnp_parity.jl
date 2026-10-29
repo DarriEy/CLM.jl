@@ -46,6 +46,7 @@ const PARTEH = parse(Int, get(ENV, "FATES_CNP_PARTEH", "2"))
 
 function build_cnp()
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
+        fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, fates_parteh_mode=PARTEH, start_date=START, dtime=Int(DTIME),
         use_bedrock=false)
     for g in 1:bounds.endg
@@ -108,7 +109,7 @@ function run_julia(nsteps::Int)
         nextsw = calday + DTIME / CLM.SECSPDAY
         CLM.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)
         CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
-        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, CLM.nuopc_doalb(i), nextsw, declin, declin,
             CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=i, is_first_step=(i <= 1),
             is_beg_curr_day=(i > 0 && tod == 0), is_end_curr_day=false, is_beg_curr_year=false,

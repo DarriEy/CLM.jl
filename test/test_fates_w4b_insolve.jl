@@ -256,7 +256,9 @@ const _Cw = CLM
             #     (finite, matching the driver) — FATES was genuinely invoked this
             #     step from inside the solve, not left stale.
             @test isfinite(bc.tgcm_pa[1])
-            @test bc.tgcm_pa[1] ≈ inst.atm2lnd.forc_t_downscaled_col[c] atol = 1e-9
+            # tgcm is the host thm_patch (reference-height potential temperature,
+            # clmfates_interfaceMod.F90:2613), not forc_t.
+            @test bc.tgcm_pa[1] ≈ inst.temperature.thm_patch[pveg] atol = 1e-9
             @test bc.cair_pa[1] ≈ inst.atm2lnd.forc_pco2_grc[1] atol = 1e-9
             saw_couple = true
 

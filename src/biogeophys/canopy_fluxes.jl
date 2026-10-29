@@ -1141,6 +1141,50 @@ Adapt.@adapt_structure CfDiagC
     return min(evap, cap), rejected
 end
 
+"""
+    canopy_water_evap_update(liqcan, snocan, net_evap, t_veg) -> (liqcan, snocan)
+
+Canopy water after the leaf-surface evaporation/dew of one step, `net_evap =
+(qflx_tran_veg - qflx_evap_veg) * dtime` (mm; negative = canopy loses water).
+CanopyFluxesMod.F90:1602-1629, line for line:
+
+* `t_veg > tfrz`: dew/evaporation works on `liqcan` FIRST; if the evaporation exceeds
+  `liqcan` the remainder comes from `snocan` (`snocan = max(0, snocan + liqcan + net)`),
+  then `liqcan = max(0, liqcan + net)`.
+* `t_veg <= tfrz`: the same on `snocan` first, remainder from `liqcan`
+  (`liqcan = liqcan + snocan + net`, no floor in Fortran either), then
+  `snocan = max(0, snocan + net)`.
+* `truncate_small_values(snocan_baseline, snocan, custom_rel_epsilon = 1e-10)`
+  (NumericsMod.F90:92-97): a snocan reduced below 1e-10 of its pre-update value is 0.
+
+Written branch-free as `warm: liq' = max(0, liq+net), sno' = max(0, sno + min(0, liq+net))`
+and `cold: sno' = max(0, sno+net), liq' = liq + min(0, sno+net)`, blended by the phase
+step `smooth_heaviside` on `t_veg - tfrz` — a hard 0/1 for Float64 (exact Fortran; the strict
+`>` is kept by sending `t_veg == tfrz` to the cold branch) and smooth for AD types. Each
+branch moves the total by exactly `net_evap` (the upstream ecidif cap keeps
+`-net_evap <= liqcan + snocan`), so the blend conserves water for AD types too. The
+non-negativity floors stay HARD: a smoothed floor overshoots by log(2)/k and creates
+canopy water no flux paid for (the PR #211 balance leak under `SMOOTH_MODE = :always`).
+
+The previous port re-split the total store in proportion to the existing phase amounts
+(#214, #219), so a warm leaf under a snow-laden canopy evaporated snow that Fortran keeps
+(canopy snow about -9 % on the Bow FATES-SP tree patches over 10 days).
+"""
+@inline function canopy_water_evap_update(liq0::T, sno0::T, net_evap::T, t_veg::T) where {T<:Real}
+    frac_liq = _primal(t_veg) == _primal(T(TFRZ)) ? zero(T) : smooth_heaviside(t_veg - T(TFRZ); k = T(200.0))
+    frac_ice = one(T) - frac_liq
+    liq_w = max(zero(T), liq0 + net_evap)
+    sno_w = max(zero(T), sno0 + min(zero(T), liq0 + net_evap))
+    sno_c = max(zero(T), sno0 + net_evap)
+    liq_c = liq0 + min(zero(T), sno0 + net_evap)
+    liq = frac_liq * liq_w + frac_ice * liq_c
+    sno = frac_liq * sno_w + frac_ice * sno_c
+    sno = abs(sno) < T(1.0e-10) * abs(sno0) ? zero(T) : sno
+    return liq, sno
+end
+canopy_water_evap_update(liq0, sno0, net_evap, t_veg) =
+    canopy_water_evap_update(promote(liq0, sno0, net_evap, t_veg)...)
+
 @kernel function _cf_postiter_kernel!(out, pp, cc, @Const(t_soisno), @Const(filterp),
         @Const(column), @Const(gridcell), @Const(snl), @Const(forc_u), @Const(forc_v),
         use_biomass::Bool, nlevsno::Int, dtime)
@@ -1232,47 +1276,8 @@ end
         out.cgrnd[p] = out.cgrnds[p] + out.cgrndl[p] * cc.htvp[c]
 
         out.snocan_baseline[p] = out.snocan[p]
-        _frac_liq = smooth_heaviside(tveg - T(TFRZ); k = T(200.0))
-        _frac_ice = one(T) - _frac_liq
-        _net_evap = (pp.qflx_tran_veg[p] - pp.qflx_evap_veg[p]) * dtime
-        # Update canopy water on the TOTAL store, then re-split by phase. The
-        # canopy must shed exactly (qflx_evap_veg - qflx_tran_veg)*dt = -net_evap,
-        # the canopy-surface-evaporation part of qflx_evap_tot; the upstream ecidif
-        # cap guarantees |net_evap| <= h2ocan. The previous code split the removal
-        # by leaf-temperature phase (_frac_liq) and clamped each phase at 0
-        # independently, so in melt season (warm leaf + snow-laden canopy) the
-        # evaporation was drawn from an empty liqcan while snocan was left
-        # undebited -> phantom water (a ~64 mm/yr column water-balance leak).
-        # Removals now draw from existing phase amounts; additions (dew) follow the
-        # leaf-temperature phase. _denom guard keeps it AD-safe at h2ocan -> 0.
-        #
-        # The non-negativity floor on the TOTAL store stays a HARD max: it is the one
-        # expression that sets how much water the canopy sheds, and the column balance
-        # debits (qflx_evap_veg - qflx_tran_veg) = -_net_evap for it, so storage and
-        # flux only agree if the store moves by EXACTLY _net_evap. It does: the upstream
-        # ecidif cap (`qflx_evap_veg = min(qflx_evap_veg, qflx_tran_veg + h2ocan/dtime)`,
-        # a hard min in both the PHS and non-PHS branches) guarantees
-        # |_net_evap| <= h2ocan, so the floor never bites and is a pure guard —
-        # differentiable (identity branch) wherever the physics actually lives.
-        # A SMOOTHED floor DOES bite: smooth_max(0, x) OVERSHOOTS max(0, x) by up to
-        # log(2)/k, and k = 50 on this mm-of-water axis is 0.0139 mm of canopy water
-        # conjured per patch per step that no flux paid for (~7.5e-3 mm/step of column
-        # water-balance error under SMOOTH_MODE=:always — the growing-season half of the
-        # leak PR #211 gated the hard error off for). The phase SPLIT below stays smooth:
-        # it only redistributes _h2ocan_new between liqcan/snocan, so it is mass-neutral.
-        # The phase split is mass-neutral (snocan = _h2ocan_new - liqcan by construction), but the
-        # SPLIT ITSELF was badly wrong under smoothing: all three guards below clamp against a
-        # CONSTANT (0, 1e-15) on a mm-of-canopy-water axis, so the clamped branch has zero
-        # derivative and smoothing recovers nothing — while the 1e-15 denominator floor was
-        # silently raised to log(2)/50 = 0.0139 mm. For a canopy holding 1e-3 mm of dew that
-        # collapses the liquid fraction to ~7% of its true value, i.e. the water is re-labelled as
-        # ice. Hard guards make the ratio exact.
-        _h2ocan_new = max(zero(T), out.liqcan[p] + out.snocan[p] + _net_evap)
-        _w_liq = out.liqcan[p] + _frac_liq * max(zero(T), _net_evap)
-        _w_sno = out.snocan[p] + _frac_ice * max(zero(T), _net_evap)
-        _denom = max(T(1.0e-15), _w_liq + _w_sno)
-        out.liqcan[p] = _h2ocan_new * (_w_liq / _denom)
-        out.snocan[p] = _h2ocan_new - out.liqcan[p]
+        out.liqcan[p], out.snocan[p] = canopy_water_evap_update(out.liqcan[p], out.snocan[p],
+            convert(T, (pp.qflx_tran_veg[p] - pp.qflx_evap_veg[p]) * dtime), tveg)
     end
 end
 
@@ -1996,7 +2001,8 @@ function canopy_fluxes_core!(
             rb_host    = rb    isa Array ? rb    : Array(rb)
             dayl_host  = dayl_factor isa Array ? dayl_factor : Array(dayl_factor)
             fpbot_host = forc_pbot_col isa Array ? forc_pbot_col : Array(forc_pbot_col)
-            ft_host    = forc_t_col isa Array ? forc_t_col : Array(forc_t_col)
+            thm_host   = temperature.thm_patch isa Array ?
+                         temperature.thm_patch : Array(temperature.thm_patch)
             pco2_host  = forc_pco2_grc isa Array ? forc_pco2_grc : Array(forc_pco2_grc)
             po2_host   = forc_po2_grc  isa Array ? forc_po2_grc  : Array(forc_po2_grc)
             colidx_h   = col_data.gridcell isa Array ? col_data.gridcell : Array(col_data.gridcell)
@@ -2023,7 +2029,11 @@ function canopy_fluxes_core!(
                     bc.eair_pa[ifp]         = eah_host[p]     # canopy-air vapor pressure
                     bc.rb_pa[ifp]           = rb_host[p]
                     bc.t_veg_pa[ifp]        = t_veg_host[p]   # CURRENT iterate leaf temp
-                    bc.tgcm_pa[ifp]         = ft_host[c]
+                    # tgcm => temperature_inst%thm_patch (clmfates_interfaceMod.F90:2573,
+                    # 2613): the potential temperature at the reference height, not
+                    # forc_t. FATES uses it for the gas-conductance conversion
+                    # cf = can_press/(rgas*tgcm) (FatesPlantRespPhotosynthMod.F90:2159).
+                    bc.tgcm_pa[ifp]         = thm_host[p]
                     bc.filter_photo_pa[ifp] = 2               # 2 = "compute" branch
                 end
             end

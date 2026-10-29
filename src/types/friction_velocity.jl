@@ -4,12 +4,6 @@
 # initialization, roughness length setting, and friction velocity calculation.
 # ==========================================================================
 
-# Snow-cover fraction below which a column is treated as snow-free when picking
-# the ground momentum roughness (zsno vs zlnd). Fortran's frac_sno is exactly 0
-# when snow is absent; Julia's snow-water bookkeeping can leave a subnormal
-# (~1e-18) that must not read as snow. Far below physical snow-cover onset (~1e-2).
-const FRAC_SNO_TRACE_FLOOR = 1.0e-11
-
 """
     FrictionVelocityData
 
@@ -522,15 +516,15 @@ in `FrictionVelocityMod.F90`.
         c = lo + i - 1
         if mask[c]
             T = eltype(z0mg_col)
-            # Fortran tests frac_sno > 0 on a value that is exactly 0 when snow is
-            # absent. Julia's snow-water bookkeeping can leave a physically-
-            # negligible subnormal frac_sno (~1e-18) that would flip this discrete
-            # branch to the snow roughness (zsno ≈ 0.0024) instead of the soil
-            # roughness (zlnd ≈ 0.01), ~halving the below-canopy resistance rah2 at
-            # low-LAI/dry canopies and warm-biasing the coupled canopy-air solve.
-            # A tiny threshold reproduces Fortran's exact-zero behaviour on every
-            # real case (physical snow cover onset is O(1e-2)).
-            has_snow = frac_sno[c] > T(FRAC_SNO_TRACE_FLOOR)
+            # FrictionVelocityMod.F90:598/605: the snow roughness applies whenever
+            # frac_sno > 0, however small. After melt-out CTSM's frac_sno decays
+            # through trace values (Bow FATES, 2002-07-06: 1.8e-5, 9.9e-7, 2.2e-12,
+            # 1.5e-17, 1.5e-27 on successive steps) and Fortran keeps zsno on all of
+            # them. The former 1e-11 floor (5cf89ff, for a Savanna subnormal that no
+            # longer occurs: zero 0 < frac_sno <= 1e-11 events in the 2017 Donga
+            # year) switched the port to zlnd one step early there, raising z0mv by
+            # 40 % and ustar by 4 % and warming the leaf 0.74 K in one step.
+            has_snow = frac_sno[c] > zero(T)
             if z0method == 1  # ZengWang2007
                 if has_snow
                     z0mg_col[c] = zsno

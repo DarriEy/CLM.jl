@@ -35,6 +35,7 @@ const ALL_FIELDS = (SCALARS..., (f * "_" * string(k) for f in PF_FIELDS for k in
 function build_mode(mode)
     fl = MODE_FLAGS[mode]
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
+        fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, fl..., fates_history_dimlevel=2, start_date=START, dtime=Int(DTIME), use_bedrock=false)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
@@ -122,7 +123,7 @@ function run_julia(mode, nsteps::Int)
         nextsw = calday + DTIME / CLM.SECSPDAY
         CLM.read_forcing_step!(fr, inst.atm2lnd, cur, ng, nc)
         CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
-        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, true, nextsw, declin, declin,
+        CLM.clm_drv!(config, inst, filt, filt_ia, bounds, CLM.nuopc_doalb(i), nextsw, declin, declin,
             CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=i, is_first_step=(i <= 1),
             is_beg_curr_day=(i > 0 && tod == 0), is_end_curr_day=false, is_beg_curr_year=false,
