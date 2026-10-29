@@ -319,7 +319,7 @@ while tm.current_date < end_date
         nstep=tm.nstep, is_first_step=(tm.nstep == 1),
         is_beg_curr_day=CLM.is_beg_curr_day(tm), is_end_curr_day=CLM.is_end_curr_day(tm),
         is_beg_curr_year=CLM.is_beg_curr_year(tm), dtime=Float64(DTIME),
-        mon=mon, day=d, photosyns=inst.photosyns)
+        mon=mon, day=d, secs=tod, photosyns=inst.photosyns)
     CLM.lnd2atm!(bounds, inst)
 
     # ---- instrument this step ----

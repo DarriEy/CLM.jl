@@ -960,16 +960,22 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ActiveLayer — WIRED
     # The annual roll `altmax_lastyear(_indx) = altmax(_indx)` fires on
     # `mon == 1 .and. day == 1 .and. sec/dtime == 1` (ActiveLayerMod.F90:114, SH
-    # :126), so alt_calc! needs the real seconds-of-day. Passing a constant
-    # `sec = 0` meant that test could never pass: `altmax_lastyear_indx_col` kept
-    # its cold-start 0 (ActiveLayerMod.F90:305) for the whole run. FATES reads it
-    # every day as `max_rooting_depth_index_col` (clmfates_interfaceMod.F90:1131-1132),
-    # so from year 2 on every FATES root profile (drought phenology, btran, litter)
-    # stayed squeezed into the top 2 soil layers. Under FATES the real `secs` is
-    # passed. Non-FATES callers keep `sec = 0` so they stay byte-identical. The same
-    # missed roll affects the CN decomposition profile; that is a separate change.
+    # :126), so alt_calc! needs the real seconds-of-day (end-of-step `secs`, as
+    # get_curr_date returns it). Passing a constant `sec = 0` meant that test could
+    # never pass: `altmax_lastyear_indx_col` kept its cold-start 0
+    # (ActiveLayerMod.F90:305), or its restart value, for the whole run. Its readers:
+    #   * soil_bgc_vertical_profile! (SoilBiogeochemVerticalProfileMod.F90:145-214):
+    #     the N-deposition, N-fixation, leaf/stem and root profiles. With index 0 they
+    #     collapse into the top decomposition layer, so every multi-year CN run used
+    #     the wrong profiles from year 2.
+    #   * FATES `max_rooting_depth_index_col` (clmfates_interfaceMod.F90:1131-1132).
+    #   * calc_root_moist_stress! under perchroot_alt (SoilMoistStressMod.F90:278).
+    #   * litter_vert_transp! reads max(altmax, altmax_lastyear)
+    #     (SoilBiogeochemLittVertTranspMod.F90:192-211).
+    # Every caller must therefore pass `secs` (the drivers do: clm_run!, run_clm,
+    # the parity harnesses). A caller that leaves the default `secs = 0` never rolls.
     alt_calc!(inst.active_layer, filt.soilc, temp, col, grc;
-              mon=mon, day=day, sec=(config.use_fates ? secs : 0), dtime=Int(dtime))
+              mon=mon, day=day, sec=secs, dtime=Int(dtime))
     if (config.use_cn || config.use_fates_bgc) && config.decomp_method != config.no_soil_decomp
         # SoilBiogeochemVerticalProfile — WIRED
         soil_bgc_vertical_profile!(

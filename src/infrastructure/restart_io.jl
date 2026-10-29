@@ -173,6 +173,24 @@ function _restart_registry_biogeophys()
         _rv1("HTOP", "patch",
             i -> i.canopystate.htop_patch,
             (i, d) -> i.canopystate.htop_patch .= d),
+
+        # --- Active layer (ActiveLayerMod.F90 Restart) ---
+        # altmax_lastyear(_indx) changes only at the 1 January roll, so a restart
+        # that dropped it would put every later step back on the cold-start index
+        # (0) until the next roll: soil_bgc_vertical_profile! and FATES rooting
+        # depth both read it.
+        _rv1("altmax", "column",
+            i -> i.active_layer.altmax_col,
+            (i, d) -> i.active_layer.altmax_col .= d),
+        _rv1("altmax_lastyear", "column",
+            i -> i.active_layer.altmax_lastyear_col,
+            (i, d) -> i.active_layer.altmax_lastyear_col .= d),
+        _rv1("altmax_indx", "column",
+            i -> i.active_layer.altmax_indx_col,
+            (i, d) -> _set_int!(i.active_layer.altmax_indx_col, d)),
+        _rv1("altmax_lastyear_indx", "column",
+            i -> i.active_layer.altmax_lastyear_indx_col,
+            (i, d) -> _set_int!(i.active_layer.altmax_lastyear_indx_col, d)),
     ]
 end
 
