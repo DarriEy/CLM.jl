@@ -640,6 +640,8 @@ include("fates/fates_driver_bc.jl")
 # use_fates_bgc host coupling: FATES litter -> CLM decomposition pools
 # (UpdateC/NLitterFluxes) and CLM HR/soil C -> FATES history (wrap_update_hifrq_hist).
 include("fates/fates_driver_soilbgc.jl")
+# Host side of a FATES restart: write the packed restart vectors / rebuild the sites.
+include("fates/fates_driver_restart.jl")
 
 # ===========================================================================
 # Driver (depends on all modules above)
