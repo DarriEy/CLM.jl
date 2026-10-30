@@ -763,7 +763,7 @@ end
 # --------------------------------------------------------------------------
 watertable_rev_aux(bounds, filt, config; dtime = 1800.0) = (;
     hydrologyc = filt.hydrologyc, bc_col = bounds.begc:bounds.endc,
-    nlevsoi = varpar.nlevsoi, joff = varpar.nlevsno,
+    nlevsoi = varpar.nlevsoi, dtime = dtime, joff = varpar.nlevsno,
     joff_zi = varpar.nlevsno + 1,
     realpar = _to_backend_like(filt.hydrologyc, Float64,
         Float64[dtime, soilhydrology_params.aq_sp_yield_min,
