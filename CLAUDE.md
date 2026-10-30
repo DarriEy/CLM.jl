@@ -75,5 +75,12 @@ julia --project=. -e 'using Test; include("test/runtests.jl")'
 CI still resolves a fresh per-version Manifest for the 1.10 minimum and latest
 stable (`.github/workflows/test.yml`); `Manifest.toml` stays gitignored.
 
+KernelAbstractions must be >= 0.9.45 (Project.toml compat): older KA wraps every
+`@Const` kernel in `@aliasscope`, which Julia >= 1.11 miscompiles on the CPU
+(JuliaLang/julia#63129). A stale local Manifest pinned to KA 0.9.42 gives wrong
+CNFUN results on 1.12, so run `Pkg.update("KernelAbstractions")` (or re-resolve).
+`CLM.set_kconst_check!(:warn)` / `CLM_CHECK_KCONST=warn` turns on the
+`@Const` aliasing checker in `_launch!` (src/infrastructure/kconst_check.jl).
+
 ## PRD
 See `PRD_CLM_JULIA_PORT.md` for the full porting plan, module dependency graph, and tier ordering.

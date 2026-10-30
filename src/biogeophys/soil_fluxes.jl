@@ -178,7 +178,7 @@ _sf_col_dv(temp, wdb, wsb, sa, cs) = _SFColDV(;
 # --------------------------------------------------------------------------
 # Kernel: partition evaporation into liquid and solid (Loop 3, per patch).
 # --------------------------------------------------------------------------
-@kernel function _soilflux_partition_kernel!(@Const(_out), @Const(mask), @Const(column),
+@kernel function _soilflux_partition_kernel!(_out, @Const(mask), @Const(column),
         @Const(landunit), @Const(snl), @Const(urbpoi), wfdv, cdv, nlevsno::Int, tfrz)
     p = @index(Global)
     @inbounds if mask[p]
@@ -239,7 +239,7 @@ end
 # --------------------------------------------------------------------------
 # Kernel: constrain evaporation from snow to <= available moisture (Loop 4).
 # --------------------------------------------------------------------------
-@kernel function _soilflux_evaplimit_kernel!(@Const(_out), @Const(mask), @Const(column),
+@kernel function _soilflux_evaplimit_kernel!(_out, @Const(mask), @Const(column),
         @Const(landunit), @Const(snl), @Const(itype), @Const(urbpoi),
         wfdv, edv, cdv, nlevsno::Int, dtime, icol_road_perv::Int)
     p = @index(Global)
