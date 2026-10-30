@@ -180,10 +180,12 @@ const _C = CLM
         pc.c3psn=fill(1.0,npft_clm); pc.woody=fill(0.0,npft_clm)
         pc.smpso=fill(-66000.0,npft_clm); pc.smpsc=fill(-275000.0,npft_clm)
         pc.z0mr=fill(0.055,npft_clm); pc.displar=fill(0.67,npft_clm)
-        # Rooting profile (Zeng 2001) — init_root_fractions! indexes these per PFT;
+        # Rooting profile (Zeng 2001 / Jackson 1996) — init_root_fractions! indexes these per PFT;
         # left empty they are an out-of-bounds read (silent under @inbounds, a
         # BoundsError under --check-bounds=yes).
         pc.roota_par=fill(6.0,npft_clm); pc.rootb_par=fill(3.0,npft_clm)
+        # Jackson (1996) beta, read by the CTSM-default rooting profile.
+        pc.rootprof_beta=fill(0.943,npft_clm,_C.NVARIANTS)
         pc.xl=fill(0.1,npft_clm); pc.rhol=fill(0.1,npft_clm,2); pc.rhos=fill(0.2,npft_clm,2)
         pc.taul=fill(0.05,npft_clm,2); pc.taus=fill(0.1,npft_clm,2)
         pc.medlynintercept=fill(100.0,npft_clm); pc.medlynslope=fill(6.0,npft_clm)
