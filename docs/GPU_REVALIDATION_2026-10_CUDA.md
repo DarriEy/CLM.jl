@@ -89,7 +89,25 @@ the CPU reverse and with central finite differences of the CUDA forward chain,
 L = Σ (soil-layer t_soisno)². Same server, Julia 1.12.6, Enzyme 0.13.216,
 EnzymeCore 0.8.26, KernelAbstractions 0.9.45, CUDA.jl 5.11.3, GPUCompiler 1.15.2.
 
-RESULT_PLACEHOLDER
+**Status: runs end to end on CUDA; gradient still wrong.** Full gate at 5102a2e
+(`CLM_REVERSE_CPU=1`, FD on; 6.0 h wall, nearly all of it Enzyme/GPU compilation):
+
+| | dL/d(t_grnd[1]) |
+|---|---|
+| CPU reverse (host phase list, unchanged) | -3.50231505e+00 |
+| Central FD of the CUDA forward chain, h = 1e-2 / 5e-3 / 2.5e-3 | -3.50231505 / -3.50231504 / -3.50231505 (Richardson -3.50231505) |
+| CUDA reverse (device phase list) | -1.34647340e-14 — **FAIL** |
+
+CPU reverse and FD agree to < 1e-8 relative, so the CPU path and the device forward
+chain are right; the device reverse loses the gradient. Per-phase CUDA-vs-CPU reverse
+checks (`phase_diff`, same checkpoint, every shadow seeded with ones, CPU running the
+same device phase list) agree to ≤ 1.3e-15 relative for tk_interface, lwrad, heatdiff,
+gnet rural / rural_contrib / reduce, SNICAR, set_qflx, infiltration. The soil-temperature
+**solve** and **post** phases disagree by O(1), in the surface-water (h2osfc) row: z,
+tk_h2osfc, dz_h2osfc, c_h2osfc, frac_h2osfc, fact, dhsdT shadows. The batched band
+solve was one cause (item 7 below); after its rule the same h2osfc-row mismatch remains,
+so a second cause is still open. Not yet checked per phase: the canopy phases, cv,
+tk_layers, setup, and the hydrology `*_dev` phases.
 
 ### Blockers found, in the order they surfaced
 
@@ -167,4 +185,8 @@ when the domain has no urban column (an exact no-op there).
 julia --project=scripts -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
 julia --project=scripts scripts/gpu_validate_<name>.jl        # one harness
 julia -e 'using CUDA, Test, CLM; include("test/test_backend.jl")'   # in an env with CLM+CUDA+Adapt+KA
+# whole-driver CUDA reverse (follow-up section): gate, upstream repro, per-phase diagnostic
+CLM_REVERSE_CPU=1 julia --project=scripts scripts/gpu_ad_reverse_driver_validate.jl
+julia --project=scripts scripts/gpu_ad_active_scalar_repro.jl
+PHASES=solve,post julia --project=scripts scripts/cuda_reverse_phase_diff.jl
 ```

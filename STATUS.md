@@ -130,8 +130,19 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   primal, while its reverse rule launches a race-free gather kernel instead of asking Enzyme
   to differentiate Atomix's CAS loop. Forward-vs-reverse and CUDA-vs-CPU errors are both
   exactly 0 for scatter; the other probes remain at ≤2.22e-16 cross-AD and ≤1.11e-16 device
-  parity. Whole-driver CUDA reverse is still pending migration of embedded per-thread scatter
-  sites to launch-level operations and an end-to-end gradient gate. Enzyme has no Metal device
+  parity. **Whole-driver CUDA reverse now runs end to end but its gradient is not yet
+  correct** (`scripts/gpu_ad_reverse_driver_validate.jl`, branch `ad/cuda-reverse-driver`):
+  all 33 phases of the one-step chain (canopy → soil temperature → surface hydrology → soil
+  water → water table → hydrology_no_drainage) reverse on the RTX 5070 Ti, but dL/d(t_grnd)
+  came out -1.3e-14 against **-3.50231505 on CPU and -3.50231505 by central FD** (CPU and FD
+  agree to <1e-8 relative). Per-phase CUDA-vs-CPU checks match ≤1.3e-15 for 13 phases; the
+  soil-temperature solve and post phases still disagree, in the surface-water (h2osfc) row.
+  Fixed on the way: host-built canopy aux, the missing `jtop/jbot` setup (illegal address),
+  an Enzyme/KernelAbstractions limitation on scalar GPU kernel arguments (launch-level rule;
+  repro `scripts/gpu_ad_active_scalar_repro.jl`; cost: zero derivative for scalar kernel
+  args on GPU), the in-kernel atomic SNICAR scatter, and an exact GPU rule for the batched
+  band solve. Details: `docs/GPU_REVALIDATION_2026-10_CUDA.md`. A fresh process takes ~6 h
+  to compile the CUDA reverse. CPU reverse is unchanged. Enzyme has no Metal device
   support; Metal's primal Atomix path is unchanged.
 
 ## 5. Fortran parity breadth
@@ -156,7 +167,7 @@ Re-run the README recipe once the CTSM case is restored.
 | Forward AD | ✅ validated | — |
 | Reverse AD | ✅ whole-driver incl. **photosynthesis** (`use_psn=1`) on 1.10 **and 1.12** | PHS-coupled (`use_hydrstress`) reverse + whole-*function* canopy still 1.12-blocked (latter avoided by decomposition) |
 | GPU Metal | ✅ validated 0.0 | — |
-| GPU CUDA | ✅ real-hardware validated | synthetic + CN + portable real-NetCDF mixed soil/lake full-driver gates pass |
+| GPU CUDA | ✅ real-hardware validated | synthetic + CN + portable real-NetCDF mixed soil/lake full-driver gates pass; whole-driver reverse AD runs but its gradient is still wrong (§4) |
 | GPU AMD | ⚠️ proxy only | unrun on real AMD hardware |
 
 ## Concrete remaining work to claim "fully validated AD + GPU"
@@ -165,7 +176,9 @@ Re-run the README recipe once the CTSM case is restored.
    reverse are both FD-validated on 1.12 (done). Only the PHS-coupled path (`use_hydrstress`, its
    own `_psn_phs_*` KA kernels) remains — the same AD-mode host-loop transform extends to it.
 2. ~~Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware~~ — **done** (§4). Remaining
-   GPU breadth is real AMD hardware, multi-GPU/MPI execution, and CUDA reverse-mode AD.
+   GPU breadth is real AMD hardware, multi-GPU/MPI execution, and a correct whole-driver
+   CUDA reverse gradient (it runs end to end; the soil-temperature solve/post phases still
+   disagree with CPU, §4).
 3. **Restore the CTSM case + run the pdump verify** → broaden T1 parity beyond the Bow anchor.
 4. ~~Multi-year T4 streamflow at depth~~ — **done** (§2.5: all 7 gauges, full multi-year
    windows, real uncalibrated KGE/NSE). Remaining there is *calibration* for real KGE skill
