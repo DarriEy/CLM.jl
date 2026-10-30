@@ -24,11 +24,17 @@ struct HistFieldDef
     level::String  # "gridcell", "column", or "patch"
     getter::Function  # (inst::CLMInstances) -> AbstractArray
     reduce::Symbol    # :avg (daily mean, default) or :snapshot (end-of-day value)
+    # Fortran hist_addfld l2g_scale_type (subgridAveMod create_scale_l2g_lookup):
+    # landunits whose scale is spval are left out of the gridcell average.
+    l2g_scale_type::String
 end
 
-# Convenience constructor: fields default to daily-mean reduction.
+# Convenience constructors: fields default to daily-mean reduction and the
+# 'unity' l2g scale (every landunit counts), the hist_addfld default.
 HistFieldDef(name, long_name, units, level, getter) =
-    HistFieldDef(name, long_name, units, level, getter, :avg)
+    HistFieldDef(name, long_name, units, level, getter, :avg, "unity")
+HistFieldDef(name, long_name, units, level, getter, reduce::Symbol) =
+    HistFieldDef(name, long_name, units, level, getter, reduce, "unity")
 
 """
     HistoryWriter
@@ -82,8 +88,12 @@ function default_hist_fields()
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_runoff_col),
         HistFieldDef("ZWT", "water table depth", "m", "column",
             history_zwt_veg_col),
+        # Under FATES-SP, CTSM points TLAI/TSAI at the *_hist_patch copies (the FATES
+        # totals); tlai/tsai_patch hold the prescribed per-PFT-slot inputs
+        # (CanopyStateType.F90:232-241).
         HistFieldDef("TLAI", "total projected leaf area index", "m2/m2", "patch",
-            inst -> inst.canopystate.tlai_patch),
+            inst -> (varctl.use_fates_sp && !isempty(inst.canopystate.tlai_hist_patch)) ?
+                    inst.canopystate.tlai_hist_patch : inst.canopystate.tlai_patch),
         HistFieldDef("ELAI", "exposed one-sided leaf area index", "m2/m2", "patch",
             inst -> inst.canopystate.elai_patch),
         HistFieldDef("QFLX_DRAIN", "sub-surface drainage", "mm/s", "column",
@@ -292,7 +302,9 @@ function default_hist_fields()
                     Float64.(inst.energyflux.tauy_patch)),
         # --- Extended parity set: canopy structure + emitted longwave ---
         HistFieldDef("TSAI", "total projected stem area index", "m2/m2", "patch",
-            inst -> isempty(inst.canopystate.tsai_patch) ? Float64[] :
+            inst -> (varctl.use_fates_sp && !isempty(inst.canopystate.tsai_hist_patch)) ?
+                    Float64.(inst.canopystate.tsai_hist_patch) :
+                    isempty(inst.canopystate.tsai_patch) ? Float64[] :
                     Float64.(inst.canopystate.tsai_patch)),
         HistFieldDef("FIRE", "emitted infrared (longwave) radiation", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_lwrad_out_patch) ? Float64[] :
@@ -836,6 +848,11 @@ end
 
 Aggregate a field from its native level (patch/column/gridcell) to gridcell
 level using area weights with renormalization.
+
+Follows Fortran `p2g_1d` / `c2g_1d` (subgridAveMod.F90:530-549 / c2g): a patch
+(column) contributes only if it is active, its `wtgcell` is nonzero, its value is
+not spval, and its landunit's `l2g_scale_type` scale is not spval. The port also
+skips non-finite values (its "no value" marker, the role spval plays in Fortran).
 """
 function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
     data = try
@@ -852,12 +869,22 @@ function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
 
     pch = inst.patch
     col = inst.column
+    lun = inst.landunit
+    # Landunit types excluded by the field's l2g scale (scale == spval).
+    scale_lookup = f.l2g_scale_type == "unity" ? nothing :
+                   create_scale_l2g_lookup(f.l2g_scale_type)
+    _l2g_ok(l) = scale_lookup === nothing || !(1 <= l <= length(lun.itype)) ||
+                 scale_lookup[lun.itype[l]] != SPVAL
 
     if f.level == "patch"
         np = length(data)
         for p in 1:np
             val = Float64(data[p])
-            if isfinite(val) && p <= length(pch.gridcell) && p <= length(pch.wtgcell)
+            if isfinite(val) && val != SPVAL && p <= length(pch.gridcell) && p <= length(pch.wtgcell)
+                # p2g_1d (subgridAveMod.F90:531): active patches with nonzero wtgcell.
+                p <= length(pch.active) && !pch.active[p] && continue
+                pch.wtgcell[p] == 0.0 && continue
+                (p <= length(pch.landunit) && !_l2g_ok(pch.landunit[p])) && continue
                 g = pch.gridcell[p]
                 if g >= 1 && g <= ng
                     gcell_val[g] += val * pch.wtgcell[p]
@@ -869,7 +896,11 @@ function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
         nc = length(data)
         for c in 1:nc
             val = Float64(data[c])
-            if isfinite(val) && c <= length(col.gridcell) && c <= length(col.wtgcell)
+            if isfinite(val) && val != SPVAL && c <= length(col.gridcell) && c <= length(col.wtgcell)
+                # c2g_1d: active columns with nonzero wtgcell.
+                c <= length(col.active) && !col.active[c] && continue
+                col.wtgcell[c] == 0.0 && continue
+                (c <= length(col.landunit) && !_l2g_ok(col.landunit[c])) && continue
                 g = col.gridcell[c]
                 if g >= 1 && g <= ng
                     gcell_val[g] += val * col.wtgcell[c]

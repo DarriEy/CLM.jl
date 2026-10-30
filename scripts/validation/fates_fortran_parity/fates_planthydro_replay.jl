@@ -10,6 +10,10 @@
 #
 # usage: julia --project=. scripts/validation/fates_fortran_parity/fates_planthydro_replay.jl \
 #            <hydro_pdump.txt> <out.txt> <nsteps> [old]
+#
+# The 2-D solvers: set FATES_HYDRO_SOLVER=2 (Picard) or 3 (Newton) and replay a dump from
+# a Fortran run whose parameter file has the same fates_hydro_solver (README §"PLANT
+# HYDRAULICS: 2-D solvers"). `old` only applies to the 1-D solver.
 const FDUMP = ARGS[1]
 const OUT = ARGS[2]
 const NSTEPS = parse(Int, ARGS[3])

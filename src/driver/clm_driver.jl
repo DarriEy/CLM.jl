@@ -836,6 +836,16 @@ function clm_drv_core!(config::CLMDriverConfig,
     # here instead.
     if inst.fates !== nothing
         fates_apply_deferred_activation!(inst)
+        # dyn_ED only rewrites patch%wtcol. CTSM then runs
+        # dynSubgrid_wrapup_weight_changes -> compute_higher_order_weights
+        # (dynSubgridDriverMod.F90:313 dyn_ED, :333 wrapup, :389 compute), which
+        # re-derives patch%wtlunit / patch%wtgcell (and col%wtgcell) from the new
+        # wtcol before reweight_wrapup/setFilters (:395). Without it the FATES patches
+        # kept their surfdata wtgcell (an inactive slot kept a nonzero gridcell weight,
+        # a vegetated patch kept a stale one), which every p2g consumer -- history,
+        # lnd2atm, drydep -- reads. FATES never moves landunit weights, so
+        # update_landunit_weights (:387) has nothing to do here.
+        compute_higher_order_weights!(bc, col, lun, pch)
         # setFiltersOneGroup asserts CLUMP-level bounds; in single-clump mode the clump
         # bounds ARE the proc bounds, so present a CLUMP-level view (the mirror of the
         # `_bc_proc` view built for dyn_subgrid below).
@@ -1705,6 +1715,22 @@ function clm_drv_core!(config::CLMDriverConfig,
         # 15 °C): the FATES cold-deciduous phenology then reads a constant, wrong 15 °C veg
         # temperature and eventually fires a spurious synchronized leaf-off that never re-
         # flushes → carbon starvation → a phantom boom/bust die-back on multi-year runs.
+        # Fortran clm_fates%WrapUpdateFatesRmean (clmfates_interfaceMod.F90:3227-3245)
+        # first packs EVERY FATES patch's own leaf temperature,
+        #     bc_in(s)%t_veg_pa(ifp) = temperature_inst%t_veg_patch(p),  p = ifp + patchi(c)
+        # so each patch's tveg24 follows its own canopy.
+        let s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                fbc = inst.fates.bc_in[s]
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    ifp <= length(fbc.t_veg_pa) || continue
+                    fbc.t_veg_pa[ifp] = inst.temperature.t_veg_patch[p]
+                end
+            end
+        end
         UpdateFatesRMeansTStep(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
 
         # (The per-timestep "hifrq" FATES history fill runs in the FATES dynamics

@@ -97,6 +97,7 @@ const INPROCESS_TEST_FILES = [
     # here in the fresh-global unit block — see the note at test_driver_reverse.jl.
     "test_photosynthesis.jl",
     "test_photosynthesis_ad_pft_params.jl",
+    "test_photosynthesis_lnc_opt.jl",
     "test_phs_night_frozen.jl",
     "test_canopy_fluxes.jl",
     "test_canopy_reverse.jl",
@@ -170,6 +171,7 @@ const INPROCESS_TEST_FILES = [
     "test_flexiblecn_matrixcn_agsys.jl",
     "test_vegetation_facade.jl",
     "test_kernels_scatter.jl",
+    "test_kconst_alias.jl",       # @Const contract: static audit + opt-in _launch! alias checker
     "test_atm2lnd.jl",
     "test_multigridcell_forcing.jl",
     "test_lnd2atm.jl",
@@ -227,6 +229,7 @@ const INPROCESS_TEST_FILES = [
     "test_crop_lifecycle.jl",  # crop lifecycle vs the CTSM CN-crop Fortran reference
   # crop lifecycle vs the CTSM CN-crop Fortran reference
     "test_crop_tails_parity.jl",  # grain fill, harvest, soyfix, vernalization vs ctsm5.3.012 dumps
+    "test_crop_fun_parity.jl",    # FUN crop N: soybean Nfix, FUN uptake/alloc, npool vs ctsm5.3.012 (gated)
     "test_multicolumn.jl",
     "test_device_adapt.jl",
     "test_backend.jl",  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)
@@ -452,6 +455,14 @@ const INPROCESS_TEST_FILES = [
     # plant water in the column budget, hydraulic-failure mortality, RestartHydrStates,
     # and woody leaf water potential vs the Fortran fates_parity_1pt run (data-gated).
     "test_fates_planthydro_coupling.jl",
+    # FATES re-weighting -> compute_higher_order_weights (dynSubgridDriverMod.F90:389):
+    # patch wtgcell follows the FATES wtcol; history p2g skips inactive/spval patches
+    # and matches the Fortran FATES-SP h0 (data-gated).
+    "test_fates_higher_order_weights.jl",
+    # FATES plant hydraulics 2-D solvers (fates_hydro_solver = 2 Picard / 3 Newton):
+    # the DGESV port, connection tables, MatSolve2D / PicardSolve2D on a synthetic
+    # network, and data-gated parity vs the Fortran runs with each solver.
+    "test_fates_planthydro_2d_solvers.jl",
     # FATES land use: fates_harvest_mode switches, the host LUH2 reader / landuse x
     # PFT data, and data-gated logging + LUH2 runs scored against Fortran CTSM.
     "test_fates_landuse.jl",
@@ -484,6 +495,7 @@ const INPROCESS_TEST_FILES = [
             "test_fortran_parity_ch4_source.jl", # CH4-as-a-source, CN locked + CH4 free-running (gated)
             "test_fates_rooting_depth_roll.jl",  # 1 Jan active-layer roll reaches FATES rooting depth (B gated)
             "test_cn_active_layer_roll.jl",      # 1 Jan active-layer roll reaches the CN vertical profiles (C gated)
+            "test_fates_snow_burial.jl",         # host snow depth reaches FATES canopy burial; case snow namelist (B gated)
             "test_fun_coldstart_finite.jl",      # use_fun=true cold start stays finite (gated)
             "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
             "test_fortran_parity_freewins.jl",   # soilresis, aerosol free-wins (gated)

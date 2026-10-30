@@ -79,6 +79,7 @@ include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/smooth_ad.jl")
 include("infrastructure/kernels.jl")  # KernelAbstractions physics kernels (Phase 4)
+include("infrastructure/kconst_check.jl")  # opt-in @Const aliasing checker for _launch!
 include("infrastructure/backend.jl")  # centralized compute-backend selection (CPU/Metal/CUDA/AMDGPU)
 
 # ===========================================================================
@@ -488,8 +489,8 @@ include("fates/FatesSoilBGCFluxMod.jl")
 # FATES plant-hydraulics solver (FatesPlantHydraulicsMod). Plant water transport
 # (Richards-style implicit 1D Taylor solver), stomatal water-stress (btran), and
 # the soil->root->stem->leaf flow network + rhizosphere shells + water mass
-# balance. Default solver path (hydr_solver_1DTaylor) ported fully; the two
-# non-default 2D solvers (Newton/Picard) are stubbed. Depends on the FATES type
+# balance. Default solver (hydr_solver_1DTaylor) plus the two 2D solvers
+# (PicardSolve2D = 2, MatSolve2D = 3) behind fates_hydro_solver. Depends on the FATES type
 # system + WRF/WKF functions + allometry + PRT + params (all included above).
 # Standalone — NOT added to CLMInstances.
 include("fates/FatesPlantHydraulicsMod.jl")

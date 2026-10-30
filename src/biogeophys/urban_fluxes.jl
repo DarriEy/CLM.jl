@@ -1173,7 +1173,7 @@ end
 # patches of the scaled fluxes vs the bulk fluxes (matches the host sum()-based
 # reduction). Writes eflx_err/qflx_err which the host reads back for the warn/error.
 # ---------------------------------------------------------------------------
-@kernel function _uf_errcheck_kernel!(eflx_err, @Const(mask), @Const(qflx_err_in),
+@kernel function _uf_errcheck_kernel!(eflx_err, @Const(mask),
         @Const(eflx_sh_grnd_scale), @Const(qflx_evap_soi_scale),
         @Const(patchi), @Const(patchf), @Const(lun_gridcell),
         @Const(forc_rho_grc), @Const(forc_q_grc), @Const(thm_g_lun),
@@ -1526,7 +1526,9 @@ function urban_fluxes!(
     # landunit), so the whole check runs on-device. The warn/error gating reads the
     # small per-landunit err arrays back on the host (a kernel cannot error()/@warn).
     # =========================================================================
-    _launch!(_uf_errcheck_kernel!, eflx_err, m_urbanl, qflx_err,
+    # (qflx_err is written here, so it is passed once, NOT also as a @Const input:
+    # an unused @Const(qflx_err_in) alias of it was dropped, see kconst_check.jl.)
+    _launch!(_uf_errcheck_kernel!, eflx_err, m_urbanl,
         eflx_sh_grnd_scale, qflx_evap_soi_scale,
         lun_data.patchi, lun_data.patchf, lun_data.gridcell,
         bf(forc_rho_grc), bf(forc_q_grc), thm_g_lun,

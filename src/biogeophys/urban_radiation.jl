@@ -45,7 +45,7 @@ Adapt.@adapt_structure _ULWOutDV
 
 # Net longwave radiation for road, both walls, roof, and canyon totals — one
 # fully independent thread per urban landunit. All Fortran scratch is local.
-@kernel function _urad_netlw_kernel!(@Const(_out), @Const(mask), inp, out,
+@kernel function _urad_netlw_kernel!(_out, @Const(mask), inp, out,
                                      imin::Int, imax::Int, niter::Int, SBc)
     l = @index(Global)
     @inbounds if imin <= l <= imax && mask[l]
@@ -311,7 +311,7 @@ Base.@kwdef struct _USpvalDV{M}
 end
 Adapt.@adapt_structure _USpvalDV
 
-@kernel function _urad_spval_kernel!(@Const(_out), @Const(mask), sa,
+@kernel function _urad_spval_kernel!(_out, @Const(mask), sa,
                                      imin::Int, imax::Int, spval)
     l = @index(Global)
     @inbounds if imin <= l <= imax && mask[l]
@@ -345,7 +345,7 @@ Base.@kwdef struct _UInSrcDV{V,VI}
 end
 Adapt.@adapt_structure _UInSrcDV
 
-@kernel function _urad_input_kernel!(@Const(_out), @Const(mask), o, s,
+@kernel function _urad_input_kernel!(_out, @Const(mask), o, s,
         imin::Int, imax::Int, tdef, snoem,
         icol_roof::Int, icol_improad::Int, icol_perv::Int,
         icol_sun::Int, icol_shade::Int)
@@ -403,7 +403,7 @@ Base.@kwdef struct _UHistLwDV{V}
 end
 Adapt.@adapt_structure _UHistLwDV
 
-@kernel function _urad_history_kernel!(@Const(_out), @Const(mask), sol, lw,
+@kernel function _urad_history_kernel!(_out, @Const(mask), sol, lw,
         @Const(column), @Const(landunit), @Const(gridcell), @Const(itype),
         @Const(forc_solad), @Const(forc_solai),
         icol_roof::Int, icol_sun::Int, icol_shade::Int,

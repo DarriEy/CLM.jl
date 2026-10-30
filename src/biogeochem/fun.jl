@@ -577,9 +577,15 @@ end
 # Phase-2 substep solver (one thread per patch). Reads packed dense tensors, aliases
 # each logical array to a @view slice (Metal-safe), runs the loop-carried ECM/AM ×
 # fixer × level solver + retrans while-loop + flux tail on the thread's own patch.
-@kernel function _fun_p2_kernel!(@Const(mask_soilp), @Const(column), @Const(ivt),
-        @Const(PFT), @Const(IV), @Const(IJ), @Const(IPI), @Const(sminn_no3_layer_step),
-        @Const(sminn_nh4_layer_step), @Const(t_soisno), @Const(dzsoi), SL, OV, OVR,
+# NO @Const on this kernel's arguments: with them, the CPU backend returned the
+# PRE-clamp nonmycorrhizal N in the accumulators below (reproducible; correct under
+# --check-bounds=yes, with no BoundsError, and correct with every @Const removed;
+# removing it from only the sminn_*_layer_step args did not help). No argument
+# aliases a written array, so this is the Const/aliasscope load-reordering, not an
+# index error. Found against the ctsm5.3.012 FUN crop dumps.
+@kernel function _fun_p2_kernel!(mask_soilp, column, ivt,
+        PFT, IV, IJ, IPI, sminn_no3_layer_step,
+        sminn_nh4_layer_step, t_soisno, dzsoi, SL, OV, OVR,
         dt, nlevdecomp::Int, smallValue, spval, npcropmin::Int,
         use_flexiblecn::Bool, use_matrixcn::Bool)
     p = @index(Global)
@@ -758,7 +764,10 @@ end
 
                 total_N_resistance = one(T) / sum_n_acquired
 
-                if leafc[p] > zero(T) && litterfall_n_step[p, istp] * fixerfrac > zero(T) && vt < npcropmin
+                # CNFUNMod.F90:1191 `ivt(p) < npcropmin`: ivt and npcropmin are both
+                # 0-based there, so compare the 0-based itype (vt = itype + 1 would
+                # wrongly exclude itype 16, the generic irrigated C3 crop).
+                if leafc[p] > zero(T) && litterfall_n_step[p, istp] * fixerfrac > zero(T) && ivt[p] < npcropmin
                     rt_result = fun_retranslocation(dt, npp_to_spend,
                         litterfall_c_step[p, istp] * fixerfrac,
                         litterfall_n_step[p, istp] * fixerfrac, total_N_resistance,
@@ -832,51 +841,60 @@ end
                     end
 
                     for j in 1:nlevdecomp
+                        # Per-layer soil-N limit (CNFUNMod.F90:1302-1356). The four
+                        # per-layer fluxes are carried in LOCAL scalars through the
+                        # clamp and the accumulation, then stored once (see the
+                        # @Const note on this kernel: with @Const the accumulators
+                        # read back the PRE-clamp nonmycorrhizal N).
+                        a_no3 = n_from_active_no3[p, j]; m_no3 = n_from_nonmyc_no3[p, j]
+                        a_nh4 = n_from_active_nh4[p, j]; m_nh4 = n_from_nonmyc_nh4[p, j]
+                        c_a_no3 = npp_to_active_no3[p, j]; c_m_no3 = npp_to_nonmyc_no3[p, j]
+                        c_a_nh4 = npp_to_active_nh4[p, j]; c_m_nh4 = npp_to_nonmyc_nh4[p, j]
                         active_no3_limit1 = sminn_no3_layer_step[p, j, istp] * fixerfrac
-                        if n_from_active_no3[p, j] + n_from_nonmyc_no3[p, j] > active_no3_limit1
-                            sminn_no3_diff = n_from_active_no3[p, j] + n_from_nonmyc_no3[p, j] - active_no3_limit1
-                            temp_n_flux = n_from_active_no3[p, j]
-                            n_from_active_no3[p, j] -= sminn_no3_diff *
-                                (n_from_active_no3[p, j] / (n_from_active_no3[p, j] + n_from_nonmyc_no3[p, j]))
-                            n_from_nonmyc_no3[p, j] -= sminn_no3_diff *
-                                (n_from_nonmyc_no3[p, j] / (temp_n_flux + n_from_nonmyc_no3[p, j]))
-                            npp_to_active_no3[p, j] = n_from_active_no3[p, j] * cost_active_no3[p, j]
-                            npp_to_nonmyc_no3[p, j] = n_from_nonmyc_no3[p, j] * cost_nonmyc_no3[p, j]
+                        if a_no3 + m_no3 > active_no3_limit1
+                            sminn_no3_diff = a_no3 + m_no3 - active_no3_limit1
+                            temp_n_flux = a_no3
+                            a_no3 = a_no3 - sminn_no3_diff * (a_no3 / (a_no3 + m_no3))
+                            m_no3 = m_no3 - sminn_no3_diff * (m_no3 / (temp_n_flux + m_no3))
+                            c_a_no3 = a_no3 * cost_active_no3[p, j]
+                            c_m_no3 = m_no3 * cost_nonmyc_no3[p, j]
                         end
 
                         active_nh4_limit1 = sminn_nh4_layer_step[p, j, istp] * fixerfrac
-                        if n_from_active_nh4[p, j] + n_from_nonmyc_nh4[p, j] > active_nh4_limit1
-                            sminn_nh4_diff = n_from_active_nh4[p, j] + n_from_nonmyc_nh4[p, j] - active_nh4_limit1
-                            temp_n_flux = n_from_active_nh4[p, j]
-                            n_from_active_nh4[p, j] -= sminn_nh4_diff *
-                                n_from_active_nh4[p, j] / (n_from_active_nh4[p, j] + n_from_nonmyc_nh4[p, j])
-                            n_from_nonmyc_nh4[p, j] -= sminn_nh4_diff *
-                                n_from_nonmyc_nh4[p, j] / (temp_n_flux + n_from_nonmyc_nh4[p, j])
-                            npp_to_active_nh4[p, j] = n_from_active_nh4[p, j] * cost_active_nh4[p, j]
-                            npp_to_nonmyc_nh4[p, j] = n_from_nonmyc_nh4[p, j] * cost_nonmyc_nh4[p, j]
+                        if a_nh4 + m_nh4 > active_nh4_limit1
+                            sminn_nh4_diff = a_nh4 + m_nh4 - active_nh4_limit1
+                            temp_n_flux = a_nh4
+                            a_nh4 = a_nh4 - (sminn_nh4_diff * a_nh4 / (a_nh4 + m_nh4))
+                            m_nh4 = m_nh4 - (sminn_nh4_diff * m_nh4 / (temp_n_flux + m_nh4))
+                            c_a_nh4 = a_nh4 * cost_active_nh4[p, j]
+                            c_m_nh4 = m_nh4 * cost_nonmyc_nh4[p, j]
                         end
+                        n_from_active_no3[p, j] = a_no3; n_from_nonmyc_no3[p, j] = m_no3
+                        n_from_active_nh4[p, j] = a_nh4; n_from_nonmyc_nh4[p, j] = m_nh4
+                        npp_to_active_no3[p, j] = c_a_no3; npp_to_nonmyc_no3[p, j] = c_m_no3
+                        npp_to_active_nh4[p, j] = c_a_nh4; npp_to_nonmyc_nh4[p, j] = c_m_nh4
 
-                        N_acquired = n_from_active_no3[p, j] + n_from_nonmyc_no3[p, j] +
-                                     n_from_active_nh4[p, j] + n_from_nonmyc_nh4[p, j]
-                        C_spent = npp_to_active_no3[p, j] + npp_to_nonmyc_no3[p, j] +
-                                  npp_to_active_nh4[p, j] + npp_to_nonmyc_nh4[p, j]
+                        N_acquired = a_no3 + m_no3 + a_nh4 + m_nh4
+                        C_spent = c_a_no3 + c_m_no3 + c_a_nh4 + c_m_nh4
                         if FIX == PLANTS_ARE_FIXING
                             N_acquired += n_from_fixation[p, j]
                             C_spent    += npp_to_fixation[p, j]
                         end
 
-                        npp_to_spend -= C_spent + N_acquired * plantCN_p * (one(T) + grperc_pft[vt])
+                        # Fortran order: npp_to_spend - C_spent - (N_acquired*plantCN*(1+grperc))
+                        npp_to_spend = npp_to_spend - C_spent -
+                                       (N_acquired * plantCN_p * (one(T) + grperc_pft[vt]))
                         nt_uptake  += N_acquired
                         npp_uptake += C_spent
 
-                        n_active_no3_acc += n_from_active_no3[p, j]
-                        n_active_nh4_acc += n_from_active_nh4[p, j]
-                        n_nonmyc_no3_acc += n_from_nonmyc_no3[p, j]
-                        n_nonmyc_nh4_acc += n_from_nonmyc_nh4[p, j]
-                        npp_active_no3_acc += npp_to_active_no3[p, j]
-                        npp_active_nh4_acc += npp_to_active_nh4[p, j]
-                        npp_nonmyc_no3_acc += npp_to_nonmyc_no3[p, j]
-                        npp_nonmyc_nh4_acc += npp_to_nonmyc_nh4[p, j]
+                        n_active_no3_acc += a_no3
+                        n_active_nh4_acc += a_nh4
+                        n_nonmyc_no3_acc += m_no3
+                        n_nonmyc_nh4_acc += m_nh4
+                        npp_active_no3_acc += c_a_no3
+                        npp_active_nh4_acc += c_a_nh4
+                        npp_nonmyc_no3_acc += c_m_no3
+                        npp_nonmyc_nh4_acc += c_m_nh4
                         if FIX == PLANTS_ARE_FIXING
                             n_fix_acc   += n_from_fixation[p, j]
                             npp_fix_acc += npp_to_fixation[p, j]
@@ -1038,7 +1056,12 @@ function cnfun!(mask_soilp::AbstractVector{Bool}, mask_soilc::AbstractVector{Boo
                 use_matrixcn::Bool=false,
                 npcropmin::Int=17,
                 smallValue::Real=SMALLVALUE,
-                spval::Real=SPVAL)
+                spval::Real=SPVAL,
+                t_soisno_soil::AbstractMatrix{<:Real}=temperature.t_soisno_col)
+    # t_soisno_soil: SOIL-layer temperature [c, j], j = 1:nlevdecomp (Fortran
+    # t_soisno_col(c, 1:nlevdecomp), CNFUNMod.F90:1056). The full
+    # TemperatureData.t_soisno_col carries the nlevsno snow layers FIRST, so a
+    # driver must pass the soil slice here; the default suits soil-only fixtures.
 
     # Aliases for state/flux fields
     ivt                    = patch.itype
@@ -1280,7 +1303,7 @@ function cnfun!(mask_soilp::AbstractVector{Bool}, mask_soilc::AbstractVector{Boo
         litterfall_c_step, litterfall_n_step, n_passive_step, NSTP; ndrange=npb)
 
     _launch!(_fun_p2_kernel!, mask_soilp, patch.column, ivt, PFT_t, IV_t, IJ_t, IPI_t,
-        sminn_no3_layer_step, sminn_nh4_layer_step, temperature.t_soisno_col,
+        sminn_no3_layer_step, sminn_nh4_layer_step, t_soisno_soil,
         dzsoi_decomp_vals, SL_t, OV_t, OVR_t, dt, nlevdecomp, smallValue, spval,
         npcropmin, use_flexiblecn, use_matrixcn)
 

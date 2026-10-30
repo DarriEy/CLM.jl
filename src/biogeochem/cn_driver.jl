@@ -524,6 +524,105 @@ function cn_driver_no_leaching!(
                   npcropmin = npcropmin, nrepr = nrepr)
     end
 
+    # CNPhenology, as a local function so it can run at BOTH of Fortran's call
+    # sites (see the calls): with use_fun, phase 1 runs BEFORE allocation
+    # (CNDriverMod.F90:399-412) and only phase 2 after decomposition
+    # (CNDriverMod.F90:530-552); without FUN both phases run after decomposition.
+    function _run_cn_phenology!(_phases)
+        if num_bgc_vegp > 0 && pftcon_main !== nothing && cn_shared_params !== nothing &&
+           patch !== nothing && crop !== nothing && cnveg_state !== nothing &&
+           temperature !== nothing && water_diag !== nothing && canopystate !== nothing &&
+           soilstate !== nothing && gridcell !== nothing
+            # Use the module-level params instance, which readParams_CNPhenology! fills
+            # from the parameter file. Constructing a fresh PhenologyParams() here meant
+            # the run silently used Fortran's *unit-test* defaults (e.g. ndays_off=30)
+            # instead of the file values (ndays_off=15) — a 2x-too-long leaf-offset ramp.
+            _phparams = cn_phenology_params
+            _phstate  = PhenologyState()
+            # Resolve the phenology-trigger soil layer from phenology_soil_depth (0.08 m),
+            # mirroring Fortran find_soil_layer_containing_depth: the first layer whose
+            # lower interface >= depth (CLM5 layers -> layer 3, node ~0.09 m). The
+            # cn_phenology_init! default stub returns 1; using the real layer matches
+            # Fortran's onset timing (layer 1 is too shallow/responsive -> early onset).
+            # zisoi[] is 1-based with zisoi[1]=0 (top) and zisoi[i+1] = lower interface of
+            # soil layer i; empty before the vertical grid is built -> fall back to 1.
+            _find_phen_layer = function (depth)
+                zi = zisoi[]
+                isempty(zi) && return 1
+                for i in 1:varpar.nlevgrnd
+                    (i + 1) <= length(zi) && depth <= zi[i + 1] && return i
+                end
+                return varpar.nlevgrnd
+            end
+            cn_phenology_init!(_phstate, _phparams, dt; find_soil_layer_fn = _find_phen_layer)
+            _pftph = PftConPhenology{Float64}(
+                evergreen = Float64.(pftcon_main.evergreen), season_decid = Float64.(pftcon_main.season_decid),
+                season_decid_temperate = Float64.(pftcon_main.season_decid_temperate),
+                stress_decid = Float64.(pftcon_main.stress_decid), woody = Float64.(pftcon_main.woody),
+                leaf_long = Float64.(pftcon_main.leaf_long), leafcn = Float64.(pftcon_main.leafcn),
+                frootcn = Float64.(pftcon_main.frootcn), lflitcn = Float64.(pftcon_main.lflitcn),
+                livewdcn = Float64.(pftcon_main.livewdcn), deadwdcn = Float64.(pftcon_main.deadwdcn),
+                ndays_on = Float64.(pftcon_main.ndays_on), crit_onset_gdd_sf = Float64.(pftcon_main.crit_onset_gdd_sf),
+                lf_f = Float64.(pftcon_main.lf_f), fr_f = Float64.(pftcon_main.fr_f),
+                biofuel_harvfrac = Float64.(pftcon_main.biofuel_harvfrac),
+                repr_structure_harvfrac = Float64.(pftcon_main.repr_structure_harvfrac),
+                minplanttemp = Float64.(pftcon_main.minplanttemp), planttemp = Float64.(pftcon_main.planttemp),
+                gddmin = Float64.(pftcon_main.gddmin), lfemerg = Float64.(pftcon_main.lfemerg),
+                grnfill = Float64.(pftcon_main.grnfill), hybgdd = Float64.(pftcon_main.hybgdd),
+                mxmat = Int.(pftcon_main.mxmat), manunitro = Float64.(pftcon_main.manunitro),
+                # REQUIRED for the crop lifecycle: these four are what
+                # crop_phenology_init! turns into minplantjday/maxplantjday, i.e. the
+                # sowing window. They were omitted here, so PftConPhenology carried EMPTY
+                # planting-date vectors and no crop could ever have been planted even if
+                # the phenology were fully ported. See docs/CROP_LIFECYCLE_MAP.md (G5).
+                mnNHplantdate = Float64.(pftcon_main.mnNHplantdate),
+                mxNHplantdate = Float64.(pftcon_main.mxNHplantdate),
+                mnSHplantdate = Float64.(pftcon_main.mnSHplantdate),
+                mxSHplantdate = Float64.(pftcon_main.mxSHplantdate),
+                is_pft_known_to_model = Bool.(pftcon_main.is_pft_known_to_model))
+
+            # Crop-window initialization. cn_phenology_init! above cannot do this — it is
+            # called without pftcon/patch/gridcell — so crop_phenology_init! had NO live
+            # call site and inhemi/minplantjday/maxplantjday stayed empty for the whole
+            # life of the port (docs/CROP_LIFECYCLE_MAP.md, G6). Gated on use_crop so the
+            # default path is untouched; crop_phenology! asserts these are non-empty.
+            if config.use_crop && patch !== nothing && gridcell !== nothing &&
+               isempty(_phstate.minplantjday)
+                crop_phenology_init!(_phstate, _pftph, patch, gridcell,
+                                     npcropmin, npcropmax, maxveg)
+            end
+            _lprof = soilbgc_state.leaf_prof_patch
+            _fprof = soilbgc_state.froot_prof_patch
+            for _phase in _phases
+                cn_phenology!(_phstate, _phparams, _pftph,
+                    mask_bgc_vegp, mask_pcropp, mask_bgc_soilc,
+                    temperature, water_diag, canopystate, soilstate,
+                    cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
+                    crop, patch, gridcell, cn_shared_params,
+                    _lprof, _fprof, _phase;
+                    varctl = varctl, is_first_step = is_first_step, avg_dayspyr = dayspyr,
+                    prec10_patch = prec10_patch,
+                    # REQUIRED: without these, cn_litter_to_column! defaults to
+                    # nlevdecomp=1 and destroys ~86% of all phenological leaf/fine-root
+                    # litterfall C and N (see phenology.jl).
+                    nlevdecomp = nlevdecomp, i_litr_min = i_litr_min,
+                    i_litr_max = i_litr_max, npcropmin = npcropmin,
+                    crop_jday = crop_jday, crop_kyr = crop_kyr, dayspyr = dayspyr,
+                    use_fertilizer = use_fertilizer,
+                    is_beg_curr_year = is_beg_curr_year,
+                    is_end_curr_day = is_end_curr_day)
+            end
+        end
+        return nothing
+    end
+
+    # CNPhenology phase 1 under FUN -- CNDriverMod.F90:399-412: "moved this call to
+    # before nutrient_demand, so that croplive didn't change half way through crop
+    # N cycle". It sets croplive/planting/harvest and onset/offset flags that
+    # allocation, N demand and CNFUN read THIS step. (Previously both phases ran
+    # after decomposition regardless of use_fun.)
+    config.use_fun && _run_cn_phenology!((1,))
+
     # GPP, maintenance-resp totals, and available C (calc_gpp_mr_availc!) — WIRED.
     # Produces cnveg_cf.{availc, gpp_before_downreg, psnsun_to_cpool, …} consumed by
     # plant N demand + allocation. Builds PftConAllocation as a subset of the main
@@ -597,17 +696,34 @@ function cn_driver_no_leaching!(
         # uptake kinetics + flexible leaf C:N) when use_flexiblecn is set AND the
         # extra soilbgc/canopystate inputs it needs are available; otherwise the
         # CLM4.5 default method runs (default path is byte-identical).
-        if config.use_flexiblecn && canopystate !== nothing && dzsoi_decomp !== nothing
-            calc_plant_nutrient_demand_flexiblecn!(mask_bgc_vegp, bounds_patch, false,
-                _pftnc, cn_shared_params, patch, crop, canopystate, cnveg_state,
-                cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf, soilbgc_ns, soilbgc_cf;
-                dt = dt, dzsoi_decomp = dzsoi_decomp, nlevdecomp = nlevdecomp,
-                npcropmin = npcropmin, nrepr = nrepr)
-        else
-            calc_plant_nutrient_demand!(mask_bgc_vegp, bounds_patch, false,
-                _pftnc, cn_shared_params, patch, crop, cnveg_state,
-                cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
-                dt = dt, npcropmin = npcropmin, nrepr = nrepr)
+        # CNDriverMod.F90:440-457 makes TWO calls: the non-prognostic-crop patches
+        # with call_is_for_pcrop = .false., then (unless AgSys) the prognostic crops
+        # with call_is_for_pcrop = .true. -- the crop call is what computes the
+        # grain-fill retranslocation (leaf/livestem/froot N -> retransn) and the
+        # grain-flag-gated avail_retransn. A single all-patch `false` call gave crops
+        # the natural-veg seasonal avail_retransn and no grain-fill retranslocation.
+        # Without prognostic crops the non-crop filter is the whole veg filter, so
+        # the single call below is unchanged.
+        _split_pcrop = any(mask_pcropp)
+        _mask_nopc = !_split_pcrop ? mask_bgc_vegp :
+            (isempty(mask_soilnopcropp) ? (mask_bgc_vegp .& .!mask_pcropp) : mask_soilnopcropp)
+        _demand_calls = _split_pcrop ?
+            (config.use_crop_agsys ? ((_mask_nopc, false),) :
+                                     ((_mask_nopc, false), (mask_pcropp, true))) :
+            ((mask_bgc_vegp, false),)
+        for (_dmask, _is_pcrop) in _demand_calls
+            if config.use_flexiblecn && canopystate !== nothing && dzsoi_decomp !== nothing
+                calc_plant_nutrient_demand_flexiblecn!(_dmask, bounds_patch, _is_pcrop,
+                    _pftnc, cn_shared_params, patch, crop, canopystate, cnveg_state,
+                    cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf, soilbgc_ns, soilbgc_cf;
+                    dt = dt, dzsoi_decomp = dzsoi_decomp, nlevdecomp = nlevdecomp,
+                    npcropmin = npcropmin, nrepr = nrepr)
+            else
+                calc_plant_nutrient_demand!(_dmask, bounds_patch, _is_pcrop,
+                    _pftnc, cn_shared_params, patch, crop, cnveg_state,
+                    cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf;
+                    dt = dt, npcropmin = npcropmin, nrepr = nrepr)
+            end
         end
         # patch→column "unity" aggregation of plant N demand for competition
         _Tnd = eltype(soilbgc_state.plant_ndemand_col)
@@ -770,7 +886,11 @@ function cn_driver_no_leaching!(
            pftcon_main !== nothing && soilstate !== nothing && temperature !== nothing &&
            canopystate !== nothing && h2osoi_liq !== nothing
             _pftcon_fun = pftcon_fun_from(pftcon_main)
-            _fun_params = FUNParams()
+            # CNFUNMod.F90:105-108 reads ndays_off from the params file -- the same
+            # variable CNPhenology reads (15 d in clm5_params), held by
+            # cn_phenology_params once readParams_CNPhenology! has run. FUNParams()'s
+            # 21 d was never the file value.
+            _fun_params = FUNParams(ndays_off = cn_phenology_params.ndays_off)
             # CNFUNInit (CNFUNMod.F90:176-182, called from CNDriverMod.F90:414 BEFORE
             # the FUN uptake): at each FUN-period boundary `mod(nstep,nstep_fun)==0`
             # re-sync leafcn_offset←leafcn and zero storage_cdemand, storage_ndemand,
@@ -802,6 +922,8 @@ function cn_driver_no_leaching!(
             # (snow padding stripped), so wrap it in a minimal WaterStateData.
             _ws_fun = WaterStateData()
             _ws_fun.h2osoi_liq_col = h2osoi_liq
+            _t_soisno_fun = t_soisno !== nothing ? t_soisno :
+                @view(temperature.t_soisno_col[:, (varpar.nlevsno + 1):end])
             _fun_hook = function ()
                 cnfun!(mask_bgc_vegp, mask_bgc_soilc, bounds_patch, bounds_col,
                        _fun_params, _pftcon_fun, patch, _ws_fun, temperature,
@@ -809,7 +931,13 @@ function cn_driver_no_leaching!(
                        soilbgc_nf, soilbgc_cf, canopystate, soilbgc_ns;
                        dt=dt, nlevdecomp=nlevdecomp, dzsoi_decomp_vals=dzsoi_decomp,
                        use_flexiblecn=config.use_flexiblecn,
-                       use_matrixcn=config.use_matrixcn, npcropmin=npcropmin)
+                       use_matrixcn=config.use_matrixcn, npcropmin=npcropmin,
+                       # SOIL layers only: the symbiotic-fixation cost reads
+                       # t_soisno(c, 1:nlevdecomp) (CNFUNMod.F90:1056). The full
+                       # temperature.t_soisno_col starts with the nlevsno SNOW layers,
+                       # so it handed FUN snow-layer temperatures (SPVAL when snow-free)
+                       # and fun_cost_fix -> big, i.e. no fixation by any fixer PFT.
+                       t_soisno_soil = _t_soisno_fun)
                 # p2c (unity): patch FUN uptake → column, per layer.
                 _fun_p2c!(soilbgc_nf.sminn_to_plant_fun_no3_vr_col,
                           cnveg_nf.sminn_to_plant_fun_no3_vr_patch,
@@ -905,7 +1033,7 @@ function cn_driver_no_leaching!(
     # Plant/heterotroph competition for mineral N
     # --------------------------------------------------
     if num_bgc_vegp > 0
-        # Phenology phase 1 (if use_fun) — already ported: cn_phenology!(...; phase=1)
+        # Phenology phase 1 (if use_fun) — WIRED before allocation (`_run_cn_phenology!((1,))`).
         # CNFUNInit — WIRED above in the use_fun FUN-hook setup block (search
         # `cnfun_init!`): runs before the cnfun! uptake, per CNDriverMod.F90:414.
         # Allocation — already ported:
@@ -927,94 +1055,12 @@ function cn_driver_no_leaching!(
     # --------------------------------------------------
     # Phenology (cn_phenology!) phase 1 then phase 2 — WIRED. For use_fun=false
     # both phases run here (after decomposition, before growth respiration), per
-    # CNDriverNoLeaching. Phase 1 updates onset/offset/dormancy state; phase 2
+    # CNDriverNoLeaching; with use_fun only phase 2 runs here (phase 1 ran before
+    # allocation, above). Phase 1 updates onset/offset/dormancy state; phase 2
     # emits growth-from-storage, litterfall, live-wood turnover and distributes
     # patch litter to the column via leaf/froot vertical profiles.
     # --------------------------------------------------
-    if num_bgc_vegp > 0 && pftcon_main !== nothing && cn_shared_params !== nothing &&
-       patch !== nothing && crop !== nothing && cnveg_state !== nothing &&
-       temperature !== nothing && water_diag !== nothing && canopystate !== nothing &&
-       soilstate !== nothing && gridcell !== nothing
-        # Use the module-level params instance, which readParams_CNPhenology! fills
-        # from the parameter file. Constructing a fresh PhenologyParams() here meant
-        # the run silently used Fortran's *unit-test* defaults (e.g. ndays_off=30)
-        # instead of the file values (ndays_off=15) — a 2x-too-long leaf-offset ramp.
-        _phparams = cn_phenology_params
-        _phstate  = PhenologyState()
-        # Resolve the phenology-trigger soil layer from phenology_soil_depth (0.08 m),
-        # mirroring Fortran find_soil_layer_containing_depth: the first layer whose
-        # lower interface >= depth (CLM5 layers -> layer 3, node ~0.09 m). The
-        # cn_phenology_init! default stub returns 1; using the real layer matches
-        # Fortran's onset timing (layer 1 is too shallow/responsive -> early onset).
-        # zisoi[] is 1-based with zisoi[1]=0 (top) and zisoi[i+1] = lower interface of
-        # soil layer i; empty before the vertical grid is built -> fall back to 1.
-        _find_phen_layer = function (depth)
-            zi = zisoi[]
-            isempty(zi) && return 1
-            for i in 1:varpar.nlevgrnd
-                (i + 1) <= length(zi) && depth <= zi[i + 1] && return i
-            end
-            return varpar.nlevgrnd
-        end
-        cn_phenology_init!(_phstate, _phparams, dt; find_soil_layer_fn = _find_phen_layer)
-        _pftph = PftConPhenology{Float64}(
-            evergreen = Float64.(pftcon_main.evergreen), season_decid = Float64.(pftcon_main.season_decid),
-            season_decid_temperate = Float64.(pftcon_main.season_decid_temperate),
-            stress_decid = Float64.(pftcon_main.stress_decid), woody = Float64.(pftcon_main.woody),
-            leaf_long = Float64.(pftcon_main.leaf_long), leafcn = Float64.(pftcon_main.leafcn),
-            frootcn = Float64.(pftcon_main.frootcn), lflitcn = Float64.(pftcon_main.lflitcn),
-            livewdcn = Float64.(pftcon_main.livewdcn), deadwdcn = Float64.(pftcon_main.deadwdcn),
-            ndays_on = Float64.(pftcon_main.ndays_on), crit_onset_gdd_sf = Float64.(pftcon_main.crit_onset_gdd_sf),
-            lf_f = Float64.(pftcon_main.lf_f), fr_f = Float64.(pftcon_main.fr_f),
-            biofuel_harvfrac = Float64.(pftcon_main.biofuel_harvfrac),
-            repr_structure_harvfrac = Float64.(pftcon_main.repr_structure_harvfrac),
-            minplanttemp = Float64.(pftcon_main.minplanttemp), planttemp = Float64.(pftcon_main.planttemp),
-            gddmin = Float64.(pftcon_main.gddmin), lfemerg = Float64.(pftcon_main.lfemerg),
-            grnfill = Float64.(pftcon_main.grnfill), hybgdd = Float64.(pftcon_main.hybgdd),
-            mxmat = Int.(pftcon_main.mxmat), manunitro = Float64.(pftcon_main.manunitro),
-            # REQUIRED for the crop lifecycle: these four are what
-            # crop_phenology_init! turns into minplantjday/maxplantjday, i.e. the
-            # sowing window. They were omitted here, so PftConPhenology carried EMPTY
-            # planting-date vectors and no crop could ever have been planted even if
-            # the phenology were fully ported. See docs/CROP_LIFECYCLE_MAP.md (G5).
-            mnNHplantdate = Float64.(pftcon_main.mnNHplantdate),
-            mxNHplantdate = Float64.(pftcon_main.mxNHplantdate),
-            mnSHplantdate = Float64.(pftcon_main.mnSHplantdate),
-            mxSHplantdate = Float64.(pftcon_main.mxSHplantdate),
-            is_pft_known_to_model = Bool.(pftcon_main.is_pft_known_to_model))
-
-        # Crop-window initialization. cn_phenology_init! above cannot do this — it is
-        # called without pftcon/patch/gridcell — so crop_phenology_init! had NO live
-        # call site and inhemi/minplantjday/maxplantjday stayed empty for the whole
-        # life of the port (docs/CROP_LIFECYCLE_MAP.md, G6). Gated on use_crop so the
-        # default path is untouched; crop_phenology! asserts these are non-empty.
-        if config.use_crop && patch !== nothing && gridcell !== nothing &&
-           isempty(_phstate.minplantjday)
-            crop_phenology_init!(_phstate, _pftph, patch, gridcell,
-                                 npcropmin, npcropmax, maxveg)
-        end
-        _lprof = soilbgc_state.leaf_prof_patch
-        _fprof = soilbgc_state.froot_prof_patch
-        for _phase in (1, 2)
-            cn_phenology!(_phstate, _phparams, _pftph,
-                mask_bgc_vegp, mask_pcropp, mask_bgc_soilc,
-                temperature, water_diag, canopystate, soilstate,
-                cnveg_state, cnveg_cs, cnveg_cf, cnveg_ns, cnveg_nf,
-                crop, patch, gridcell, cn_shared_params,
-                _lprof, _fprof, _phase;
-                varctl = varctl, is_first_step = is_first_step, avg_dayspyr = dayspyr,
-                prec10_patch = prec10_patch,
-                # REQUIRED: without these, cn_litter_to_column! defaults to
-                # nlevdecomp=1 and destroys ~86% of all phenological leaf/fine-root
-                # litterfall C and N (see phenology.jl).
-                nlevdecomp = nlevdecomp, i_litr_min = i_litr_min,
-                i_litr_max = i_litr_max, npcropmin = npcropmin,
-                crop_jday = crop_jday, crop_kyr = crop_kyr, dayspyr = dayspyr,
-                use_fertilizer = use_fertilizer,
-                is_beg_curr_year = is_beg_curr_year,
-                is_end_curr_day = is_end_curr_day)
-        end
-    end
+    _run_cn_phenology!(config.use_fun ? (2,) : (1, 2))
 
     # --------------------------------------------------
     # Growth respiration (cn_gresp!) — WIRED. Reads cpool_to_*c (allocation) +

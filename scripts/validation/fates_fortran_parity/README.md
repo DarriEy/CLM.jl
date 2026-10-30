@@ -1293,6 +1293,44 @@ quantity in the chain, in the order found:
    `test_fates_planthydro_coupling.jl`. `fates_apply_deferred_activation!` now performs
    `dyn_ED`. The SP scores are unchanged.
 
+6. **Gridcell weights were never recomputed after `dyn_ED`.** CTSM follows `dyn_ED`
+   (dynSubgridDriverMod.F90:313) with `dynSubgrid_wrapup_weight_changes` (:333), whose
+   `compute_higher_order_weights` (:389; subgridWeightsMod.F90:216-242) re-derives
+   `patch%wtlunit`, `patch%wtgcell` and `col%wtgcell` from the new `wtcol` before
+   `reweight_wrapup` (:395). The port ran `dyn_ED` (`fates_apply_deferred_activation!`)
+   but not the recompute, so the FATES patches kept their **surfdata** `wtgcell`. An
+   inactive slot kept a nonzero gridcell weight (nocomp p6: 0.408), and the bare and
+   vegetated patches kept weights unrelated to their FATES area (nocomp bare patch:
+   `wtgcell` 0.350 vs `wtcol` 0.880). The port's history writer
+   (`_aggregate_to_gridcell`) averaged with those weights and without the
+   `patch%active` test of `p2g_1d` (subgridAveMod.F90:531-538). Fix:
+   `compute_higher_order_weights!` right after `fates_apply_deferred_activation!` in
+   `clm_drv!`. The history writer and `hist_dov2xy` now skip inactive units, zero
+   weights and spval, as p2g/c2g do, and `HistFieldDef` carries an `l2g_scale_type`.
+   Under FATES-SP, TLAI/TSAI point at `tlai/tsai_hist_patch` (CanopyStateType.F90:232-241).
+   Other `wtgcell`/`wtlunit` readers (lnd2atm, drydep, dust) also see the corrected
+   weights. The prognostic state should not move, because column averages already used
+   `wtcol`. The column fields below are identical before and after to the printed digits.
+
+   Port history-writer gridcell value vs the Fortran h0 (`hist_dov2xy` default), 240
+   hourly steps. The figure is the relative error of the window mean (`HIST_*` in
+   `fates_modes_parity.jl`).
+
+   | field | SP before | SP after | nocomp before | nocomp after |
+   |---|---|---|---|---|
+   | BTRAN (instantaneous, l2g `veg`) | 0.82 | 6.6e-4 | 1.51 | 6.8e-5 |
+   | TV | 4.5e-3 (1.3 K) | 4.1e-6 | 5.4e-3 | 3.4e-5 |
+   | FSH | 0.53 | 5.5e-4 | 0.33 | 1.3e-2 |
+   | EFLX_LH_TOT | 0.67 | 9.8e-4 | 0.16 | 6.8e-3 |
+   | FSA | 0.52 | 2.5e-6 | 0.37 | 2.0e-6 |
+   | FIRE | 0.53 | 2.6e-5 | 0.37 | 8.1e-4 |
+   | SABV | 0.75 | 4.2e-5 | 1.22 | 2.6e-4 |
+   | ELAI | 0.62 | 1.6e-8 | 0.94 | 2.0e-4 |
+
+   Column-level fields (QRUNOFF, H2OSNO, TSOI_10CM, ...) were already right and are
+   unchanged. `test_fates_higher_order_weights.jl` pins the weight invariants and the
+   SP history values.
+
 **Default (non-FATES) path.** Items 1, 2, 4 and 5 are FATES-only. Item 3 is a real
 default-behaviour change for any caller of `clm_initialize!` + `clm_drv!` that did not
 set `use_clm5_fpi` itself. It is not a change for `clm_run!` (and so not for
@@ -1406,12 +1444,79 @@ Fortran CNP's leaf-off.
   arithmetic; the result is ill-conditioned.
 * Melt season (Feb-May) is still +0.3 to +1.1 K warm, with single days up to 5 K. In
   March the tree patch absorbs about 7 W/m2 more SABV and holds more canopy snow.
-  Not localized further.
+  Not localized further. **Closed below ("Melt season").**
 * 412 days into SPITFIRE: `FATES_VEGC` +7 %, live-grass fuel +35 %.
 
 Reproduce: stage the carbon-only control (`fates_cnp_ctrl_c1` namelists) with
 `hist_dov2xy = .false.` and the per-patch fields above. Score the port with
 `FATES_CNP_PARTEH=1 fates_cnp_parity.jl <h0> 240`.
+
+## Melt season: snow burial, per-patch `tveg24`, case snow namelist (2026-10-29)
+
+Localized with a per-patch hourly Fortran tape over the SPITFIRE case (fates_fire_1pt
+namelists, 335 days, `hist_fincl2` hourly with `hist_dov2xy = .false.`: TV, SABV, SABG,
+ELAI/TLAI, SNOCAN, unloading, SNOWDP, H2OSNO, FSNO, ALBD/ALBGRD, ...) against the same
+quantities dumped from the port each step. In March 2003 both FATES patches had the same
+TLAI, HTOP, SWE and snow cover in both models, but the port's exposed LAI was far higher
+(tree patch `elai` 0.41-0.55 vs 0.24-0.35; the small patch 0.14-0.21 vs the 0.1 floor),
+and its snow was 6-15 % shallower. Three causes:
+
+1. **The snowpack never reached FATES** (`src/`, FATES path). Fortran
+   `wrap_update_hlmfates_dyn` (clmfates_interfaceMod.F90:1494-1504) opens with
+   `bc_in%snow_depth_si = snow_depth(c)`, `bc_in%frac_sno_eff_si = frac_sno_eff(c)` and
+   `UpdateFatesAvgSnowDepth` (EDCanopyStructureMod.F90:1478, `site%snow_depth = depth *
+   fsno`). The port ported `UpdateFatesAvgSnowDepth!` but never called it or packed the
+   two fields, so `site%snow_depth` stayed 0: the leaf-area profile buried nothing,
+   `elai = tlai` all winter, and the canopy absorbed 2-15x the Fortran SABV
+   (small patch, March: 11 vs 0.7 W/m2). `fates_update_snow_burial!` now runs where
+   Fortran calls `wrap_update_hlmfates_dyn`: after the daily dynamics, at the cold
+   start, and at a restart (pack only; the restarted `snow_depth` is kept).
+2. **`tveg24` per patch** (`src/`, FATES path). `WrapUpdateFatesRmean`
+   (clmfates_interfaceMod.F90:3227-3245) packs every patch's `t_veg_patch` into
+   `t_veg_pa(ifp)` before `UpdateFatesRMeansTStep`, which rolls each patch's
+   `tveg24`/`tveg_lpa`/`tveg_longterm` from its own value (FatesInterfaceMod.F90:2119-2121).
+   The port drove every patch from the first finite `t_veg_pa`, the value the
+   photosynthesis iteration had left for patch 1, not each patch's final leaf
+   temperature. After fix 1 this was the remaining +0.17..0.34 K Feb-May bias.
+3. **Snow namelist in the FATES harnesses** (harness). Every Fortran FATES case lnd_in
+   (fates_parity_1pt, fates_fire_1pt, fates_cnp_*, fates_bgc_1pt_v2, fates_sp/nocomp/
+   fixedbg/hydro/lu_*) sets `snow_overburden_compaction_method = 'Vionnet2012'` and
+   `wind_dependent_snow_density = .true.`. The port defaults are Anderson1976 and no wind
+   term (the smoother AD path); `parity_run_domain.jl` already set the Fortran values,
+   the FATES harnesses did not. `fates_case_snow_namelist!` (fates_fortran_parity.jl)
+   is now called by every FATES build (build, build_cnp, build_mode, build_hydro, the
+   land-use build). Snow depth, March: 0.851/0.851 m (was 0.76/0.89).
+
+SPITFIRE mode-1 case, `FATES_TVEG24` J - F by 30-day block (Fortran: the committed
+`fates_spitfire_fortran.csv`):
+
+| days | before (main) | + case snow namelist | + snow burial | + per-patch tveg24 |
+|---|---|---|---|---|
+| 181-210 | +0.17 (max 0.43) | +0.12 | +0.08 | **+0.00 (max 0.04)** |
+| 211-240 | +0.33 (0.73) | +0.28 | +0.17 | **-0.00 (0.01)** |
+| 241-270 | +0.79 (1.74) | +0.76 | +0.26 | **-0.01 (0.13)** |
+| 271-300 | +1.15 (2.92) | +1.07 | +0.34 | **+0.00 (0.00)** |
+| 301-330 | +0.86 (5.27) | +0.77 | +0.29 | **+0.00 (0.06)** |
+| 331-360 | | | +0.09 | +0.05 (0.55) |
+| `FATES_VEGC` J/F, day 330 / 412 | 1.048 / | 1.047 | 1.0002 | **1.0000 / 0.9996** |
+
+The per-patch hourly means (20-day blocks) then agree to the last digit shown for TV,
+TG, SABV, SABG, FSA, SNOCAN, SNOWDP, H2OSNO and FSNO on both FATES patches.
+
+**Effect on the 4-year demography** (docs/FATES_MULTIYEAR_ENERGY.md, last follow-up):
+the year-2..4 excess was this canopy. Recruitment J/F goes from 1.16/1.57/1.53/2.16 to
+1.00/0.90/0.99/1.01, NPP from 1.00/1.30/1.42/1.40 to 0.99/0.98/0.99/0.98, the seed bank
+from 1.8-2.4x to 0.94-1.02x, and the PFT-14 summer collapse (day 721: 0.74 vs 9.2 m-2)
+to 8.3 vs 9.2 m-2.
+
+**SPITFIRE fuel** (412 days, mode 1, `fates_spitfire_parity.jl`): the fuel-load residual of
+the section "Fuel-load residual localized" is gone. Days 380-412 live grass (FC6)
+0.0490 vs 0.0488 (was 0.0709 vs 0.0488), fuel amount mean rel. error 1.1e-3, peak fire
+intensity 24.6 vs 24.3 kW/m (was 32.4), no burn days in either model.
+
+Reproduce (scratch tooling, not committed): stage the fates_fire_1pt namelists with an
+hourly `hist_fincl2` / `hist_dov2xy = .false.` tape and run the stock `cesm.exe`; dump
+the port from `fates_spitfire_parity.jl`'s `build()` with the same per-patch fields.
 
 ---
 
@@ -1571,13 +1676,115 @@ copy semantics showed up as a 0.3x / 0.16x shortfall.
   the balive-weighted `BTranForHLMDiagnosticsFromCohortHydr`). With the harness fixed,
   day 1 matches to float32 precision. The days 3-10 error is the plant-state
   decorrelation above.
-* **2-D solvers.** `MatSolve2D` and `PicardSolve2D` are still not ported.
+* **2-D solvers.** Ported; see the next section.
 * **Near-zero fluxes.** The site is extremely water-stressed (cold-start frozen soil; leaf
   psi ~ -15 MPa). Transpiration is ~1e-8 mm/s, so the QVEGT and BTRAN relative errors are
   on near-zero values.
 * **Water balance.** With hydraulics on (plant water in the budget), the column balance
   |errh2o| is < 1e-12 mm on every step n >= 1 of the 240-step run. Fortran's daily
   plant-water conservation check is the inert one described above.
+
+## PLANT HYDRAULICS: 2-D solvers (`fates_hydro_solver` = 2, 3)
+
+`clm_initialize!(use_fates_planthydro=true, fates_hydro_solver=k)` overrides the FATES
+parameter `fates_hydro_solver` (CTSM 5.3 has no namelist entry; the value lives in the
+parameter file). The numbering is FatesHydraulicsMemMod.F90's, and the parameter file's
+long name says the same: **1 = 1-D Taylor, 2 = 2-D Picard (`PicardSolve2D`),
+3 = 2-D Newton (`MatSolve2D`, "deprecated")**. Note that 2 is Picard, not Newton.
+
+Both solvers treat the cohort and the rhizosphere of every layer as a single system:
+3 + 2 x nlevrhiz nodes and the same number of connections minus one, with the troot
+joining all layers. They assemble a dense Jacobian and solve it with LAPACK DGESV.
+The port's `_dgesv!` is the DGETF2/DGETRS algorithm as a plain loop, so it is
+type-generic and allocation-free. The reference `cesm.exe` links Accelerate's LAPACK.
+
+Reproduced Fortran details:
+* `dpsi_scap = dpsi_pcap = 0.1` and Picard's `1.e-3` theta test are single-precision
+  literals (gfortran `-O` with no `-fdefault-real-8`), i.e. 0.10000000149 and 1.0000000475e-3.
+* `PicardSolve2D` passes `dftc_dtheta_node(id_up/id_dn)` to GetImTaylorKAB's
+  `intent(inout)` dummies, the same aliasing as the 1-D solver (#354). `MatSolve2D`'s
+  GetKAndDKDPsi copies its inputs, so it has no aliasing.
+* Newton's convergence test uses the signed `sum(residual)`, not the absolute value.
+* Picard floors psi at -1e5 MPa for the CFL estimate and at -1e2 MPa in the iterations.
+  Its final fluxes reuse the last iteration's kmax.
+
+### Reference runs
+`instrument_planthydro.py` plus a per-iteration trace (NWT / PIC lines in `lnd.log`, the
+same quantities as the port's `CLM._HYDRO2D_TRACE` hook), relinked with the
+SapwoodAreaGrass SourceMod. Then `stage_planthydro_run.sh` is run with `CDL=` set to the
+default parameter file with `fates_hydro_solver` set to 2 or 3. The trace does not change
+the run (the per-call dumps of the traced and untraced Picard runs are identical).
+
+### Newton (3): Fortran aborts on the first hydraulics call
+Fortran endruns on the first call (`Newton hydraulics solve could not converge`, pft 1,
+dbh 0.764 cm), on all 30 launches. In each round:
+* iteration 1 has max |residual| 6e-6 kg/s;
+* the first update raises it to 6.6e-2;
+* the second update leaves a node whose residual is NaN.
+
+`lnd.log` carries 242 `bisect_pv` "100 iterations" warnings from the TFS retention
+inversion. Each round therefore fails, and the substep is halved 11 times (3600 s ->
+3.5 s) until `nsteps > max_newton_rounds`. Halving the step does not help, because the
+first update (capped at 0.1 MPa per node) already overshoots. The port follows the same
+path: 33 iterations, NaN at the same iterations, max |residual| equal to ~1e-9 relative
+(iteration 2 bit-for-bit), then the same endrun. The 33-line Fortran trace is committed as
+`fates_planthydro_newton_fortran_trace.txt` and checked by
+`test_fates_planthydro_2d_solvers.jl`. No Fortran reference exists past this point, so
+nothing further can be compared; the parameter file's "deprecated" label fits.
+
+### Picard (2)
+Fortran runs all 240 steps. `fates_planthydro_picard_fortran.csv` is the hourly extract
+(`fates_planthydro_parity.jl export`). It is scored with
+`FATES_HYDRO_SOLVER=2 julia --project=. fates_planthydro_parity.jl fates_planthydro_picard_fortran.csv 240`.
+
+The table gives the median per-step relative error, the max in brackets, and the sum ratio
+Julia / Fortran over the window in parentheses:
+
+| field | day 1 (n 2-24) | days 2-3 (n 25-72) | days 3-10 (n 73-240) |
+|---|---|---|---|
+| leaf psi, woody mean | 4.9e-7 [2.1e-5] (1.00) | 1.5e-5 [2.4e-5] (1.00) | 1.3e-5 [0.73\*] (1.01) |
+| leaf psi, PFT 1 | 2.6e-7 [2.2e-5] | 1.2e-5 [2.3e-5] | 1.3e-5 [0.23\*] |
+| leaf psi, grass PFT 12 / 14 | 8e-6 / 7e-6 [7e-5] | 2.6e-5 / 2.8e-5 [7e-5] | 1.0e-5 / 7.5e-6 [1.7e-3] |
+| leaf / stem water content | 1.2e-7 / 6e-8 | 6.1e-6 / 7.4e-6 | 5e-7 / 8e-7 [1-2e-2\*] |
+| cohort hydraulic btran | 1.3e-6 [5e-5] | 2.4e-5 [5.5e-5] | 2.9e-6 [0.10\*] |
+| FATES_VEGH2O | 1.1e-7 [1.1e-5] | 7.3e-6 [1.2e-5] | 3.2e-6 [1.5e-5] |
+| QROOTSINK layer 1 | 3.6e-5 (1.00) | 2.4e-5 (1.00) | 6.6e-6 (1.00) |
+| SOILLIQ layer 1 / 4 | 2.6e-6 / 1.9e-8 | 2.1e-6 / 3.7e-6 | 1.7e-6 / 1.6e-6 |
+| EFLX_LH_TOT | 6.6e-6 (1.00) | 1.2e-5 (1.00) | 2.1e-5 (1.00) |
+| FATES_GPP | 8.3e-5 (1.00) | 8.7e-5 (1.00) | 1.1e-4 (1.00) |
+| QVEGT | 1.5e-5 (1.00) | 5.9e-5 (1.00) | 5.5e-5 (1.00) |
+| BTRAN (host) | 6.3e-7 | 2.5e-5 | 7.0e-6 |
+
+The column water balance |errh2o| is <= 1.0e-12 mm on every step. \*All the large maxima
+fall on the daily FATES step records (nstep 97, 121, ..., 217). The cohort counts are the
+same in both models, and the next step matches to ~1e-5 again, so these are transients in
+the n-weighted means at the daily step, not solver drift.
+
+Unlike the 1-D solver, the Picard run does not decorrelate after day 3. Picard is
+well conditioned here: the CFL split puts most calls at the 20-substep cap of 180 s. For
+scale, Fortran solver 1 and Fortran solver 2 differ by 2 % in leaf psi on day 1, and
+the two runs are 30-60x apart in GPP and cohort btran afterwards. So the choice of solver
+dominates the hydraulics on this site.
+
+**Fortran Picard oddity.** Of 88,097 traced substeps, 88,096 exit the Picard loop after
+the first iteration. The stopping test (`max|dtheta| < 1e-3` on the update itself, or
+water balance < 1e-8 kg) is met by the first linear solve, so the scheme is effectively a
+one-step linearised implicit solve, not an iterated Picard solve. The `icnv = 1` restart
+path (after 100 iterations) never fires. If it did, it would restart from t = 0 with the
+same substep and one iteration per substep; the substep is not shortened, despite the
+"explicit integration with small time step" comment.
+
+**Teacher-forced replay** (`FATES_HYDRO_SOLVER=2 fates_planthydro_replay.jl` on the
+instrumented Picard dump). The relative error in each cohort's change of water content
+per call is:
+* calls 1-20: <= 4.5e-8, mostly 1e-10 to 1e-13;
+* calls 21-74: median 6.6e-6, p90 7.3e-5, max 9.8e-3 (on near-zero changes). These follow
+  the host's transpiration input, `qflx_transp_pa`, which is 1e-4 off from call 21, as in
+  the 1-D replay.
+
+From call 75 a patch holds several cohorts of the same PFT. The replay keys its forcing
+by (patch, pft), so it can no longer assign the Fortran states to the right cohorts and
+is not meaningful there. This harness limitation also applies to the 1-D replay.
 
 ---
 

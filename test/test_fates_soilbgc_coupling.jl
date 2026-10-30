@@ -22,6 +22,10 @@ using CLM
 using Dates
 
 include("testdata.jl")
+# The FATES harness build sets the Fortran case snow namelist (module-global Refs,
+# fates_case_snow_namelist!); restore the port defaults when this file is done.
+_snow_ctrl_saved = (CLM.WIND_DEPENDENT_SNOW_DENSITY[], CLM.OVERBURDEN_COMPACTION_METHOD[],
+                    CLM.NEW_SNOW_DENSITY[])
 
 # Minimal PRT stub (FluxIntoLitterPools only reads PRT state on the MIMICS path).
 mutable struct _SBCStubPRT <: CLM.AbstractPRTVartypes end
@@ -243,3 +247,6 @@ CLM.GetState(::_SBCStubPRT, organ_id::Integer, element_id::Integer,
         end
     end
 end
+
+CLM.WIND_DEPENDENT_SNOW_DENSITY[], CLM.OVERBURDEN_COMPACTION_METHOD[], CLM.NEW_SNOW_DENSITY[] =
+    _snow_ctrl_saved

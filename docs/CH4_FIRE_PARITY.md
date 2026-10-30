@@ -1323,3 +1323,78 @@ tightened from 5e-3 to 4e-3, and new gates cover `RR` < 2e-3, `O2_DEMAND_RR` < 2
 `O2_DEMAND_NIT`/`POT_F_NIT_VR` < 1e-4, `O_SCALAR` < 1e-12 and `O2_OXID_SAT` < 1e-2.
 `CONC_O2_SAT` stays at 5e-3: it is bounded by the chaos above, not by a known residual.
 `test_cn_veg_carbon_flux.jl` pins `rr_patch` including `livecroot_mr`.
+
+## 18. Day-time RR and the HR floor: two reference settings the harness was missing (2026-10-29)
+
+§17 left two CN-side residuals feeding the O₂ demand: day-time `RR` up to 3.6e-3 (168 h), and
+the constant 6.6e-4 `HR_VR` floor from §16. Both turned out to be settings in the reference
+run that the Julia harness did not reproduce. One of them is a missing port feature.
+
+### Localization (`RR` split per patch, CN locked)
+* `FROOT_MR` and `LIVECROOT_MR` match Fortran to about 1e-6 at every step. The whole day-time
+  residual was **growth respiration**, which scales with `availc`.
+* `availc` (from the restart dump of the next step) ran +5e-4 to +4e-2 high, while
+  `gpp_pepv` ran 0.6–2e-3 *low*. So Julia's total MR was low, and the low term was leaf MR.
+* `lnca` (canopy-top leaf N) was **13% below Fortran's** on both vegetated patches.
+
+### Root cause 1: `lnc_opt` / `vcmax_opt` were never ported
+The reference `lnd_in` sets `lnc_opt = .true.` and `vcmax_opt = 3`. These are CTSM's
+namelist defaults: `lnc_opt` is on whenever `use_cn`, and `vcmax_opt = 3` whenever
+`use_flexibleCN` (`namelist_defaults_ctsm.xml:586,596`). The port always used
+`lnc = 1/(slatop·leafcn)` (the `lnc_opt = .false.` branch), not
+`lnc = leafn/(tlai·Σnscaler)` (`PhotosynthesisMod.F90:1547-1597`, PHS `3160-3206`).
+Under Atkin2015 the leaf-MR base rate is `lmr_intercept + 0.2061·lnc − 0.0402·(t10−tfrz)`.
+With `lnc` too low, Julia's leaf MR was too low, so `availc`, the allocation fluxes and the
+root growth-respiration terms in `rr` (`CNVegCarbonFluxType.F90:5015-5026`) were all too high.
+
+**Fix.** `PhotosynthesisData` gains `lnc_opt` and `vcmax_opt`. Both Pass-2 kernels (non-PHS and
+PHS) implement `lnc_opt` and `vcmax_opt ∈ {0, 3, 4}` (`i_vcad/s_vcad`, `i_flnr/s_flnr`). The PHS
+path keeps `min(lnc, 10)` (l.3206); the non-PHS path has no clip, as in Fortran.
+**The defaults stay `.false.` / 0** (the `clm_varctl.F90` module defaults), so the default path
+is byte-identical. CTSM turns these on by default under CN; a separate audit will flip the
+CN defaults to the CTSM namelist defaults in one change. `fortran_parity_common.jl`
+sets `lnc_opt = true, vcmax_opt = 3` for every `use_cn` Bow harness, matching the Bow `lnd_in`.
+Note: Fortran LUNA reads `lnca` at end of day (`LunaMod.F90:361-387`). That path now sees the
+Fortran value too, which bears on the open LUNA `vcmx25_z` residual (backlog C1a).
+
+### Root cause 2: the reference clock is GREGORIAN
+`bow_ref_ch4o2/nuopc.runconfig` has `calendar = GREGORIAN`, so Fortran's
+`get_average_days_per_year()` is 365.2425 in every decomposition rate constant
+(`SoilBiogeochemDecompCascadeBGCMod.F90:606-624`). The Julia default is NO_LEAP (365.0).
+The ratio 365.2425/365 − 1 = **6.64e-4** is exactly the "constant" HR floor, in every layer and
+in both `SOMHR` and `LITHR`. The port already supports the calendar (`CLM.CLM_CALENDAR[]`, the same
+finding as the MIMICS `K_CWD` note in `MULTISITE_PARITY_MATRIX.md`). `run_source` now sets
+GREGORIAN and restores it on exit. The window (2003) has no leap day.
+
+### Before / after (`fortran_parity_ch4_source.jl`, CN locked, CH4 free)
+| field | before (§17) | after, 24 h | after, 168 h |
+|---|---|---|---|
+| `lnca` (both patches) | −13% | **0 (exact)** | — |
+| `gpp_pepv` / `availc`, tree (pft 1) | −6e-4 / +1e-3…+1 | **≤ 4e-11 / ≤ 2e-8** | — |
+| `HR_VR` | 6.6e-4 | **1.9e-6** | **1.4e-5** |
+| `RR` | 1.75e-3 (24 h) / 3.6e-3 | **6.9e-5** | **5.5e-4** |
+| `O2_DECOMP_SAT` | 1.3e-3 (12 h) / 2.99e-3 | **6.5e-5** | **5.1e-4** |
+| `CH4_PROD_SAT` | 6.6e-4 | **1.9e-6** | **1.5e-5** |
+| `CH4_OXID_SAT` | 1.1e-2 (168 h) | **3.9e-5** | **2.8e-4** |
+| `CONC_CH4_SAT` / `TOTCOLCH4` | 5.2e-4 / 3.4e-4 (168 h) | 2.6e-6 / 1.0e-6 | 5.1e-6 / 2.2e-6 |
+| `CH4_SURF_FLUX_TOT` | 8.6e-3 (168 h) | 1.1e-5 | 1.4e-4 |
+| `CONC_O2_SAT` | 6.1e-2 (168 h) | 3.2e-4 | 1.0e-1 |
+
+### What remains
+* **Grass (pft 12) day-time GPP: 1e-5 to 1.4e-4**, while the tree patch is exact to 4e-11.
+  It appears on some afternoon steps (n4722–4732) and is about 1e-12 on others (n4741–4744).
+  It is the whole remaining `RR` residual. Not localized yet. Candidates are the grass
+  PHS solve (the old "grass GPP/ci axis", `PARITY_STATUS.md`).
+* `CONC_O2_SAT` over 168 h is still set by the layer-1 aerenchyma sensitivity of §17. The
+  Julia-vs-Julia twin divergence was 4.9%. `O2_AERE_SAT` flips on and off (rel.err 3.4 on an
+  8e-6 scale), and the 168-h worst moves between 6% and 10% as the port residual shrinks.
+  Over 24 h it is 3.2e-4.
+
+### Test
+`test_fortran_parity_ch4_source.jl` (12 h) skips cleanly when the `CESM_INPUTDATA` ndep or
+TWS-inversion file is absent. The gates are tightened to about 3–5× the 24-h worsts: `hr_vr`
+< 1e-5, `RR`/`O2_DEMAND_RR`/`O2_DECOMP_*` < 3e-4, `CH4_PROD_SAT` < 1e-5, `CONC_CH4_SAT` < 1e-5,
+`TOTCOLCH4` < 5e-6, `FROOT_MR` < 1e-8, `LIVECROOT_MR` < 1e-10, `CONC_O2_SAT` < 1.5e-3.
+`test_photosynthesis_lnc_opt.jl` checks `lnc_opt`, `vcmax_opt` 0/3/4, the Atkin leaf-MR response
+and the PHS `lnc` clip on both Pass-2 paths. Expected values are recomputed from the Fortran
+expressions.

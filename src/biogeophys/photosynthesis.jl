@@ -260,6 +260,11 @@ Base.@kwdef mutable struct PhotosynthesisData{FT<:Real,
     leafresp_method::Int = LEAFRESP_MTD_RYAN1991
     stomatalcond_mtd::Int = STOMATALCOND_MTD_MEDLYN2011
     modifyphoto_and_lmr_forcrop::Bool = false
+    # clm_varctl leaf-N / vcmax25top options (PhotosynthesisMod.F90:1547-1630,
+    # 3160-3239). Defaults are the clm_varctl.F90 module defaults (.false., 0); CTSM's
+    # namelist sets lnc_opt=.true. when use_cn and vcmax_opt=3 when use_flexibleCN.
+    lnc_opt::Bool = false
+    vcmax_opt::Int = 0
 end
 
 PhotosynthesisData{FT}(; kwargs...) where {FT<:Real} =
@@ -1547,8 +1552,102 @@ end
 Base.@kwdef struct _PsnP2Pft{Vp}
     slatop_pft::Vp; leafcn_pft::Vp; flnr_pft::Vp; fnitr_pft::Vp
     lmr_intercept_atkin::Vp; crop_pft::Vp
+    # vcmax_opt=3/4 coefficients (only indexed when vcmax_opt ∈ (3, 4))
+    i_vcad::Vp; s_vcad::Vp; i_flnr::Vp; s_flnr::Vp
 end
 Adapt.@adapt_structure _PsnP2Pft
+
+# Leaf-N option bundle shared by the non-PHS and PHS Pass 2 (one kernel argument, so
+# the Metal buffer budget is unchanged). `lnc_opt`/`vcmax_opt` are the clm_varctl
+# switches (PhotosynthesisMod.F90:1547-1630 / 3160-3239). leafn/tlai get their own
+# type parameters: they are CN/canopy state and need not share the eltype of t_veg
+# (a Dual on the AD path). When lnc_opt is false they are never read.
+struct _PsnLnc{VL,VT}
+    leafn::VL; tlai::VT
+    lnc_opt::Bool; vcmax_opt::Int
+end
+Adapt.@adapt_structure _PsnLnc
+
+# Leaf N at the canopy top (gN/m2 leaf). PhotosynthesisMod.F90:1547-1597 (and
+# 3160-3204 in PhotosynthesisHydraulicStress):
+#   lnc_opt = .false. : 1 / (slatop * leafcn)
+#   lnc_opt = .true.  : leafn / (tlai * sum_nscaler), sum_nscaler = Σ_iv nscaler over
+#                       nrad layers (nscaler = 1 for nlevcan = 1, else exp(-kn*laican)).
+# CTSM's namelist default is lnc_opt = .true. whenever use_cn (namelist_defaults_ctsm.xml).
+# NOTE (nlevcan > 1 only): Fortran's kn(p) is the persistent patch array from the
+# previous call; here kn is per-call scratch (zero), so nscaler = 1. Irrelevant for the
+# default nlevcan = 1 (sun/shade big leaf).
+@inline function _psn_lnc_top(p, ivt_p, lncb, slatop_pft, leafcn_pft, tlai_z, nrad, kn,
+                              nlevcan::Int, ::Type{T}) where {T}
+    lncb.lnc_opt || return one(T) / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
+    sum_nscaler = zero(T)
+    laican = zero(T)
+    for iv in 1:nrad[p]
+        if iv == 1
+            laican = T(0.5) * tlai_z[p, iv]
+        else
+            laican = laican + T(0.5) * (tlai_z[p, iv-1] + tlai_z[p, iv])
+        end
+        nscaler = nlevcan == 1 ? one(T) : exp(-kn[p] * laican)
+        sum_nscaler = sum_nscaler + nscaler
+    end
+    tl = lncb.tlai[p]
+    if tl > zero(T) && sum_nscaler > zero(T)
+        return lncb.leafn[p] / (tl * sum_nscaler)
+    else
+        return zero(T)
+    end
+end
+
+# vcmax25 at the canopy top before the daylength / calibration factors that differ
+# between call sites. PhotosynthesisMod.F90:1608-1630 (3217-3239 PHS):
+#   vcmax_opt = 0 : lnc * flnr * fnr * act25 * dayl_factor (× fnitr when .not. use_cn)
+#   vcmax_opt = 3 : (i_vcad + s_vcad * lnc) * dayl_factor
+#   vcmax_opt = 4 : non-tree (itype >= nptreemax = 9): lnc*(i_flnr + s_flnr*lnc)*fnr*act25*dayl
+#                   tree:                              lnc*(i_flnr*exp(s_flnr*lnc))*fnr*act25*dayl
+# ivt_p is the 1-based Julia PFT index (= Fortran itype + 1).
+@inline function _psn_vcmax25top(ivt_p, vcmax_opt::Int, lnc_p, dayl, use_cn::Bool, flnr_pft,
+                                 fnitr_pft, i_vcad, s_vcad, i_flnr, s_flnr, fnr, act25)
+    if vcmax_opt == 3
+        return (i_vcad[ivt_p] + s_vcad[ivt_p] * lnc_p) * dayl
+    elseif vcmax_opt == 4
+        if ivt_p - 1 >= 9
+            return lnc_p * (i_flnr[ivt_p] + s_flnr[ivt_p] * lnc_p) * fnr * act25 * dayl
+        else
+            return lnc_p * (i_flnr[ivt_p] * exp(s_flnr[ivt_p] * lnc_p)) * fnr * act25 * dayl
+        end
+    else
+        v = lnc_p * flnr_pft[ivt_p] * fnr * act25 * dayl
+        return use_cn ? v : v * fnitr_pft[ivt_p]
+    end
+end
+
+# Host-side construction of the leaf-N bundle. `ref` supplies a patch-shaped,
+# backend-matched placeholder for leafn/tlai when lnc_opt is off (never read).
+function _psn_lnc_bundle(ref::AbstractVector, lnc_opt::Bool, vcmax_opt::Int, leafn, tlai)
+    vcmax_opt in (0, 3, 4) || error("photosynthesis: vcmax_opt=$(vcmax_opt) not supported " *
+        "(PhotosynthesisMod.F90 implements 0, 3, 4)")
+    if lnc_opt
+        (leafn === nothing || tlai === nothing) && error("photosynthesis: lnc_opt=true " *
+            "requires leafn and tlai (PhotosynthesisMod.F90:1591)")
+        return _PsnLnc(leafn, tlai, true, vcmax_opt)
+    end
+    return _PsnLnc(ref, ref, false, vcmax_opt)
+end
+
+# Per-PFT vcmax_opt coefficient vectors on the same container as `ref` (empty-safe:
+# only indexed when vcmax_opt ∈ (3, 4)).
+function _psn_vcmax_coefs(ref::AbstractVector, vcmax_opt::Int)
+    _v(x) = (vcmax_opt == 0 && isempty(x)) ? zero(ref) : _psn_pft_like(ref, x)
+    if vcmax_opt == 3
+        (isempty(pftcon.i_vcad) || isempty(pftcon.s_vcad)) &&
+            error("photosynthesis: vcmax_opt=3 requires pftcon.i_vcad/s_vcad (paramfile)")
+    elseif vcmax_opt == 4
+        (isempty(pftcon.i_flnr) || isempty(pftcon.s_flnr)) &&
+            error("photosynthesis: vcmax_opt=4 requires pftcon.i_flnr/s_flnr (paramfile)")
+    end
+    return (_v(pftcon.i_vcad), _v(pftcon.s_vcad), _v(pftcon.i_flnr), _v(pftcon.s_flnr))
+end
 
 @kernel function _psn_pass2_kernel!(ps, kn, jmax_z_local, @Const(mask_patch),
         @Const(ivt), pft::_PsnP2Pft,
@@ -1557,13 +1656,13 @@ Adapt.@adapt_structure _PsnP2Pft
         @Const(vcmaxcint_sun), @Const(nrad), prm, vcmax25_scale, jmax25top_sf_val,
         leaf_mr_vcm, use_cn::Bool, use_luna::Bool,
         light_inhibit::Bool, leafresp_method::Int, nlevcan::Int,
-        is_sun::Bool, leafresp_ryan::Int)
+        is_sun::Bool, leafresp_ryan::Int, lncb)
     p = @index(Global)
     _psn_pass2_body!(p, ps, kn, jmax_z_local, mask_patch, ivt, pft.slatop_pft, pft.leafcn_pft,
         pft.flnr_pft, pft.fnitr_pft, pft.lmr_intercept_atkin, pft.crop_pft, dayl_factor, t10, t_veg,
         btran, tlai_z, par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, vcmax25_scale,
         jmax25top_sf_val, leaf_mr_vcm, use_cn, use_luna, light_inhibit, leafresp_method,
-        nlevcan, is_sun, leafresp_ryan)
+        nlevcan, is_sun, leafresp_ryan, lncb, pft.i_vcad, pft.s_vcad, pft.i_flnr, pft.s_flnr)
 end
 
 # Shared per-patch body for Pass 2 (KA kernel + AD host loop) — see _photosynth_ci_body!.
@@ -1571,7 +1670,8 @@ end
         leafcn_pft, flnr_pft, fnitr_pft, lmr_intercept_atkin, crop_pft, dayl_factor, t10,
         t_veg, btran, tlai_z, par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, vcmax25_scale,
         jmax25top_sf_val, leaf_mr_vcm, use_cn::Bool, use_luna::Bool, light_inhibit::Bool,
-        leafresp_method::Int, nlevcan::Int, is_sun::Bool, leafresp_ryan::Int)
+        leafresp_method::Int, nlevcan::Int, is_sun::Bool, leafresp_ryan::Int,
+        lncb, i_vcad, s_vcad, i_flnr, s_flnr)
     @inbounds if mask_patch[p]
         T = eltype(t_veg)
         ivt_p = ivt[p]
@@ -1585,12 +1685,14 @@ end
         # Short-circuits before indexing, so crop_pft may be empty when use_luna=false.
         luna_p = use_luna && c3flag_p && !(crop_pft[ivt_p] > T(0.5))
 
-        lnc_p = one(T) / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
+        # lnc_opt / vcmax_opt: PhotosynthesisMod.F90:1547-1630 (see _psn_lnc_top).
+        # Unlike the PHS path (l.3206) the non-PHS Photosynthesis has no min(lnc, 10).
+        lnc_p = _psn_lnc_top(p, ivt_p, lncb, slatop_pft, leafcn_pft, tlai_z, nrad, kn,
+                             nlevcan, T)
         ps.lnca_patch[p] = lnc_p
-        vcmax25top = lnc_p * flnr_pft[ivt_p] * prm.fnr * prm.act25 * dayl_factor[p]
-        if !use_cn
-            vcmax25top = vcmax25top * fnitr_pft[ivt_p]
-        end
+        vcmax25top = _psn_vcmax25top(ivt_p, lncb.vcmax_opt, lnc_p, dayl_factor[p], use_cn,
+                                     flnr_pft, fnitr_pft, i_vcad, s_vcad, i_flnr, s_flnr,
+                                     prm.fnr, prm.act25)
         if !isnan(vcmax25_scale)
             vcmax25top = vcmax25top * vcmax25_scale
         end
@@ -1708,7 +1810,8 @@ end
 function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
         leafcn_pft, flnr_pft, fnitr_pft, crop_pft, dayl_factor, t10, t_veg, btran, tlai_z,
         par_z_in, vcmaxcint, vcmaxcint_sun, nrad, use_cn::Bool, use_luna::Bool,
-        leaf_mr_vcm, nlevcan::Int, is_sun::Bool, overrides, bounds_patch)
+        leaf_mr_vcm, nlevcan::Int, is_sun::Bool, overrides, bounds_patch;
+        lnc_opt::Bool=false, vcmax_opt::Int=0, leafn=nothing, tlai=nothing)
     T = eltype(t_veg)
     lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
     prm = (fnr = T(params_inst.fnr), act25 = T(params_inst.act25),
@@ -1743,6 +1846,9 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
     # host path runs fine with the default), so the substitute is never read either;
     # it exists purely so the kernel argument is bitstype on a device.
     vcmaxcint_sun = isempty(vcmaxcint_sun) ? zero(vcmaxcint) : vcmaxcint_sun
+    # lnc_opt / vcmax_opt (PhotosynthesisMod.F90:1547-1630).
+    lncb = _psn_lnc_bundle(dayl_factor, lnc_opt, vcmax_opt, leafn, tlai)
+    (i_vcad, s_vcad, i_flnr, s_flnr) = _psn_vcmax_coefs(slatop_pft, vcmax_opt)
     dv = _psn_dv(ps)
     if _PSN_CI_AD_HOSTLOOP[]
         @inbounds for p in 1:length(bounds_patch)
@@ -1751,18 +1857,20 @@ function psn_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, slatop_pft,
                 t10, t_veg, btran, tlai_z,
                 par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, T(overrides.vcmax25_scale),
                 T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, use_luna, ps.light_inhibit,
-                ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991)
+                ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991,
+                lncb, i_vcad, s_vcad, i_flnr, s_flnr)
         end
     else
         be = _kernel_backend(t_veg)
         pft_b = _PsnP2Pft(; slatop_pft = slatop_pft, leafcn_pft = leafcn_pft,
                             flnr_pft = flnr_pft, fnitr_pft = fnitr_pft,
-                            lmr_intercept_atkin = lmr_intercept_atkin, crop_pft = crop_pft)
+                            lmr_intercept_atkin = lmr_intercept_atkin, crop_pft = crop_pft,
+                            i_vcad = i_vcad, s_vcad = s_vcad, i_flnr = i_flnr, s_flnr = s_flnr)
         _psn_pass2_kernel!(be)(dv, kn, jmax_z_local, mask_patch, ivt, pft_b, dayl_factor,
             t10, t_veg, btran, tlai_z,
             par_z_in, vcmaxcint, vcmaxcint_sun, nrad, prm, T(overrides.vcmax25_scale),
             T(jmax25top_sf_val), T(leaf_mr_vcm), use_cn, use_luna, ps.light_inhibit,
-            ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991;
+            ps.leafresp_method, nlevcan, is_sun, LEAFRESP_MTD_RYAN1991, lncb;
             ndrange = length(bounds_patch))
         KA.synchronize(be)
     end
@@ -2022,6 +2130,8 @@ end
 Base.@kwdef struct _Psn2Pft{Vp}
     c3psn_pft::Vp; mbbopt_pft::Vp; slatop_pft::Vp; leafcn_pft::Vp
     flnr_pft::Vp; fnitr_pft::Vp; lmr_intercept_atkin::Vp; crop_pft::Vp
+    # vcmax_opt=3/4 coefficients (only indexed when vcmax_opt ∈ (3, 4))
+    i_vcad::Vp; s_vcad::Vp; i_flnr::Vp; s_flnr::Vp
 end
 Base.@kwdef struct _Psn2In{V,M}     # read-only forcing vectors (V) + matrices (M)
     forc_pbot::V; oair::V; dayl_factor::V; t10::V; t_veg::V
@@ -2043,13 +2153,13 @@ end
 # PHS Pass 2: kinetics + N-profile + vcmax/jmax/tpu/kp/lmr, BOTH phases, writing
 # the 3D ps.*_phs fields ([p,SUN,iv] & [p,SHA,iv]) in one iv pass. params_inst
 # scalars bundled in `prm`; overrides / leaf_mr_vcm resolved on the host.
-@kernel function _psn_phs_pass2_kernel!(ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+@kernel function _psn_phs_pass2_kernel!(ps, kn, jmax_z_local, prm, idx, pft, inp, sc2, lncb)
     p = @index(Global)
-    _psn_phs_pass2_body!(p, ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+    _psn_phs_pass2_body!(p, ps, kn, jmax_z_local, prm, idx, pft, inp, sc2, lncb)
 end
 
 # Shared per-patch body for PHS Pass 2 (KA kernel + AD host loop) — see _photosynth_ci_body!.
-@inline function _psn_phs_pass2_body!(p, ps, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+@inline function _psn_phs_pass2_body!(p, ps, kn, jmax_z_local, prm, idx, pft, inp, sc2, lncb)
     # alias grouped fields to locals → physics body below is byte-identical
     mask_patch = idx.mask_patch; ivt = idx.ivt; nrad = idx.nrad
     c3psn_pft = pft.c3psn_pft; mbbopt_pft = pft.mbbopt_pft; slatop_pft = pft.slatop_pft
@@ -2108,15 +2218,16 @@ end
         ps.ko_patch[p] = ko25 * ft_photo(t_veg[p], prm.koha)
         ps.cp_patch[p] = cp25 * ft_photo(t_veg[p], prm.cpha)
 
-        # Nitrogen profile
-        lnc_p = one(T) / (slatop_pft[ivt_p] * leafcn_pft[ivt_p])
+        # Nitrogen profile: lnc_opt / vcmax_opt, PhotosynthesisMod.F90:3160-3239
+        # (see _psn_lnc_top / _psn_vcmax25top), then lnc = min(lnc, 10) (l.3206).
+        lnc_p = _psn_lnc_top(p, ivt_p, lncb, slatop_pft, leafcn_pft, inp.tlai_z, nrad, kn,
+                             nlevcan, T)
         lnc_p = smooth_min(lnc_p, T(10.0))
         ps.lnca_patch[p] = lnc_p
 
-        vcmax25top = lnc_p * flnr_pft[ivt_p] * prm.fnr * prm.act25 * dayl_factor[p]
-        if !use_cn
-            vcmax25top = vcmax25top * fnitr_pft[ivt_p]
-        end
+        vcmax25top = _psn_vcmax25top(ivt_p, lncb.vcmax_opt, lnc_p, dayl_factor[p], use_cn,
+                                     flnr_pft, fnitr_pft, pft.i_vcad, pft.s_vcad,
+                                     pft.i_flnr, pft.s_flnr, prm.fnr, prm.act25)
         if !isnan(vcmax25_scale)
             vcmax25top = vcmax25top * vcmax25_scale
         end
@@ -2289,7 +2400,8 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         crop_pft, dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
         vcmaxcint_sha, nrad, use_cn::Bool, use_c13::Bool, leaf_mr_vcm, nlevcan::Int,
         stomatalcond_mtd::Int, light_inhibit::Bool, leafresp_method::Int,
-        overrides, bounds_patch; use_luna::Bool=false)
+        overrides, bounds_patch; use_luna::Bool=false,
+        lnc_opt::Bool=false, vcmax_opt::Int=0, leafn=nothing, tlai=nothing)
     T = eltype(t_veg)
     lmrc = fth25_photo(params_inst.lmrhd, params_inst.lmrse)
     prm = (kc25_coef = T(params_inst.kc25_coef), ko25_coef = T(params_inst.ko25_coef),
@@ -2310,10 +2422,13 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
     # struct (Metal 31-arg-buffer reduction); same refs, so behaviour unchanged.
     idx = _Psn2Idx(; mask_patch = mask_patch, ivt = ivt, nrad = nrad)
     lmr_intercept_atkin = _psn_pft_like(slatop_pft, params_inst.lmr_intercept_atkin)
+    (i_vcad, s_vcad, i_flnr, s_flnr) = _psn_vcmax_coefs(slatop_pft, vcmax_opt)
     pft = _Psn2Pft(; c3psn_pft = c3psn_pft, mbbopt_pft = mbbopt_pft,
         slatop_pft = slatop_pft, leafcn_pft = leafcn_pft, flnr_pft = flnr_pft,
         fnitr_pft = fnitr_pft, lmr_intercept_atkin = lmr_intercept_atkin,
-        crop_pft = crop_pft)
+        crop_pft = crop_pft, i_vcad = i_vcad, s_vcad = s_vcad,
+        i_flnr = i_flnr, s_flnr = s_flnr)
+    lncb = _psn_lnc_bundle(dayl_factor, lnc_opt, vcmax_opt, leafn, tlai)
     inp = _Psn2In(; forc_pbot = forc_pbot, oair = oair, dayl_factor = dayl_factor,
         t10 = t10, t_veg = t_veg, vcmaxcint_sun = vcmaxcint_sun,
         vcmaxcint_sha = vcmaxcint_sha, tlai_z = tlai_z,
@@ -2324,11 +2439,11 @@ function psn_phs_pass2_update!(ps, kn, jmax_z_local, mask_patch, ivt, c3psn_pft,
         stomatalcond_mtd, STOMATALCOND_MTD_BB1987, LEAFRESP_MTD_RYAN1991, SUN, SHA)
     if _PSN_CI_AD_HOSTLOOP[]
         @inbounds for p in 1:length(bounds_patch)
-            _psn_phs_pass2_body!(p, dv, kn, jmax_z_local, prm, idx, pft, inp, sc2)
+            _psn_phs_pass2_body!(p, dv, kn, jmax_z_local, prm, idx, pft, inp, sc2, lncb)
         end
     else
         be = _kernel_backend(t_veg)
-        _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, prm, idx, pft, inp, sc2;
+        _psn_phs_pass2_kernel!(be)(dv, kn, jmax_z_local, prm, idx, pft, inp, sc2, lncb;
             ndrange = length(bounds_patch))
         KA.synchronize(be)
     end
@@ -2482,7 +2597,8 @@ function photosynthesis!(ps,
         leafcn_pft, flnr_pft, fnitr_pft, crop_pft, dayl_factor, t10, t_veg, btran, tlai_z,
         par_z_in, vcmaxcint, (phase == "sun" ? vcmaxcint : vcmaxcint_sun), nrad,
         use_cn, use_luna, leaf_mr_vcm, nlevcan,
-        phase == "sun", overrides, bounds_patch)
+        phase == "sun", overrides, bounds_patch;
+        lnc_opt = ps.lnc_opt, vcmax_opt = ps.vcmax_opt, leafn = leafn, tlai = tlai)
 
     # ---- Pass 3: Leaf-level photosynthesis and stomatal conductance ----
     # Kernelized: one thread per patch, with the per-canopy-layer iv loop running
@@ -5603,7 +5719,8 @@ function photosynthesis_hydrstress!(ps,
         crop_pft, dayl_factor, t10, t_veg, tlai_z, par_z_sun_in, par_z_sha_in, vcmaxcint_sun,
         vcmaxcint_sha, nrad, use_cn, use_c13, leaf_mr_vcm, nlevcan,
         stomatalcond_mtd, light_inhibit, leafresp_method, overrides, bounds_patch;
-        use_luna=use_luna)
+        use_luna=use_luna, lnc_opt=ps.lnc_opt, vcmax_opt=ps.vcmax_opt,
+        leafn=leafn, tlai=tlai)
 
     # ---- Pass 3: Leaf-level photosynthesis (kernelized) ----
     # One thread per patch; the entire per-patch PHS Newton solve (hybrid_PHS →
