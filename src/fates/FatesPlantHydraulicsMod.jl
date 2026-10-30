@@ -21,8 +21,9 @@
 #     `Matrix{Union{WRFType,Nothing}}` indexed [pm+1, ft] (pm 0 -> row 1), wrapped in a
 #     Ref so InitHydroGlobals! can (re)allocate. Helper getters `wrf_plant(pm,ft)` /
 #     `wkf_plant(pm,ft)` preserve the Fortran call shape and apply the +1 offset.
-#   * The Fortran dense / tri-diagonal linear solves are replaced by a Thomas tri-diagonal
-#     solve (Hydraulics_Tridiagonal) whose ASSEMBLY math is identical to the Fortran. The
+#   * The 1D solver's tri-diagonal system uses a Thomas solve (Hydraulics_Tridiagonal)
+#     whose ASSEMBLY math is identical to the Fortran; the 2D solvers' DGESV is the
+#     dense partial-pivoting LU `_dgesv!`. The
 #     Newton/Picard convergence loop and the water mass-balance + error handling of the
 #     default 1D solver are preserved verbatim.
 #
@@ -31,10 +32,11 @@
 #   The FATES default `hydr_solver` is hydr_solver_1DTaylor. This module ports that path
 #   FULLY end-to-end (OrderLayersForSolve1D + ImTaylorSolve1D + GetImTaylorKAB +
 #   Hydraulics_Tridiagonal + all geometry/kmax setup + init + psi/ftc update + btran +
-#   mass balance). The two NON-DEFAULT 2D solvers (hydr_solver_2DNewton -> MatSolve2D,
-#   hydr_solver_2DPicard -> PicardSolve2D) are STUBBED: calling hydraulics_bc with those
-#   solver settings raises a clear error. GetKAndDKDPsi / SetMaxCondConnections (used only
-#   by the 2D solvers) are ported as faithful helpers for future 2D work.
+#   mass balance). The two NON-DEFAULT 2D solvers are ported too, behind the FATES
+#   parameter `fates_hydro_solver` (EDParams.hydr_solver): 2 = hydr_solver_2DPicard ->
+#   PicardSolve2D, 3 = hydr_solver_2DNewton -> MatSolve2D. They solve the whole plant +
+#   all-layer rhizosphere network at once (SetConnections! tables, SetMaxCondConnections!,
+#   GetKAndDKDPsi / GetImTaylorKAB Jacobians, dense LU `_dgesv!` for the Fortran DGESV).
 #
 # Deps: FatesConstantsMod, FatesGlobals, EDParamsMod (EDParams), EDTypesMod (ed_site_type,
 #       area), FatesPatchMod, FatesCohortMod, FatesHydraulicsMemMod, FatesHydroWTFMod,
@@ -2010,8 +2012,23 @@ function SetMaxCondConnections(csite_hydr, cohort_hydr, h_node::AbstractVector)
     # 2D-only helper that spans all layers, so size from the explicit formula.)
     num_cnxs = n_hypool_leaf + n_hypool_stem + n_hypool_troot - 1 +
                (n_hypool_aroot + nshell) * csite_hydr.nlevrhiz
-    kmax_dn = fill(fates_unset_r8, num_cnxs)
-    kmax_up = fill(fates_unset_r8, num_cnxs)
+    kmax_dn = Vector{Float64}(undef, num_cnxs)
+    kmax_up = Vector{Float64}(undef, num_cnxs)
+    SetMaxCondConnections!(csite_hydr, cohort_hydr, h_node, kmax_dn, kmax_up)
+    return kmax_dn, kmax_up
+end
+
+"""
+    SetMaxCondConnections!(csite_hydr, cohort_hydr, h_node, kmax_dn, kmax_up)
+
+In-place form of [`SetMaxCondConnections`](@ref), writing into the caller's
+connection vectors (the 2D solvers pass `csite_hydr.kmax_dn` / `kmax_up`, as the
+Fortran does).
+"""
+function SetMaxCondConnections!(csite_hydr, cohort_hydr, h_node::AbstractVector,
+                                kmax_dn::AbstractVector, kmax_up::AbstractVector)
+    fill!(kmax_dn, fates_unset_r8)
+    fill!(kmax_up, fates_unset_r8)
 
     # Leaf -> stem (single leaf layer).
     icnx = 1
@@ -2055,7 +2072,7 @@ function SetMaxCondConnections(csite_hydr, cohort_hydr, h_node::AbstractVector)
             end
         end
     end
-    return kmax_dn, kmax_up
+    return nothing
 end
 
 """
@@ -2309,7 +2326,8 @@ the host soil grid (conductance-weighted) into `bc_out.qflx_soil2root_sisl`, and
 runs the site plant-water + total-water balance checks. Crucially it populates
 `co_hydr.ftc_ag/ftc_troot/ftc_aroot` (via `UpdatePlantPsiFTCFromTheta!`),
 `co_hydr.btran`, and `leaf_psi` (`psi_ag[1]`) — the fields the mortality and
-photosynthesis branches consume. The 2D solver branches raise (not ported).
+photosynthesis branches consume. `EDParams[].hydr_solver` selects the solver
+(`MatSolve2D` / `PicardSolve2D` for the 2D options).
 Mirrors the Fortran `hydraulics_bc`.
 """
 function Hydraulics_BC(nsites::Integer, sites::AbstractVector,
@@ -2405,15 +2423,17 @@ function Hydraulics_BC(nsites::Integer, sites::AbstractVector,
 
                     transp_flux += (qflx_tran_veg_indiv * dtime) * ccohort.n * AREA_INV
 
-                    # Advance the cohort's flow path (default 1D Taylor solver).
+                    # Advance the cohort's flow path (fates_hydro_solver: 1 = 1D Taylor,
+                    # 2 = 2D Picard, 3 = 2D Newton).
                     if solver == hydr_solver_2DNewton
-                        MatSolve2D()
-                        sapflow = 0.0; rootuptake = zeros(Float64, nlevrhiz)
-                        wb_err_plant = 0.0; dwat_plant = 0.0
+                        sapflow, rootuptake, wb_err_plant, dwat_plant =
+                            MatSolve2D(csite_hydr, ccohort, ccohort_hydr, dtime,
+                                       qflx_tran_veg_indiv, dth_layershell_col)
                     elseif solver == hydr_solver_2DPicard
-                        PicardSolve2D()
-                        sapflow = 0.0; rootuptake = zeros(Float64, nlevrhiz)
-                        wb_err_plant = 0.0; dwat_plant = 0.0
+                        sapflow, rootuptake, wb_err_plant, dwat_plant =
+                            PicardSolve2D(csite_hydr, ccohort, ccohort_hydr, dtime,
+                                          qflx_tran_veg_indiv, dth_layershell_col,
+                                          csite_hydr.num_nodes)
                     else  # hydr_solver_1DTaylor
                         ordered = copy(ordered_init)
                         OrderLayersForSolve1D(csite_hydr, ccohort, ccohort_hydr, ordered, kbg_layer)
@@ -2578,24 +2598,700 @@ function hydraulics_drive(nsites::Integer, sites::AbstractVector,
 end
 
 # ===========================================================================
-# Non-default 2D solvers (STUBBED — see module header)
+# Non-default 2D solvers: MatSolve2D (hydr_solver_2DNewton = 3) and
+# PicardSolve2D (hydr_solver_2DPicard = 2)
 # ===========================================================================
+#
+# Both cast the whole cohort network (leaf, stem, troot, then aroot + rhizosphere
+# shells for EVERY rhizosphere layer) as one system over `csite_hydr.num_nodes`
+# nodes and `csite_hydr.num_connections` connections (tables from SetConnections!),
+# and solve it with a dense LU (LAPACK DGESV in the Fortran) on every iteration.
+# Scratch lives on `csite_hydr` (residual, ajac, ipiv, th_node*, ...), as in the
+# Fortran. The switch numbering follows FatesHydraulicsMemMod.F90: 1 = 1-D Taylor,
+# 2 = 2-D Picard, 3 = 2-D Newton (the parameter file calls 3 "deprecated").
+#
+# Literal-precision notes (gfortran -O, no -fdefault-real-8): `dpsi_scap = 0.1` and
+# `dpsi_pcap = 0.1` are default-real (single) literals assigned to real(r8)
+# parameters, and Picard's water-content stopping test compares with the single
+# literal `1.e-3`; those are Float64(0.1f0) / Float64(1f-3) here. Fortran `sum` of
+# an array product is a sequential left-to-right sum (`_seqdot`), not Julia's
+# pairwise `sum`.
 
 """
-    MatSolve2D(args...)
-
-NON-DEFAULT solver (hydr_solver_2DNewton). Not ported; the default FATES solver is
-`hydr_solver_1DTaylor` (`ImTaylorSolve1D`). Calling this raises an error.
+Optional per-iteration trace of the 2D solvers (validation only; `nothing` = off).
+Called as `f(:newton, ft, dbh, nsteps, nwtn_iter, residual_amax, sum_residual, dtime, tm)`
+and `f(:picard, ft, dbh, icnv, picd_iter, dtime, tm, wb_error, max_res, max_dth, cfl_max)`,
+matching the NWT / PIC lines of the instrumented Fortran used for the parity runs.
 """
-MatSolve2D(args...; kwargs...) =
-    fates_endrun("MatSolve2D (hydr_solver_2DNewton) is not ported in CLM.jl; " *
-                 "use the default hydr_solver_1DTaylor path (ImTaylorSolve1D).")
+const _HYDRO2D_TRACE = Ref{Any}(nothing)
 
 """
-    PicardSolve2D(args...)
+    _dgesv!(a, b, ipiv) -> info
 
-NON-DEFAULT solver (hydr_solver_2DPicard). Not ported; see [`MatSolve2D`](@ref).
+Dense LU solve of `a * x = b` with partial (row) pivoting, overwriting `a` with its
+L/U factors, `ipiv` with the pivot rows and `b` with `x`. Same algorithm and `info`
+convention as LAPACK DGESV (DGETF2 right-looking elimination, IDAMAX first-maximum
+pivot, DGETRS forward/back substitution): `info = 0` on success, `info = k > 0`
+if `U[k,k]` is exactly zero (then `b` is left unsolved). A plain loop (no BLAS), so
+it is type-generic (dual numbers) and allocation-free. The Fortran links
+Accelerate's LAPACK, whose blocked factorization may round differently from this
+unblocked one at the last bit.
 """
-PicardSolve2D(args...; kwargs...) =
-    fates_endrun("PicardSolve2D (hydr_solver_2DPicard) is not ported in CLM.jl; " *
-                 "use the default hydr_solver_1DTaylor path (ImTaylorSolve1D).")
+function _dgesv!(a::AbstractMatrix, b::AbstractVector, ipiv::AbstractVector{<:Integer})
+    n = size(a, 1)
+    info = 0
+    sfmin = floatmin(Float64)
+    @inbounds for k in 1:n
+        # IDAMAX: first index of the maximum |a[i,k]|, i >= k
+        p = k
+        amax = abs(a[k, k])
+        for i in (k + 1):n
+            ai = abs(a[i, k])
+            if ai > amax
+                amax = ai
+                p = i
+            end
+        end
+        ipiv[k] = p
+        if a[p, k] != 0
+            if p != k
+                for jc in 1:n
+                    a[k, jc], a[p, jc] = a[p, jc], a[k, jc]
+                end
+            end
+            if abs(a[k, k]) >= sfmin
+                r = 1.0 / a[k, k]
+                for i in (k + 1):n
+                    a[i, k] *= r
+                end
+            else
+                for i in (k + 1):n
+                    a[i, k] /= a[k, k]
+                end
+            end
+        elseif info == 0
+            info = k
+        end
+        for jc in (k + 1):n
+            akj = a[k, jc]
+            akj == 0 && continue
+            for i in (k + 1):n
+                a[i, jc] -= a[i, k] * akj
+            end
+        end
+    end
+    info != 0 && return info
+    @inbounds begin
+        for k in 1:n                      # apply the row interchanges to b
+            p = ipiv[k]
+            p != k && ((b[k], b[p]) = (b[p], b[k]))
+        end
+        for jc in 1:n                     # L y = P b   (unit lower)
+            bj = b[jc]
+            bj == 0 && continue
+            for i in (jc + 1):n
+                b[i] -= bj * a[i, jc]
+            end
+        end
+        for jc in n:-1:1                  # U x = y
+            b[jc] == 0 && continue
+            b[jc] /= a[jc, jc]
+            bj = b[jc]
+            for i in 1:(jc - 1)
+                b[i] -= bj * a[i, jc]
+            end
+        end
+    end
+    return 0
+end
+
+"Sequential (Fortran `sum(a(:)*b(:))`) dot product."
+@inline function _seqdot(a::AbstractVector, b::AbstractVector)
+    s = 0.0
+    @inbounds for i in eachindex(a)
+        s += a[i] * b[i]
+    end
+    return s
+end
+
+"Water retention / conductance functions of node `k` of the 2D network."
+@inline function _node_wtf(csite_hydr, k::Integer, ft::Integer)
+    pm = csite_hydr.pm_node[k]
+    if pm == rhiz_p_media
+        j = csite_hydr.node_layer[k]
+        return csite_hydr.wrf_soil[j], csite_hydr.wkf_soil[j]
+    end
+    return wrf_plant(pm, ft), wkf_plant(pm, ft)
+end
+
+"""
+    _fill_2d_nodes!(csite_hydr, cohort_hydr; guard_aroot_frac)
+
+Transfer node heights, volumes and initial water contents of the cohort (leaf,
+stem, troot) and of every rhizosphere layer (aroot + shells) into the site node
+vectors. MatSolve2D guards the cohort's fraction of the layer's roots against
+`l_aroot_layer <= nearzero`; PicardSolve2D divides unguarded.
+"""
+function _fill_2d_nodes!(csite_hydr, cohort_hydr; guard_aroot_frac::Bool)
+    z_node = csite_hydr.z_node
+    v_node = csite_hydr.v_node
+    th_node_init = csite_hydr.th_node_init
+    for i in 1:(n_hypool_ag + n_hypool_troot)
+        if i <= n_hypool_ag
+            z_node[i] = cohort_hydr.z_node_ag[i]
+            v_node[i] = cohort_hydr.v_ag[i]
+            th_node_init[i] = cohort_hydr.th_ag[i]
+        else
+            z_node[i] = cohort_hydr.z_node_troot
+            v_node[i] = cohort_hydr.v_troot
+            th_node_init[i] = cohort_hydr.th_troot
+        end
+    end
+    i = n_hypool_ag + n_hypool_troot
+    for j in 1:csite_hydr.nlevrhiz
+        if !guard_aroot_frac || cohort_hydr.l_aroot_layer[j] > nearzero
+            aroot_frac_plant = cohort_hydr.l_aroot_layer[j] / csite_hydr.l_aroot_layer[j]
+        else
+            aroot_frac_plant = 0.0
+        end
+        for k in 1:(n_hypool_aroot + nshell)
+            i += 1
+            z_node[i] = -csite_hydr.zi_rhiz[j] + 0.5 * csite_hydr.dz_rhiz[j]
+            if k == 1
+                v_node[i] = cohort_hydr.v_aroot_layer[j]
+                th_node_init[i] = cohort_hydr.th_aroot[j]
+            else
+                kshell = k - 1
+                v_node[i] = csite_hydr.v_shell[j, kshell] * aroot_frac_plant
+                th_node_init[i] = csite_hydr.h2osoi_liqvol_shell[j, kshell]
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+    _finish_2d_solve!(csite_hydr, cohort, cohort_hydr, tmx, qtop, w_tot_beg,
+                      dth_layershell_site) -> (sapflow, rootuptake, wb_err_plant, dwat_plant)
+
+Shared epilogue of the two 2D solvers: flux diagnostics from the last `q_flux`,
+cohort state update from `th_node - th_node_init`, the per-layer shell change
+`dth_layershell_site` (scaled by this cohort's share of the layer's roots), and the
+plant water-balance error. `check_neg_th_ag` is PicardSolve2D's negative-leaf/stem
+water trap.
+"""
+function _finish_2d_solve!(csite_hydr, cohort, cohort_hydr, tmx::Real, qtop::Real,
+                           w_tot_beg::Real, dth_layershell_site::AbstractMatrix;
+                           check_neg_th_ag::Bool)
+    denh2o = dens_fresh_liquid_water
+    q_flux = csite_hydr.q_flux
+    th_node = csite_hydr.th_node
+    th_node_init = csite_hydr.th_node_init
+    dth_node = csite_hydr.dth_node
+    v_node = csite_hydr.v_node
+    nlevrhiz = csite_hydr.nlevrhiz
+
+    sapflow = 0.0 + q_flux[n_hypool_ag] * tmx
+    rootuptake = zeros(Float64, nlevrhiz)
+    for j in 1:nlevrhiz
+        icnx_ar = n_hypool_ag + (j - 1) * (nshell + 1) + 2   # aroot <-> 1st shell
+        rootuptake[j] = q_flux[icnx_ar] * tmx
+    end
+
+    for k in eachindex(dth_node)
+        dth_node[k] = dth_node[k] + (th_node[k] - th_node_init[k])
+    end
+
+    for i in 1:n_hypool_ag
+        cohort_hydr.th_ag[i] = cohort_hydr.th_ag[i] + dth_node[i]
+    end
+    if check_neg_th_ag && minimum(@view cohort_hydr.th_ag[1:n_hypool_ag]) < 0.0
+        fates_endrun("PicardSolve2D: negative water content th_ag=$(cohort_hydr.th_ag) " *
+                     "thmin=$(get_thmin(wrf_plant(csite_hydr.pm_node[1], cohort.pft)))")
+    end
+    cohort_hydr.th_troot = cohort_hydr.th_troot + dth_node[n_hypool_ag + 1]
+
+    nplant = n_hypool_ag + n_hypool_troot
+    dwat_plant = _seqdot(@view(dth_node[1:nplant]), @view(v_node[1:nplant])) * denh2o
+
+    inode = nplant
+    for j in 1:nlevrhiz
+        for k in 1:(1 + nshell)
+            inode += 1
+            if k == 1
+                cohort_hydr.th_aroot[j] = cohort_hydr.th_aroot[j] + dth_node[inode]
+                dwat_plant = dwat_plant + (dth_node[inode] * v_node[inode]) * denh2o
+            else
+                ishell = k - 1
+                dth_layershell_site[j, ishell] = dth_layershell_site[j, ishell] +
+                    dth_node[inode] * cohort_hydr.l_aroot_layer[j] * cohort.n /
+                    csite_hydr.l_aroot_layer[j]
+            end
+        end
+    end
+
+    w_tot_end = _seqdot(th_node, v_node) * denh2o
+    wb_err_plant = (qtop * tmx) - (w_tot_beg - w_tot_end)
+    return sapflow, rootuptake, wb_err_plant, dwat_plant
+end
+
+"""
+    MatSolve2D(csite_hydr, cohort, cohort_hydr, tmx, qtop, dth_layershell_site)
+        -> (sapflow, rootuptake, wb_err_plant, dwat_plant)
+
+`hydr_solver_2DNewton` (= 3): Newton iteration on matric potential over the whole
+plant + all-layer rhizosphere network. Each iteration assembles the mass-balance
+residual (storage change since the substep start minus net connection fluxes, plus
+`qtop` on the leaf) and its Jacobian (storage self-term `-rho V / (dpsi/dth dt)`
+plus the `GetKAndDKDPsi` flux derivatives), solves `ajac * dpsi = residual` densely
+(`_dgesv!`, DGESV in the Fortran), and updates psi with a smooth cap on steps
+larger than 0.1 MPa. A round fails on a NaN residual or after 100 iterations, and
+is retried from the substep start with half the substep; more than 10 failed
+rounds is fatal, as is a singular factorization. Converged when both the signed
+sum and the max |residual| are < 1e-8 kg/s (1e-7 on the last allowed iteration).
+Mirrors the Fortran `MatSolve2D`.
+"""
+function MatSolve2D(csite_hydr, cohort, cohort_hydr, tmx::Real, qtop::Real,
+                    dth_layershell_site::AbstractMatrix)
+    max_allowed_residual = 1.0e-8
+    max_newton_rounds = 10
+    max_newton_iter = 100
+    icnv_fail_round = 1
+    icnv_pass_round = 2
+    dtime_rf = 0.5
+    rlfx_soil_init = 1.0
+    rlfx_plnt_init = 1.0
+    dpsi_scap = Float64(0.1f0)     # real(r8), parameter :: dpsi_scap = 0.1 (single literal)
+    dpsi_pcap = Float64(0.1f0)
+    rlfx_plnt_shrink = 1.0
+    rlfx_soil_shrink = 1.0
+    reset_on_fail = false
+    allow_lenient_lastiter = true
+
+    denh2o = dens_fresh_liquid_water
+    ft = cohort.pft
+    nn = csite_hydr.num_nodes
+    conn_up = csite_hydr.conn_up; conn_dn = csite_hydr.conn_dn
+    kmax_up = csite_hydr.kmax_up; kmax_dn = csite_hydr.kmax_dn
+    q_flux = csite_hydr.q_flux; residual = csite_hydr.residual
+    ajac = csite_hydr.ajac; ipiv = csite_hydr.ipiv
+    th_node = csite_hydr.th_node; th_node_prev = csite_hydr.th_node_prev
+    th_node_init = csite_hydr.th_node_init
+    psi_node = csite_hydr.psi_node; pm_node = csite_hydr.pm_node
+    ftc_node = csite_hydr.ftc_node; z_node = csite_hydr.z_node
+    v_node = csite_hydr.v_node; dth_node = csite_hydr.dth_node
+    h_node = csite_hydr.h_node; dftc_dpsi_node = csite_hydr.dftc_dpsi_node
+
+    FlushSiteScratch!(csite_hydr, hydr_solver_2DNewton)
+
+    cohort_hydr.iterh1 = 0
+    cohort_hydr.iterh2 = 0
+    fill!(dth_node, 0.0)
+
+    _fill_2d_nodes!(csite_hydr, cohort_hydr; guard_aroot_frac = true)
+
+    w_tot_beg = _seqdot(th_node_init, v_node) * denh2o
+
+    tm = 0.0
+    nsteps = 0
+    th_node_prev .= th_node_init
+    th_node .= th_node_init
+    dtime = Float64(tmx)
+    rlfx_plnt0 = rlfx_plnt_init
+    rlfx_soil0 = rlfx_soil_init
+    rlfx_plnt = rlfx_plnt0
+    rlfx_soil = rlfx_soil0
+
+    while tm < tmx
+        dtime = min(dtime, tmx - tm)
+        tm = tm + dtime
+
+        if nsteps > max_newton_rounds
+            fates_endrun("Newton hydraulics solve could not converge on a solution. " *
+                         "Perhaps try increasing iteration cap, and decreasing relaxation " *
+                         "factors. pft: $ft dbh: $(cohort.dbh)")
+        end
+
+        round_failed = false
+        nwtn_iter = 0
+        while true
+            nwtn_iter += 1
+
+            fill!(ajac, 0.0)
+            fill!(residual, 0.0)
+
+            for k in 1:nn
+                residual[k] = residual[k] + denh2o * v_node[k] * (th_node[k] - th_node_prev[k]) / dtime
+                wrf, wkf = _node_wtf(csite_hydr, k, ft)
+                psi_node[k] = psi_from_th(wrf, th_node[k])
+                h_node[k] = mpa_per_pa * denh2o * grav_earth * z_node[k] + psi_node[k]
+                ftc_node[k] = ftc_from_psi(wkf, psi_node[k])
+                dftc_dpsi_node[k] = dftcdpsi_from_psi(wkf, psi_node[k])
+                ajac[k, k] = -denh2o * v_node[k] / (dpsidth_from_th(wrf, th_node[k]) * dtime)
+            end
+
+            SetMaxCondConnections!(csite_hydr, cohort_hydr, h_node, kmax_dn, kmax_up)
+
+            for icnx in 1:csite_hydr.num_connections
+                id_dn = conn_dn[icnx]
+                id_up = conn_up[icnx]
+                dk_dpsi_dn, dk_dpsi_up, k_eff = GetKAndDKDPsi(kmax_dn[icnx], kmax_up[icnx],
+                    h_node[id_dn], h_node[id_up], ftc_node[id_dn], ftc_node[id_up],
+                    dftc_dpsi_node[id_dn], dftc_dpsi_node[id_up])
+
+                q_flux[icnx] = k_eff * (h_node[id_up] - h_node[id_dn])
+
+                residual[id_dn] = residual[id_dn] - q_flux[icnx]
+                residual[id_up] = residual[id_up] + q_flux[icnx]
+
+                dqflx_dpsi_dn = -k_eff + (h_node[id_up] - h_node[id_dn]) * dk_dpsi_dn
+                dqflx_dpsi_up =  k_eff + (h_node[id_up] - h_node[id_dn]) * dk_dpsi_up
+
+                ajac[id_dn, id_dn] = ajac[id_dn, id_dn] + dqflx_dpsi_dn
+                ajac[id_up, id_dn] = ajac[id_up, id_dn] - dqflx_dpsi_dn
+                ajac[id_dn, id_up] = ajac[id_dn, id_up] + dqflx_dpsi_up
+                ajac[id_up, id_up] = ajac[id_up, id_up] - dqflx_dpsi_up
+            end
+
+            residual[1] = residual[1] + qtop
+
+            icnv = icnv_pass_round
+            residual_amax = 0.0
+            for k in 1:nn
+                rsdx = abs(residual[k])
+                if isnan(rsdx)
+                    icnv = icnv_fail_round
+                    break
+                end
+                if rsdx > residual_amax
+                    residual_amax = rsdx
+                end
+            end
+            _HYDRO2D_TRACE[] === nothing ||
+                _HYDRO2D_TRACE[](:newton, ft, cohort.dbh, nsteps, nwtn_iter, residual_amax,
+                                 _seqsum(residual), dtime, tm)
+            nwtn_iter > max_newton_iter && (icnv = icnv_fail_round)
+
+            if icnv == icnv_fail_round
+                # Retry the current substep (reset_on_fail = .false.) with half dtime.
+                if reset_on_fail
+                    tm = 0.0
+                    th_node .= th_node_init
+                    th_node_prev .= th_node_init
+                    cohort_hydr.iterh1 = 0
+                else
+                    tm = tm - dtime
+                    th_node .= th_node_prev
+                end
+                nsteps += 1
+                dtime = dtime * dtime_rf
+                rlfx_plnt0 = rlfx_plnt_init * rlfx_plnt_shrink^Float64(nsteps)
+                rlfx_soil0 = rlfx_soil_init * rlfx_soil_shrink^Float64(nsteps)
+                rlfx_plnt = rlfx_plnt0
+                rlfx_soil = rlfx_soil0
+                nwtn_iter = 0
+                cohort_hydr.iterh1 += 1
+                round_failed = true
+                break
+            end
+
+            if allow_lenient_lastiter && nwtn_iter == max_newton_iter &&
+               residual_amax < 10 * max_allowed_residual
+                break
+            end
+
+            # NB: the Fortran tests the SIGNED sum of the residuals.
+            if _seqsum(residual) < max_allowed_residual && residual_amax < max_allowed_residual
+                break
+            end
+
+            cohort_hydr.iterh2 += 1
+
+            info = _dgesv!(ajac, residual, ipiv)
+            if info < 0
+                fates_endrun("illegal value generated in DGESV() linear system solver, see node: $(-info)")
+            elseif info > 0
+                fates_endrun("the factorization of linear system in DGESV() generated a " *
+                             "singularity at node: $info")
+            end
+
+            # residual now holds dpsi; capped, relaxed update of psi, then theta.
+            for k in 1:nn
+                wrf, _ = _node_wtf(csite_hydr, k, ft)
+                if pm_node[k] == rhiz_p_media
+                    if abs(residual[k]) < dpsi_scap
+                        psi_node[k] = psi_node[k] + residual[k] * rlfx_soil
+                    else
+                        psi_node[k] = psi_node[k] + 2.0 * copysign(dpsi_scap, residual[k]) -
+                                      dpsi_scap * dpsi_scap / residual[k]
+                    end
+                else
+                    if abs(residual[k]) < dpsi_pcap
+                        psi_node[k] = psi_node[k] + residual[k] * rlfx_plnt
+                    else
+                        psi_node[k] = psi_node[k] + 2.0 * copysign(dpsi_pcap, residual[k]) -
+                                      dpsi_pcap * dpsi_pcap / residual[k]
+                    end
+                end
+                th_node[k] = th_from_psi(wrf, psi_node[k])
+            end
+
+            rlfx_plnt = min(1.0, rlfx_plnt0 +
+                (1.0 - rlfx_plnt0) * Float64(nwtn_iter) / Float64(max_newton_iter - 3))
+            rlfx_soil = min(1.0, rlfx_soil0 +
+                (1.0 - rlfx_soil0) * Float64(nwtn_iter) / Float64(max_newton_iter - 3))
+        end
+        round_failed && continue
+
+        th_node_prev .= th_node
+        rlfx_plnt = rlfx_plnt0
+        rlfx_soil = rlfx_soil0
+    end
+
+    return _finish_2d_solve!(csite_hydr, cohort, cohort_hydr, tmx, qtop, w_tot_beg,
+                             dth_layershell_site; check_neg_th_ag = false)
+end
+
+"Sequential (Fortran `sum(a(:))`) sum."
+@inline function _seqsum(a::AbstractVector)
+    s = 0.0
+    @inbounds for x in a
+        s += x
+    end
+    return s
+end
+
+"""
+    _imtaylor_kab_aliased(kmax_up, kmax_dn, i_up, i_dn, ftc_node, h_node,
+                          dftc_dtheta_node, dpsi_dtheta_node) -> (k_eff, a_term, b_term)
+
+`GetImTaylorKAB` on the connection `i_up -> i_dn` of the 2D network with the Fortran
+argument aliasing reproduced (see [`_imtaylor_kab_path!`](@ref)): PicardSolve2D
+passes `dftc_dtheta_node(id_up/id_dn)` to the `intent(inout)` dummies, so the
+upstream-K branch zeroes the non-governing side's derivative in the node array, and
+later connections through that node (the troot joins every layer) see the zero.
+"""
+@inline function _imtaylor_kab_aliased(kmax_up, kmax_dn, i_up::Integer, i_dn::Integer,
+                                       ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
+    r = GetImTaylorKAB(kmax_up, kmax_dn,
+        ftc_node[i_up], ftc_node[i_dn], h_node[i_up], h_node[i_dn],
+        dftc_dtheta_node[i_up], dftc_dtheta_node[i_dn],
+        dpsi_dtheta_node[i_up], dpsi_dtheta_node[i_dn])
+    if do_upstream_k
+        if h_node[i_up] - h_node[i_dn] > 0.0
+            dftc_dtheta_node[i_dn] = 0.0
+        else
+            dftc_dtheta_node[i_up] = 0.0
+        end
+    end
+    return r
+end
+
+"""
+    PicardSolve2D(csite_hydr, cohort, cohort_hydr, tmx, qtop, dth_layershell_site, nnode)
+        -> (sapflow, rootuptake, wb_err_plant, dwat_plant)
+
+`hydr_solver_2DPicard` (= 2): Picard iteration on water content over the whole plant +
+all-layer rhizosphere network. A CFL estimate from the initial fluxes splits the step
+into up to 20 equal substeps. Each iteration assembles the residual and the
+`GetImTaylorKAB` A/B Jacobian (storage self-term `-rho V / dt`), solves for
+`dtheta` densely (`_dgesv!`), clips theta at the retention function's minimum, and
+stops when the substep water balance is < 1e-8 kg, max |dtheta| < 1e-3, or the
+change in theta since the previous iteration is < 1e-3. After 100 iterations the
+whole step restarts from the initial state with `icnv = 1`, under which every
+substep takes exactly one iteration (the substep is NOT shortened). Fluxes for the
+diagnostics are re-evaluated at the final state with the last iteration's kmax.
+Mirrors the Fortran `PicardSolve2D`, including its psi floors (-1e5 MPa for the CFL
+estimate, -1e2 MPa in the iterations) and the `dftc_dtheta_node` argument aliasing.
+"""
+function PicardSolve2D(csite_hydr, cohort, cohort_hydr, tmx::Real, qtop::Real,
+                       dth_layershell_site::AbstractMatrix, nnode::Integer)
+    max_allowed_residual = 1.0e-8
+    max_picard_rounds = 100
+    cfl = 1.0
+    th_tol = Float64(1.0f-3)        # `maxval(abs(th_node - th_prev)) < 1.e-3` (single literal)
+
+    denh2o = dens_fresh_liquid_water
+    ft = cohort.pft
+    nn = csite_hydr.num_nodes
+    conn_up = csite_hydr.conn_up; conn_dn = csite_hydr.conn_dn
+    kmax_up = csite_hydr.kmax_up; kmax_dn = csite_hydr.kmax_dn
+    q_flux = csite_hydr.q_flux; residual = csite_hydr.residual
+    ajac = csite_hydr.ajac; ipiv = csite_hydr.ipiv
+    th_node = csite_hydr.th_node; th_node_prev = csite_hydr.th_node_prev
+    th_node_init = csite_hydr.th_node_init
+    psi_node = csite_hydr.psi_node; pm_node = csite_hydr.pm_node
+    ftc_node = csite_hydr.ftc_node; z_node = csite_hydr.z_node
+    v_node = csite_hydr.v_node; dth_node = csite_hydr.dth_node
+    h_node = csite_hydr.h_node; dftc_dpsi_node = csite_hydr.dftc_dpsi_node
+    dftc_dtheta_node = zeros(Float64, nnode)
+    dpsi_dtheta_node = zeros(Float64, nnode)
+    th_prev = zeros(Float64, nnode)
+
+    FlushSiteScratch!(csite_hydr, hydr_solver_2DPicard)
+
+    cohort_hydr.iterh1 = 0
+    cohort_hydr.iterh2 = 0
+    fill!(dth_node, 0.0)
+
+    _fill_2d_nodes!(csite_hydr, cohort_hydr; guard_aroot_frac = false)
+
+    tm = 0.0
+    nsteps = 0
+    th_node_prev .= th_node_init
+    th_node .= th_node_init
+    dtime = Float64(tmx)
+
+    w_tot_beg = _seqdot(th_node_init, v_node) * denh2o
+
+    # Node properties at the initial state (psi floored at -1e5 MPa) for the CFL estimate.
+    function eval_nodes!(psi_floor)
+        for k in 1:nn
+            wrf, wkf = _node_wtf(csite_hydr, k, ft)
+            psi_node[k] = max(psi_floor, psi_from_th(wrf, th_node[k]))
+            h_node[k] = mpa_per_pa * denh2o * grav_earth * z_node[k] + psi_node[k]
+            ftc_node[k] = ftc_from_psi(wkf, psi_node[k])
+            dftc_dpsi_node[k] = dftcdpsi_from_psi(wkf, psi_node[k])
+            dpsi_dtheta_node[k] = dpsidth_from_th(wrf, th_node[k])
+            dftc_dtheta_node[k] = dftc_dpsi_node[k] * dpsi_dtheta_node[k]
+        end
+        return nothing
+    end
+
+    cfl_max = 0.0
+    eval_nodes!(-1.0e5)
+    SetMaxCondConnections!(csite_hydr, cohort_hydr, h_node, kmax_dn, kmax_up)
+    for icnx in 1:csite_hydr.num_connections
+        id_dn = conn_dn[icnx]
+        id_up = conn_up[icnx]
+        k_eff, _, _ = _imtaylor_kab_aliased(kmax_up[icnx], kmax_dn[icnx], id_up, id_dn,
+                                            ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
+        q_flux[icnx] = k_eff * (h_node[id_up] - h_node[id_dn])
+        volx = (v_node[id_dn] + v_node[id_up]) / 2.0
+        cfl_max = max(cfl_max, abs(k_eff * (h_node[id_dn] - h_node[id_up])) * dtime / volx / denh2o)
+    end
+    cfl_max = max(cfl_max, abs(qtop * dtime / v_node[1] / denh2o))
+    cfl_max = min(20.0, cfl_max)
+
+    if cfl_max > cfl
+        nsteps = min(trunc(Int, cfl_max / cfl) + 1, 20)
+        dtime = tmx / nsteps
+    end
+
+    icnv = 0
+    while tm < tmx
+        dtime = min(dtime, tmx - tm)
+        if ((tmx - tm) < (2 * dtime)) && ((tmx - tm) > dtime)
+            dtime = tmx - tm
+        end
+        tm = tm + dtime
+
+        restart = false
+        picd_iter = 0
+        while true
+            picd_iter += 1
+
+            fill!(ajac, 0.0)
+            fill!(residual, 0.0)
+            th_prev .= th_node
+
+            for k in 1:nn
+                residual[k] = residual[k] + (th_node[k] - th_node_prev[k]) * denh2o * v_node[k] / dtime
+                wrf, wkf = _node_wtf(csite_hydr, k, ft)
+                psi_node[k] = max(-1.0e2, psi_from_th(wrf, th_node[k]))
+                h_node[k] = mpa_per_pa * denh2o * grav_earth * z_node[k] + psi_node[k]
+                ftc_node[k] = ftc_from_psi(wkf, psi_node[k])
+                dftc_dpsi_node[k] = dftcdpsi_from_psi(wkf, psi_node[k])
+                dpsi_dtheta_node[k] = dpsidth_from_th(wrf, th_node[k])
+                dftc_dtheta_node[k] = dftc_dpsi_node[k] * dpsi_dtheta_node[k]
+                ajac[k, k] = -denh2o * v_node[k] / dtime
+            end
+
+            SetMaxCondConnections!(csite_hydr, cohort_hydr, h_node, kmax_dn, kmax_up)
+
+            for icnx in 1:csite_hydr.num_connections
+                id_dn = conn_dn[icnx]
+                id_up = conn_up[icnx]
+                k_eff, a_term, b_term = _imtaylor_kab_aliased(kmax_up[icnx], kmax_dn[icnx],
+                    id_up, id_dn, ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
+
+                q_flux[icnx] = k_eff * (h_node[id_up] - h_node[id_dn])
+
+                residual[id_dn] = residual[id_dn] - q_flux[icnx]
+                residual[id_up] = residual[id_up] + q_flux[icnx]
+
+                ajac[id_dn, id_dn] = ajac[id_dn, id_dn] + a_term
+                ajac[id_up, id_dn] = ajac[id_up, id_dn] - a_term
+                ajac[id_dn, id_up] = ajac[id_dn, id_up] + b_term
+                ajac[id_up, id_up] = ajac[id_up, id_up] - b_term
+            end
+
+            residual[1] = residual[1] + qtop
+
+            info = _dgesv!(ajac, residual, ipiv)
+            if info < 0
+                fates_endrun("illegal value generated in DGESV() linear system solver, see node: $(-info)")
+            elseif info > 0
+                fates_endrun("the factorization of linear system in DGESV() generated a " *
+                             "singularity at node: $info")
+            end
+
+            # residual now holds dtheta; update and clip at the WRF minimum.
+            for k in 1:nn
+                th_node[k] = th_node[k] + residual[k]
+            end
+            for k in 1:nn
+                wrf, _ = _node_wtf(csite_hydr, k, ft)
+                th_node[k] = max(th_node[k], get_thmin(wrf))
+            end
+
+            wb_error = qtop * dtime - (_seqdot(th_node_prev, v_node) - _seqdot(th_node, v_node)) * denh2o
+
+            max_res = 0.0
+            max_dth = 0.0
+            for k in 1:nn
+                max_res = max(max_res, abs(residual[k]))
+                max_dth = max(max_dth, abs(th_node[k] - th_prev[k]))
+            end
+            _HYDRO2D_TRACE[] === nothing ||
+                _HYDRO2D_TRACE[](:picard, ft, cohort.dbh, icnv, picd_iter, dtime, tm,
+                                 wb_error, max_res, max_dth, cfl_max)
+            if abs(wb_error) < max_allowed_residual || max_res < 1.0e-3 || max_dth < th_tol
+                break
+            end
+
+            icnv == 1 && break      # explicit integration with small time step
+
+            if picd_iter > max_picard_rounds
+                icnv = 1
+                tm = 0.0
+                th_node .= th_node_init
+                th_node_prev .= th_node_init
+                restart = true
+                break
+            end
+        end
+        restart && continue
+
+        th_node_prev .= th_node
+    end
+
+    # Final potentials / ftc (psi floored at -1e2 MPa) and fluxes, with the kmax of
+    # the last iteration (not re-evaluated, as in the Fortran).
+    for k in 1:nn
+        wrf, wkf = _node_wtf(csite_hydr, k, ft)
+        psi_node[k] = max(-1.0e2, psi_from_th(wrf, th_node[k]))
+        h_node[k] = mpa_per_pa * denh2o * grav_earth * z_node[k] + psi_node[k]
+        ftc_node[k] = ftc_from_psi(wkf, psi_node[k])
+    end
+    for icnx in 1:csite_hydr.num_connections
+        id_dn = conn_dn[icnx]
+        id_up = conn_up[icnx]
+        k_eff, _, _ = _imtaylor_kab_aliased(kmax_up[icnx], kmax_dn[icnx], id_up, id_dn,
+                                            ftc_node, h_node, dftc_dtheta_node, dpsi_dtheta_node)
+        q_flux[icnx] = k_eff * (h_node[id_up] - h_node[id_dn])
+    end
+
+    return _finish_2d_solve!(csite_hydr, cohort, cohort_hydr, tmx, qtop, w_tot_beg,
+                             dth_layershell_site; check_neg_th_ag = true)
+end

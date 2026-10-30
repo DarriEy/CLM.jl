@@ -532,7 +532,8 @@ Parameters are read from the REAL FATES default parameter file
 is the physically-meaningful replacement for the old synthetic 2-PFT table. The
 PFT count (`numpft[]`) comes from the file (14 for the default file); pass
 `numpft_in` only to override/validate it (a mismatch is an error). `params_path`
-selects an alternative parameter file.
+selects an alternative parameter file. `hydr_solver` (1 / 2 / 3) overrides the
+file's `fates_hydro_solver` (plant-hydraulics solver; only used with `use_planthydro`).
 
 This sets the FATES module-global `hlm_*` control Refs and the parameter globals
 as a side effect. The default test suite never calls this, so the globals are
@@ -569,6 +570,7 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
                          seeddisp_cadence::Int = 0,
                          use_inventory_init::Bool = false,
                          inventory_ctrl_file::AbstractString = "none",
+                         hydr_solver::Union{Nothing,Int} = nothing,
                          dtime::Real = 1800.0)
 
     # ---- Fixed-biogeography (climate-appropriate PFT screening) config ----------
@@ -661,6 +663,17 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
     # are all read here regardless of mode (the CDL carries real values for them);
     # the modes only gate their RUNTIME use.
     read_fates_params!(; path = params_path)
+
+    # Plant-hydraulics solver override (`fates_hydro_solver`, a FATES parameter-file
+    # scalar read into EDParams.hydr_solver): 1 = 1-D Taylor, 2 = 2-D Picard,
+    # 3 = 2-D Newton (FatesHydraulicsMemMod.F90 numbering). `nothing` keeps the
+    # file's value. Must precede InitHydrSites, which sizes the 2-D node tables.
+    if hydr_solver !== nothing
+        hydr_solver in (hydr_solver_1DTaylor, hydr_solver_2DPicard, hydr_solver_2DNewton) ||
+            error("clm_fates_init!: hydr_solver must be 1 (1-D Taylor), 2 (2-D Picard) " *
+                  "or 3 (2-D Newton); got $hydr_solver")
+        ed_params().hydr_solver = hydr_solver
+    end
 
     # ---- CNP "forced uptake" configuration (CLM only supports prescribed uptake) ----
     # The ctsm5.3 host never fills bc_in%plant_nh4/no3/p_uptake_flux (no FATES branch

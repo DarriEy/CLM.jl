@@ -27,6 +27,8 @@
 #         [fortran_h0.nc | fates_planthydro_fortran.csv] [nsteps=240] [out.csv]
 #   (no argument => the committed fates_planthydro_fortran.csv)
 #   ... fates_planthydro_parity.jl export <fortran_h0.nc> [out.csv]   # refresh the extract
+#   FATES_HYDRO_SOLVER=2 ... fates_planthydro_parity.jl fates_planthydro_picard_fortran.csv
+#                                                        # 2-D Picard solver (README)
 using CLM, Printf, Dates, NCDatasets
 include(joinpath(@__DIR__, "..", "..", "fates_fortran_parity.jl"))   # FSURDAT, FPARAM, FORCDIR, START, DTIME
 
@@ -52,12 +54,17 @@ const ALL_FIELDS = (PLANT..., SCALARS...,
                     (f * "_" * string(j) for f in LAYERED for j in 1:NLAY)..., PERPFT...,
                     PERPFT_DEMOG...)
 
+# FATES_HYDRO_SOLVER=1|2|3 selects the plant-hydraulics solver (unset: the parameter
+# file's fates_hydro_solver, 1). Score a solver against a Fortran run made with the
+# same value in its parameter file.
+const HYDRO_SOLVER = haskey(ENV, "FATES_HYDRO_SOLVER") ? parse(Int, ENV["FATES_HYDRO_SOLVER"]) : nothing
+
 function build_hydro()
     fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
-        use_fates=true, use_fates_planthydro=true, start_date=START, dtime=Int(DTIME),
-        use_bedrock=false)
+        use_fates=true, use_fates_planthydro=true, fates_hydro_solver=HYDRO_SOLVER,
+        start_date=START, dtime=Int(DTIME), use_bedrock=false)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
         isfinite(inst.gridcell.londeg[g]) || (inst.gridcell.londeg[g] = inst.gridcell.lon[g]*180/π)

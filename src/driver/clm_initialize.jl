@@ -158,6 +158,12 @@ function clm_initialize!(;
     # Taylor solver (fates_hydro_solver=1). Requires use_fates (+ the FATES soil BGC
     # layering). Off by default.
     use_fates_planthydro::Bool = false,
+    # FATES plant-hydraulics solver, the FATES parameter `fates_hydro_solver`
+    # (FatesHydraulicsMemMod numbering): 1 = 1-D Taylor (default file value),
+    # 2 = 2-D Picard (PicardSolve2D), 3 = 2-D Newton (MatSolve2D, "deprecated" in the
+    # parameter file). `nothing` keeps the value in `fates_paramfile`; an Int
+    # overrides it, as editing the .cdl would. CTSM 5.3 has no namelist entry for it.
+    fates_hydro_solver::Union{Nothing,Int} = nothing,
     # FATES SPITFIRE mode (namelist fates_spitfire_mode): 0 no fire, 1 scalar
     # lightning (constant ignitions, no streams), 2-5 need lightning/popdens streams.
     fates_spitfire_mode::Int = 0,
@@ -337,6 +343,11 @@ function clm_initialize!(;
     varctl.use_fates_bgc = _fates_bgc
     use_fates_planthydro && !use_fates &&
         error("clm_initialize!: use_fates_planthydro requires use_fates")
+    fates_hydro_solver !== nothing && !use_fates_planthydro &&
+        error("clm_initialize!: fates_hydro_solver requires use_fates_planthydro")
+    fates_hydro_solver !== nothing && !(fates_hydro_solver in (1, 2, 3)) &&
+        error("clm_initialize!: fates_hydro_solver must be 1 (1-D Taylor), " *
+              "2 (2-D Picard) or 3 (2-D Newton); got $fates_hydro_solver")
     varctl.use_fates_planthydro = use_fates_planthydro
     if use_fates
         fates_check_niche_modes(; use_fates_tree_damage, use_fates_ed_st3,
@@ -980,6 +991,7 @@ function clm_initialize!(;
                         fluh_timeseries = fluh_timeseries,
                         flandusepftdat = flandusepftdat,
                         use_planthydro = use_fates_planthydro,
+                        hydr_solver = fates_hydro_solver,
                         dtime = dtime,
                         _fates_parteh_kwargs(fates_parteh_mode, _fates_bgc)...)
         # SPITFIRE modes 2-5 read lightning (and, modes >= 3, population density)
