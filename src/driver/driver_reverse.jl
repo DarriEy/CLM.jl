@@ -202,7 +202,11 @@ soiltemp_rev_aux(bounds, filt; dtime = 1800.0) = (;
     urbantv = fill(323.15, bounds.endl), dtime = dtime,
     bc_col = bounds.begc:bounds.endc, bc_lun = bounds.begl:bounds.endl,
     bc_patch = bounds.begp:bounds.endp,
-    nolakec = filt.nolakec, nolakep = filt.nolakep, urbanl = filt.urbanl, urbanc = filt.urbanc)
+    nolakec = filt.nolakec, nolakep = filt.nolakep, urbanl = filt.urbanl, urbanc = filt.urbanc,
+    # Host-side flag: the urban gnet kernel writes only patches on urban landunits, so
+    # with no urban column it is an exact no-op and its (very slow to compile on
+    # CUDA: ~100 min) reverse can be skipped.
+    has_urban = any(Array(filt.urbanc)))
 
 function soiltemp_rev_phase!(b, aux)
     i = b.inst
@@ -482,7 +486,7 @@ function soiltemp_gnet_patch_rural_contrib_array_phase!(x, aux)
 end
 
 function soiltemp_gnet_patch_urban_array_phase!(x, aux)
-    np=length(x.column); np == 0 && return nothing
+    np=length(x.column); (np == 0 || !aux.has_urban) && return nothing
     backend=_kernel_backend(x.hs)
     _kcall!(_gnet_patch_urban_kernel!, backend, x.out, x.pin, x.cin, x.lin, aux.nolakep,
         x.column, x.landunit, x.itype, x.urbpoi,
