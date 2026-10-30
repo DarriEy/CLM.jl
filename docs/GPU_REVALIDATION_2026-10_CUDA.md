@@ -109,6 +109,12 @@ solve was one cause (item 7 below); after its rule the same h2osfc-row mismatch 
 so a second cause is still open. Not yet checked per phase: the canopy phases, cv,
 tk_layers, setup, and the hydrology `*_dev` phases.
 
+The soil-temperature block alone carries this gradient, and its device decomposition is
+right on CPU: reversing only soil temperature with the same seed gives
+dL/d(t_grnd[1]) = -3.5023150483 for the production `soil_temperature!` and
+-3.5023150483 for the 13-phase decomposition on the CPU (shadow maxima of t_soisno,
+t_h2osfc, frac_h2osfc, h2osfc identical to 7 digits). The open defect is CUDA-specific.
+
 ### Blockers found, in the order they surfaced
 
 1. **`canopy_rev_aux` scalar-indexed device masks** (the failure in the table above).
