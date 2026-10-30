@@ -939,7 +939,7 @@ end
 # Per-column kernel: aerosol mass transport down the snow column. The outgoing
 # flux of layer j becomes the incoming flux of layer j+1, so the qin_* state is
 # loop-carried — the layer loop runs sequentially in-thread (one thread/column).
-@kernel function _snowhyd_aerosol_fluxes_kernel!(@Const(_probe), aerosol, @Const(mask_snow),
+@kernel function _snowhyd_aerosol_fluxes_kernel!(_probe, aerosol, @Const(mask_snow),
         @Const(snl), @Const(h2osoi_ice), @Const(h2osoi_liq),
         @Const(qflx_snow_percolation), dtime, nlevsno::Int,
         sf, bcphi, bcpho, ocphi, ocpho, dst1, dst2, dst3, dst4, cmin::Int, cmax::Int)

@@ -322,7 +322,7 @@ _ssf_dv(surfalb, canopystate, solarabs) = _SSFDV(;
 
 # One thread per patch; the internal nrad loop is loop-carried (laisun/laisha
 # sums), so it stays sequential inside the thread — fully independent per patch.
-@kernel function _canopy_sun_shade_kernel!(@Const(_out), @Const(mask),
+@kernel function _canopy_sun_shade_kernel!(_out, @Const(mask),
         @Const(nrad_patch), @Const(column), @Const(gridcell),
         @Const(forc_solad_col), @Const(forc_solai), dv, ipar::Int)
     p = @index(Global)
@@ -546,7 +546,7 @@ Adapt.@adapt_structure _SRTmpDV
 # --------------------------------------------------------------------------
 # Pass 0: zero the per-patch flux accumulators (non-urban, masked).
 # --------------------------------------------------------------------------
-@kernel function _surfrad_init_kernel!(@Const(_out), @Const(mask), @Const(landunit),
+@kernel function _surfrad_init_kernel!(_out, @Const(mask), @Const(landunit),
         @Const(lun_itype), sol, tmp, nlevsno::Int, istsoil::Int, istcrop::Int)
     p = @index(Global)
     @inbounds if mask[p]
@@ -576,7 +576,7 @@ end
 # the Fortran do-ib loop exactly — canopy/ground absorption sums, transmitted
 # fluxes, snow/soil/total ground absorption, SNICAR no-aerosol sums.
 # --------------------------------------------------------------------------
-@kernel function _surfrad_nband_kernel!(@Const(_out), @Const(mask), @Const(column),
+@kernel function _surfrad_nband_kernel!(_out, @Const(mask), @Const(column),
         @Const(landunit), @Const(gridcell), @Const(lun_itype), @Const(snl),
         @Const(forc_solad_col), @Const(forc_solai),
         alb, sol, tmp, nband::Int, istsoil::Int, istcrop::Int, istdlak::Int,
@@ -656,7 +656,7 @@ end
 # Pass 2: absorbed flux per snow/soil layer + SNICAR forcings (per patch;
 # internal sequential layer loop). Mirrors the Fortran snow-layer block.
 # --------------------------------------------------------------------------
-@kernel function _surfrad_snowlyr_kernel!(@Const(_out), @Const(mask), @Const(column),
+@kernel function _surfrad_snowlyr_kernel!(_out, @Const(mask), @Const(column),
         @Const(landunit), @Const(lun_itype), @Const(snl),
         @Const(snow_depth_col), @Const(frac_sno_col),
         alb, sol, srd, tmp, nlevsno::Int, istsoil::Int, istcrop::Int, istdlak::Int,
@@ -780,7 +780,7 @@ end
 # Pass 3: radiation diagnostics (per patch, non-urban). NDVI/reflected solar,
 # incident/reflected VIS+NIR, local-noon diagnostics, snow diagnostics.
 # --------------------------------------------------------------------------
-@kernel function _surfrad_diag_kernel!(@Const(_out), @Const(mask), @Const(column),
+@kernel function _surfrad_diag_kernel!(_out, @Const(mask), @Const(column),
         @Const(gridcell), @Const(snl), @Const(londeg),
         @Const(forc_solad_col), @Const(forc_solai),
         alb, sol, srd, tmp, deltasec, current_tod,
@@ -881,7 +881,7 @@ end
 # Pass 4: urban patches (per patch, urban mask). Incident/reflected solar +
 # local-noon diagnostics; fsr is summed from VIS+NIR reflected.
 # --------------------------------------------------------------------------
-@kernel function _surfrad_urban_kernel!(@Const(_out), @Const(mask), @Const(column),
+@kernel function _surfrad_urban_kernel!(_out, @Const(mask), @Const(column),
         @Const(gridcell), @Const(londeg),
         @Const(forc_solad_col), @Const(forc_solai),
         alb, sol, srd, deltasec, current_tod, spval)

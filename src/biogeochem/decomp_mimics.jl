@@ -1011,7 +1011,7 @@ end
 # --- Main per-column rate kernel: internal j loop, own-[c,j] writes ---
 # `_out` (a per-column array) only sets the launch ndrange/backend; all data lives
 # in the `arr` bundle (same shared refs), mirroring the soil_fluxes! kernel pattern.
-@kernel function _dmr_rates_kernel!(@Const(_out), arr::_DMRArr, @Const(mask), idx::_DMRIdx,
+@kernel function _dmr_rates_kernel!(_out, arr::_DMRArr, @Const(mask), idx::_DMRIdx,
                                     coef::_DMRCoef, nlevdecomp::Int, use_fates::Bool)
     c = @index(Global)
     @inbounds if mask[c]
@@ -1132,7 +1132,7 @@ end
 end
 
 # Post-assignment pathfrac terms (own-[c,j], all levels; unmasked as in host loop).
-@kernel function _dmr_pathfrac_post_kernel!(@Const(_out), arr::_DMRArr, idx::_DMRIdx, nlevdecomp::Int)
+@kernel function _dmr_pathfrac_post_kernel!(_out, arr::_DMRArr, idx::_DMRIdx, nlevdecomp::Int)
     c = @index(Global)
     @inbounds begin
         T = eltype(arr.pathfrac_decomp_cascade)
@@ -1146,7 +1146,7 @@ end
 end
 
 # CWD->L2 pathfrac + respiration fraction (only if FATES not enabled).
-@kernel function _dmr_cwdl2_kernel!(@Const(_out), arr::_DMRArr, i_cwdl2_local::Int, nlevdecomp::Int, rf_cwdl2)
+@kernel function _dmr_cwdl2_kernel!(_out, arr::_DMRArr, i_cwdl2_local::Int, nlevdecomp::Int, rf_cwdl2)
     c = @index(Global)
     @inbounds begin
         T = eltype(arr.pathfrac_decomp_cascade)
@@ -1158,7 +1158,7 @@ end
 end
 
 # Respiration fractions for all transitions (own-[c,j], all levels).
-@kernel function _dmr_rf_kernel!(@Const(_out), arr::_DMRArr, idx::_DMRIdx, nlevdecomp::Int,
+@kernel function _dmr_rf_kernel!(_out, arr::_DMRArr, idx::_DMRIdx, nlevdecomp::Int,
         rf_l1m1, rf_l1m2, rf_l2m1, rf_l2m2, rf_s1m1, rf_s1m2)
     c = @index(Global)
     @inbounds begin

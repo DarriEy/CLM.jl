@@ -79,6 +79,7 @@ include("infrastructure/tridiagonal.jl")
 include("infrastructure/band_diagonal.jl")
 include("infrastructure/smooth_ad.jl")
 include("infrastructure/kernels.jl")  # KernelAbstractions physics kernels (Phase 4)
+include("infrastructure/kconst_check.jl")  # opt-in @Const aliasing checker for _launch!
 include("infrastructure/backend.jl")  # centralized compute-backend selection (CPU/Metal/CUDA/AMDGPU)
 
 # ===========================================================================

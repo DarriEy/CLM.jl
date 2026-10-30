@@ -1186,8 +1186,10 @@ function balance_check!(
     if !isempty(bounds_g)
         # streamflow array may be empty when not using hillslope routing; the
         # kernel only reads it under use_hillslope_routing, but it still needs a
-        # device-resident array of the right shape to index safely.
-        streamflow_arg = use_hillslope_routing ? qflx_streamflow_grc : errh2o_grc
+        # device-resident array of the right shape to index safely. The placeholder
+        # is a READ-ONLY input (endwb_grc), not the written errh2o_grc: the argument
+        # is @Const, which must not alias an array the kernel writes (kconst_check.jl).
+        streamflow_arg = use_hillslope_routing ? qflx_streamflow_grc : endwb_grc
         _launch!(_bc_errh2o_grc_kernel!, errh2o_grc,
             endwb_grc, begwb_grc, forc_rain_grc, forc_snow_grc, forc_flood_grc,
             qflx_sfc_irrig_grc, qflx_glcice_dyn_water_flux_grc_arr, qflx_evap_tot_grc,

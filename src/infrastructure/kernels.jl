@@ -85,7 +85,11 @@ const _DEFER_GPU_SYNC = Ref(false)
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = _kernel_backend(out)
-    kernel(backend)(out, args...; ndrange = ndrange)
+    if kconst_check_mode() === :off   # compile-time constant (see kconst_check.jl)
+        kernel(backend)(out, args...; ndrange = ndrange)
+    else
+        _kconst_checked_launch!(kernel, backend, ndrange, (out, args...))
+    end
     (_DEFER_GPU_SYNC[] && !(backend isa KA.CPU)) || KA.synchronize(backend)
     return out
 end
