@@ -132,7 +132,7 @@ _launch_scalar_grad(a) = nothing
 _dval_or_nothing(a) = a isa Union{Duplicated, Enzyme.DuplicatedNoNeed} ? a.dval : nothing
 
 function augmented_primal(config, func::Const{typeof(batched_band_solve!)}, ::Type{RT},
-        tvector::Duplicated{<:GPUArraysCore.AbstractGPUArray}, bmatrix::Enzyme.Annotation,
+        tvector::Enzyme.Annotation{<:GPUArraysCore.AbstractGPUArray}, bmatrix::Enzyme.Annotation,
         rvector::Enzyme.Annotation, jtop::Enzyme.Annotation, jbot::Enzyme.Annotation,
         mask::Enzyme.Annotation, kl::Const, ku::Const, off::Const) where {RT}
     func.val(tvector.val, bmatrix.val, rvector.val, jtop.val, jbot.val, mask.val,
@@ -141,11 +141,12 @@ function augmented_primal(config, func::Const{typeof(batched_band_solve!)}, ::Ty
 end
 
 function reverse(config, func::Const{typeof(batched_band_solve!)}, ::Type{RT}, tape,
-        tvector::Duplicated{<:GPUArraysCore.AbstractGPUArray}, bmatrix::Enzyme.Annotation,
+        tvector::Enzyme.Annotation{<:GPUArraysCore.AbstractGPUArray}, bmatrix::Enzyme.Annotation,
         rvector::Enzyme.Annotation, jtop::Enzyme.Annotation, jbot::Enzyme.Annotation,
         mask::Enzyme.Annotation, kl::Const, ku::Const, off::Const) where {RT}
     xsol, bm = tape
-    _batched_band_solve_pullback!(tvector.dval, _dval_or_nothing(rvector),
+    dtv = _dval_or_nothing(tvector)
+    dtv === nothing || _batched_band_solve_pullback!(dtv, _dval_or_nothing(rvector),
         _dval_or_nothing(bmatrix), xsol, bm, jtop.val, jbot.val, mask.val,
         kl.val, ku.val, off.val)
     return (nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)

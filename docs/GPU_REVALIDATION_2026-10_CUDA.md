@@ -130,6 +130,17 @@ RESULT_PLACEHOLDER
    now also match a `Duplicated` index array.
 6. **Reverse-rule return type.** Enzyme checks the inferred return type of a reverse
    rule; the `_gpu_launch!` rule now builds it by dispatch so it is concrete.
+7. **Wrong adjoint from the batched band solve (no error raised).** With 1–6 fixed the
+   whole chain ran on CUDA but returned dL/d(t_grnd) = -1.3e-14 against -3.5023 on CPU
+   and by FD. A per-phase CUDA-vs-CPU reverse comparison (same checkpoint, all shadows
+   seeded with ones) matched every soil-temperature phase checked to ≤1.3e-15 relative
+   except the solve phase, which was off by O(1). Enzyme's reverse of
+   `_batched_band_solve_kernel!` (per-thread pivoted Gaussian elimination with a
+   data-dependent system size, overwriting its scratch in place) is wrong on CUDA. A
+   reverse rule for `batched_band_solve!` on GPU arrays now supplies the exact
+   linear-solve adjoint (λ = A⁻ᵀ x̄ from the same batched solver on the transposed
+   band; r̄ += λ; Ā -= λ xᵀ), FD-checked in `test/test_band_solve_adjoint.jl`. Not yet
+   reduced to a standalone upstream reproduction.
 
 The CPU reverse is unchanged: `driver_rev_phases` gives host filters the same phase
 list as before (production `soil_temperature!`, `water_table!`, the canopy block, …)
