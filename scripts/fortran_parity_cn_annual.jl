@@ -39,6 +39,12 @@
 # clm_drv!'s update_daylength! left prev_dayl == dayl, ws_flag stuck at 1, and the
 # season-deciduous grass never dropped its leaves. Seeded once now: TLAI Oct-Dec
 # <=5.8e-3 (was 7.5e-2), LEAFC <=0.14 (was 2.1), TOTVEGC <=4.8e-2 (was 8.3e-2).
+# ALIGNMENT FIXED (2026-10-30): the comparison indexed the h0 by day, but record 1 is
+# the startup run's nstep-0 snapshot, so Julia day d was compared with Fortran day d-1;
+# and the orbit was taken from the pre-advance calday (one step behind Fortran). The
+# "grass onset/offset timing" residual (grass LEAFC +20 % Apr, -5 % Oct) was entirely
+# the record offset: aligned, the grass onset and offset fire on the same day and
+# step as Fortran (see docs/DRIVER_DEFAULTS_AUDIT.md, "Follow-up: grass phenology timing").
 #
 # HISTORY — STATUS (2026-06-20): scaffold complete + the comparison framework works, but it
 # surfaced a BLOCKER on the first end-to-end use_cn=true annual run: the soil
@@ -378,9 +384,17 @@ function run_cn_annual(; ndays::Int = 365)
         acc = Dict(f[1] => 0.0 for f in fields); ns = 0
         for h in 1:24
             cur = start_date + Day(d - 1) + Hour(h - 1)
+            # Orbit from the POST-advance calday, as clm_run! does. Fortran's startup
+            # clock runs nstep 0 at the start time and advances after each clm_drv
+            # (lnd_comp_nuopc.F90:890-891 calday/declin, :903 clm_drv, :921
+            # advance_timestep), so the nstep-k step this loop step matches (the
+            # k-th step of the h0 day) sees calday = start + k*dtime. Using the
+            # pre-advance calday lagged the declination, and so the daylength, by one
+            # step: the season-deciduous grass offset (dayl < crit_dayl) fired one
+            # hour late.
+            CLM.advance_timestep!(tm)
             calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
-            (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
-            nextsw = calday + 3600.0 / CLM.SECSPDAY
+            nextsw = calday
             # Seed daylength ONCE. clm_drv! (is_first_step=false here) runs
             # update_daylength!, which shifts prev_dayl <- dayl each step
             # (DaylengthMod.F90:192-202), so seed the step BEFORE the first one and
@@ -388,10 +402,10 @@ function run_cn_annual(; ndays::Int = 365)
             # pinned ws_flag at 1, and the season-deciduous grass never dropped its
             # leaves in autumn (CNPhenologyMod.F90:1023-1027, 1182).
             if d == 1 && h == 1
+                (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
                 (declinm2, _) = CLM.compute_orbital(calday - 2 * 3600.0 / CLM.SECSPDAY)
                 CLM.init_daylength!(inst.gridcell, declinm1, declinm2, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
             end
-            CLM.advance_timestep!(tm)
             CLM.read_forcing_step!(fr, inst.atm2lnd, _force_date(cur), ng, nc)
             CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
             (yr, mon, dy, tod) = CLM.get_curr_date(tm)
@@ -492,6 +506,13 @@ function run_cn_annual(; ndays::Int = 365)
         return inst, bounds
     end
     fds = NCDataset(CN_H0, "r")
+    # Align by the record's time stamp, not its index. The startup run writes a
+    # zero-length nstep-0 snapshot as record 1 (time = 0, bounds [0, 0]); the mean
+    # over model day d is the record with time == d (bounds [d-1, d]). Indexing the
+    # records by day compared Julia day d with Fortran day d-1, which showed up as
+    # spurious onset/offset "timing" errors (grass LEAFC +20 % in April, -5 % in
+    # October). Day 365 lives in the next year's file and is skipped.
+    _frec = Dict(round(Int, t) => k for (k, t) in enumerate(Float64.(fds["time"].var[:])))
     mstart = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
     mend   = [31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]
     mons = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
@@ -505,9 +526,10 @@ function run_cn_annual(; ndays::Int = 365)
         for m in 1:12
             d1, d2 = mstart[m], min(mend[m], nrec)
             d1 > nrec && continue
-            jm = mean(@view jd[d1:d2])
-            fvals = [_fv(fds[nm][1, dd]) for dd in d1:d2]; fvals = filter(isfinite, fvals)
-            fm = isempty(fvals) ? NaN : mean(fvals)
+            dds = [dd for dd in d1:d2 if haskey(_frec, dd)]
+            isempty(dds) && continue
+            jm = mean(jd[dds])
+            fm = mean(_fv(fds[nm][1, _frec[dd]]) for dd in dds)
             rel = (isnan(fm) || isnan(jm)) ? NaN : abs(jm - fm) / (1 + abs(fm))
             @printf("  %-3s        %12.4g %12.4g %10.2e\n", mons[m], jm, fm, rel)
         end

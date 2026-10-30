@@ -701,7 +701,8 @@ function clm_initialize!(;
     end
 
     # ---- Step 14: Cold-start initialization ----
-    cold_start_initialize!(inst, bounds, filt, surf; use_aquifer_layer=use_aquifer_layer)
+    cold_start_initialize!(inst, bounds, filt, surf; use_aquifer_layer=use_aquifer_layer,
+                           use_cn=use_cn)
 
     # ---- Step 14a: Soil hydrology runtime controls ----
     soilhydrology_read_nl!(inst.soilhydrology; h2osfcflag=h2osfcflag)

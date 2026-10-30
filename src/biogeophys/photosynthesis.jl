@@ -569,10 +569,13 @@ function quadratic_solve(a::Real, b::Real, c::Real)
         end
     end
     discriminant = b * b - T(4.0) * a * c
-    if discriminant < zero(T)
-        discriminant = zero(T)
-    end
-    q = -T(0.5) * (b + sign(b) * sqrt(discriminant))
+    # A double root (discriminant == 0, or a negative round-off clamped to 0) takes
+    # sqrt = 0 as a constant: the value is the same, but sqrt(Dual(0, ·)) carries an
+    # infinite partial, and Inf*0 = NaN poisoned every AD derivative downstream. This
+    # is hit whenever the net assimilation is exactly 0 (stomata closed by PHS, e.g.
+    # on frozen soil): the Medlyn gs quadratic then has b^2 = 4ac exactly.
+    sqd = discriminant > zero(T) ? sqrt(discriminant) : zero(T)
+    q = -T(0.5) * (b + sign(b) * sqd)
     if q == zero(q)
         r1 = zero(T)
         r2 = zero(T)
@@ -3317,20 +3320,11 @@ function getvegwp!(p::Int, c::Int, gb_mol::Real,
         0.0, 0.0, qsatl, qaf, havegs, laisun_p, laisha_p,
         elai_p, esai_p, fdry_p, forc_rho_c, forc_pbot_c, tgcm_p)
 
-    # Calculate root water potential. Threshold (not ==0): when ALL root layers are
-    # frozen the smooth_max floor in pass-1 leaves k_soil_root ~1e-16 (not exactly 0,
-    # an AD-safety artifact), so sum_ksr ~1e-17 would bypass a literal ==0 check and
-    # the -qflx/sum_ksr term below would give a huge xroot → vegwp Newton NaN / bogus
-    # vegwp. Below the threshold = effectively no root water access: use the k-weighted
-    # mean of (smp-grav2) for xroot (the qflx→0 limit), which is bounded AND zero-
-    # weights the bedrock layers (k=0, smp pinned at smpmin=-1e8) — an UNWEIGHTED mean
-    # would be dragged to ~-4e7 by that dry bedrock. soilflux is the mass-balance
-    # demand below (= Fortran else-branch's soilflux=qflx).
+    # Calculate root water potential (Fortran-literal ==0 test, see _getvegwp)
     sum_ksr = sum(k_soil_root_p[1:nlevsoi])
-    no_root_access = abs(sum_ksr) <= oftype(sum_ksr, 1.0e-12)
     ksmp = sum(k_soil_root_p[1:nlevsoi] .* (smp_c[1:nlevsoi] .- grav2))
-    if no_root_access
-        x[ROOT_SEG] = abs(sum_ksr) > zero(sum_ksr) ? ksmp / sum_ksr : zero(eltype(x))
+    if sum_ksr == zero(sum_ksr)
+        x[ROOT_SEG] = sum(smp_c[1:nlevsoi] .- grav2) / nlevsoi
     else
         x[ROOT_SEG] = (ksmp - qflx_sun - qflx_sha) / sum_ksr
     end
@@ -3403,22 +3397,26 @@ end
         sum_ksr += k_soil_root[p, j]
     end
     xroot = zero(T)
-    # Threshold (not ==0): all-frozen soil leaves k_soil_root at the pass-1 smooth_max
-    # floor (~1e-16, an AD artifact) so sum_ksr ~1e-17 ≠ 0; the full else-branch's
-    # -qflx/sum_ksr term would then blow xroot → ±1e11 (Newton NaN / bogus vegwp).
-    # Below threshold = effectively no root water access: use the k-weighted mean of
-    # (smp-grav2) for xroot (the qflx→0 limit of the else-branch). This is bounded
-    # (a weighted average, so within the smp range) AND zero-weights the bedrock
-    # layers (k_soil_root=0 there, smp pinned at smpmin=-1e8); an UNWEIGHTED mean
-    # would be dragged to ~-4e7 by that dry bedrock. soilflux is set to the
-    # mass-balance demand below (= Fortran else-branch's soilflux=qflx).
-    no_root_access = abs(sum_ksr) <= T(1.0e-12)
+    # Fortran-literal (PhotosynthesisMod.F90 getvegwp:5018-5023): the mean of
+    # (smp-grav2) only when sum(k_soil_root) is EXACTLY zero, otherwise the full
+    # supply-limited solve. Over all-frozen soil k_soil_root sits at Fortran's own
+    # 1e-16 conductance floor (:3086-3087), so sum_ksr ~1e-15 and the -qflx/sum_ksr
+    # term drives xroot (and so vegwp) far below the soil potential: the plc
+    # stress then closes the stomata, which is how CTSM shuts down winter
+    # photosynthesis on frozen ground. A former `abs(sum_ksr) <= 1e-12` threshold
+    # took the bounded k-weighted-mean branch there instead, pinning vegwp at the
+    # soil potential (btran ~1) and letting the evergreen photosynthesise all
+    # winter on fully frozen soil (Bow cold start: Jan-Apr GPP 4-1000x Fortran).
     s = zero(T)
     @inbounds for j in 1:nlevsoi
         s += k_soil_root[p, j] * (smp_l[c, j] - z_col[c, j] * T(1000.0))
     end
-    if no_root_access
-        xroot = abs(sum_ksr) > zero(T) ? s / sum_ksr : zero(T)
+    if sum_ksr == zero(T)
+        sm = zero(T)
+        @inbounds for j in 1:nlevsoi
+            sm += smp_l[c, j] - z_col[c, j] * T(1000.0)
+        end
+        xroot = sm / nlevsoi
     else
         xroot = (s - qflx_sun - qflx_sha) / sum_ksr
     end
@@ -3445,16 +3443,10 @@ end
     end
 
     # Soil flux (host order: grav2[j]=z_col[c,j]*1000) = the actual soil→root water
-    # supply. ALWAYS the per-layer loop (matching Fortran getvegwp): `qflx_tran_veg` is
-    # set to `soilflux` and MUST equal the soil extraction that the HydStress transpiration
-    # sink later debits (qflx_rootsoi_col = Σ_j k_soil_root·(smp − vegwp[root] − grav2)),
-    # or the column water balance leaks. In the no-root-access branch xroot is the
-    # k-WEIGHTED mean of (smp−grav2) (= s/sum_ksr), so this loop telescopes to exactly 0
-    # (s − xroot·sum_ksr) — the physically-correct supply-limited flux (frozen roots →
-    # no transpiration), bit-identical to what the sink computes with the same xroot.
-    # The previous no_root_access branch set soilflux to the atmospheric DEMAND
-    # (qflx_sun+qflx_sha), so frozen-soil patches were over-transpired into the balance
-    # while the soil gave up ~0 → errh2o leak (spiked over threshold at spring green-up).
+    # supply, the per-layer loop of Fortran getvegwp. `qflx_tran_veg` is set to it and
+    # it equals the extraction the HydStress sink debits (qflx_rootsoi_col =
+    # Σ_j k_soil_root·(smp − vegwp[root] − grav2)) with the same xroot, so the column
+    # water balance closes (#228).
     soilflux = zero(T)
     @inbounds for j in 1:nlevsoi
         soilflux += k_soil_root[p, j] * (smp_l[c, j] - xroot - z_col[c, j] * T(1000.0))
