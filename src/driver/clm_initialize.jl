@@ -239,6 +239,12 @@ function clm_initialize!(;
     cnfire_method::Symbol = :nofire,
     flnfm::String = "",
     fhdm::String = "",
+    # popd_streams year window (FireDataBaseType hdm_init). 0 = use every hdm record
+    # by day of year (single-year streams). The CTSM HYDE file spans 1850-2016 and a
+    # run uses one year of it, e.g. stream_year_first_popdens = _last = 2000.
+    stream_year_first_popdens::Int = 0,
+    stream_year_last_popdens::Int = 0,
+    model_year_align_popdens::Int = 0,
     # MEGAN biogenic-VOC emissions. Default `false` ⇒ the gridded isoprene EF map
     # (efisop_grc) is NOT read and stays NaN, exactly as before (byte-identical).
     # When `true`, VOCEmission::iniTimeConst's read of EF1_BTR/FET/FDT/SHR/GRS/CRP
@@ -620,7 +626,9 @@ function clm_initialize!(;
         # inactive when no file is supplied: forc_lnfm/forc_hdm then stay 0, which
         # zeroes the ignition term (no fire) rather than reading uninitialized data.
         if need_lightning_and_popdens(cnfire_method) && !(isempty(flnfm) && isempty(fhdm))
-            fire_stream_init!(inst.cnfire_stream; flnfm = flnfm, fhdm = fhdm)
+            fire_stream_init!(inst.cnfire_stream; flnfm = flnfm, fhdm = fhdm,
+                              stream_year_first_popdens, stream_year_last_popdens,
+                              model_year_align_popdens)
         end
     end
 
@@ -1021,7 +1029,9 @@ function clm_initialize!(;
         # CN fire schemes. Without files the arrays stay inactive and bc_in
         # lightning24/pop_density stay 0 (no ignitions), as before.
         if fates_spitfire_mode > 1 && !(isempty(flnfm) && isempty(fhdm))
-            fates_fire_data_init!(inst.fates_fire_data, ng; flnfm = flnfm, fhdm = fhdm)
+            fates_fire_data_init!(inst.fates_fire_data, ng; flnfm = flnfm, fhdm = fhdm,
+                                  stream_year_first_popdens, stream_year_last_popdens,
+                                  model_year_align_popdens)
         end
     end
 
