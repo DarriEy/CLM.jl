@@ -1061,6 +1061,144 @@ and transpired too little. TOTVEGC moves slightly away (by 0.2 percentage points
 because carbon that used to sit in the transfer pool, which counts in TOTVEGC, is now
 displayed leaf that turns over.
 
+### Follow-up: grass phenology timing and the cold-start winter GPP
+
+Two residuals were left after the evergreen fix: the grass patch's LEAFC in cn_annual
+(+20 % in April, −5 % in October, read as onset/offset timing), and the cold start's
+year-1 GPP (+15.8 %). The first was not in the model. The second was two cold-start
+bugs, one of them a deliberate deviation from Fortran.
+
+**1. The grass "timing" residual was a record offset in the comparison.** A startup
+run writes a zero-length nstep-0 snapshot as history record 1 (time 0, bounds [0, 0];
+`lnd.log`: "Writing current time sample ... at nstep = 0"). The mean over model day d
+is the record with time == d. `fortran_parity_cn_annual.jl` (and the per-patch
+comparison scripts derived from it) indexed the records by day, so Julia day d was
+compared with Fortran day d−1. Every field that changes fast looked one day early;
+the grass onset jump in late April and the leaf drop in October are the largest such
+changes. Aligned by the time stamp, the grass onset fires on the same day and the same
+step as Fortran. The harness also took the orbit from the pre-advance calday, which is
+one step behind Fortran's (`lnd_comp_nuopc.F90:890-891` takes calday and declin before
+`clm_drv` at :903 and advances the clock after it at :921, with nstep 0 at the start
+time, so the step a Julia loop step matches sees calday = start + k·dtime; `clm_run!`
+already does this). That put the daylength-triggered grass offset one hour late. Both
+are fixed in the harness. There is no phenology code change.
+
+Grass patch (itype 12) LEAFC, monthly means, J/F − 1:
+
+| comparison | Jan | Mar | Apr | May | Jun | Sep | Oct | Nov | annual |
+|---|---|---|---|---|---|---|---|---|---|
+| index-aligned (old harness) | −0.01 % | −0.01 % | **+19.82 %** | +4.55 % | −0.01 % | −0.01 % | **−4.67 %** | −0.01 % | +0.02 % |
+| time-aligned, pre-advance orbit | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % | +0.21 % | 0.00 % | +0.02 % |
+| time-aligned, post-advance orbit (this branch) | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % |
+
+The gridcell numbers in the cn_annual tables above are annual means of index-aligned
+monthly means. The one-day shift barely moves those annual means, but the monthly
+"timing" rows were artifacts.
+
+**2. The cold-start winter GPP: frozen-soil PHS on a cold-start canopy.** Per-patch
+daily and hourly history from the pristine ctsm5.3.012 exe (130-day cold start, extra
+`hist_fincl2` tape with VEGWP, KROOT, HK, SMP, TSOI, SOILLIQ, SOILICE, FPSN, FCTR,
+TSAI, ...) against the same fields dumped from the Julia harness. The whole year-1
+excess is in January to April. Fortran's needleleaf GPP is about 0 from day 13 to day
+96, because the whole root zone is frozen (SOILLIQ 0.01 kg/m2 per layer). Every
+k_soil_root then sits at the 1e-16 conductance floor, the plant water potential falls to
+−4e5 to −2e6 mm, and the plc stress closes the stomata. In Julia, VEGWP stayed at the
+soil potential (−1.29e5 mm), btran stayed near 1, and the tree photosynthesised all
+winter (March GPP 1.8e-6 against Fortran's 1.9e-9). Two causes:
+
+- **`getvegwp` threshold** (`photosynthesis.jl` `_getvegwp` and the host `getvegwp!`;
+  Fortran `PhotosynthesisMod.F90:5018-5023`). Fortran takes the mean of
+  (smp − grav2) only when `sum(k_soil_root) == 0`. Otherwise it solves
+  x(root) = (Σk(smp − grav2) − qflx)/Σk. The port used `abs(sum_ksr) <= 1e-12` and,
+  below that, a k-weighted mean of (smp − grav2). That is the qflx → 0 limit, so
+  vegwp was pinned at the soil potential. The threshold was added in d0ad46a, when
+  the below-threshold branch was an *unweighted* mean that the dry bedrock dragged to
+  −4e7 mm. #228 later replaced that branch with the weighted mean and made soilflux
+  the per-layer sum. The threshold's own reason is gone with both of those: the
+  floors are Fortran's own `max(…, 1e-16)` conductances (`:3086-3087`), not an AD
+  artifact, and the cn_annual harness header already records that the Fortran-literal
+  `== 0` produces no NaN. Now Fortran-literal: soilflux telescopes to the demand, the
+  HydStress sink debits the same flux, and the water balance closes.
+- **SP canopy seeded on a CN cold start** (`cold_start.jl` `init_satellite_phenology!`).
+  CTSM fills the canopy state from the surface-data monthly LAI/SAI only for SP,
+  FATES-SP or dry deposition (`clm_initializeMod.F90:461-486,697-707`). Under `use_cn`,
+  tlai/tsai/elai/esai/htop/hbot keep `CanopyStateType::InitCold`'s zeros (`:529-536`).
+  The port seeded them on every cold start. CNVegStructUpdate then started from the
+  surface SAI (2.77 for Bow's needleleaf; Fortran's CN value is 0.5) as `tsai_old`, and
+  relaxed it only over months. Through the first winter the tree carried 5.5× the stem
+  area, 2.9× the root conductance (through the root-area index) and 5.5× the xylem
+  conductance. `cold_start_initialize!` now takes `use_cn` and seeds only the SP
+  interpolation arrays when it is set.
+
+**AD consequence.** With vegwp now supply-limited on frozen soil, the stomata shut
+completely (bsun = bsha = 0, net assimilation exactly 0). The Medlyn gs quadratic then
+has an exact double root (b² = 4ac), and `quadratic_solve`'s `sqrt(0)` gave an
+infinite Dual partial, so Inf·0 = NaN in every derivative. `test_ad_robustness.jl`
+"Spring (285K)" and the scenarios after it failed (AD NaN, FD finite). Negative
+round-off was already clamped to 0 and hit the same `sqrt(Dual(0))`. `quadratic_solve`
+now takes sqrt = 0 as a constant when the discriminant is ≤ 0. The value is identical,
+and every Float64 result is bit-identical.
+
+Applied first, the SAI fix brings TSAI and SNOCAN to Fortran's values, but winter GPP
+stays high. The getvegwp fix closes it. With both, the needleleaf
+winter GPP and transpiration track Fortran day by day (day 9: GPP 1.166e-7 vs 1.158e-7;
+FCTR 1.09e-3 W/m2 vs QVEGT 4.34e-10 mm/s, the same flux).
+
+**Cold-start 2-year** (#362 harness vs `fortran_cold2y`, annual means, both runs with real
+SNICAR; "before" is main after #372):
+
+| field | year | Fortran | before | after |
+|---|---|---|---|---|
+| GPP (gC/m2/s) | 1 | 1.7916e-6 | 2.0742e-6 (+15.8 %) | 1.8084e-6 (**+0.9 %**) |
+| GPP | 2 | 2.2825e-6 | 2.3640e-6 (+3.6 %) | 2.3473e-6 (+2.8 %) |
+| NPP (gC/m2/s) | 1 | 3.1971e-7 | 4.4299e-7 (+38.6 %) | 3.3436e-7 (**+4.6 %**) |
+| NPP | 2 | 8.7454e-7 | 8.8176e-7 (+0.8 %) | 8.8417e-7 (+1.1 %) |
+| TG (K) | 1 / 2 | 273.10 / 273.78 | 273.04 / 273.75 | 273.09 / 273.77 |
+| TOTVEGC (gC/m2) | 1 | 175.04 | 177.57 (+1.45 %) | 175.35 (**+0.18 %**) |
+| TOTVEGC | 2 | 136.25 | 140.06 (+2.80 %) | 137.08 (**+0.61 %**) |
+| TLAI | 2 | 0.29817 | 0.30298 (+1.6 %) | 0.30083 (+0.9 %) |
+| FROOTC (gC/m2) | 2 | 46.608 | 47.877 (+2.7 %) | 47.035 (+0.9 %) |
+| EFLX_LH_TOT (W/m2) | 1 | 8.8868 | 9.2147 (+3.7 %) | 8.9201 (+0.4 %) |
+| SMINN (gN/m2) | 1 | 0.0047905 | 0.003975 (−17 %) | 0.0047737 (−0.4 %) |
+| TOTECOSYSC (gC/m2) | 2 | 1129.6 | 1134.6 | 1131.2 |
+
+(The "after" run also uses the post-advance orbit in the cold harness.)
+
+**cn_annual** (Fortran 2202 restart, time-aligned; annual mean of monthly means,
+J/F − 1; "before" is main after #372 run through the same aligned comparison):
+
+| field | Fortran | before | after |
+|---|---|---|---|
+| LEAFC | 9.927 | −0.03 % | −0.05 % |
+| TLAI | 0.06635 | −0.03 % | −0.05 % |
+| GPP | 2.463e-6 | −0.82 % | −0.98 % |
+| NPP | 1.696e-6 | −1.08 % | −1.27 % |
+| TOTVEGC | 374.5 | −0.06 % | −0.07 % |
+| TG | 273.7 | +0.01 % | +0.00 % |
+
+On the restart run the root zone is never fully frozen, so the threshold rarely
+binds. The small move (winter GPP −10 to −14 % of a ~5e-8 flux, against −2 to −7.5 %
+before) comes from the hours when it did.
+
+**Strict gate** (5 sites, scored without the old BTRAN→BTRANMN alias): Bow 68/69,
+Stillwater 68/69, Abisko 69/69, Baltimore 68/69, Savanna 69/69, the same as before.
+Stillwater, Abisko, Baltimore and Savanna are bit-identical. The SP path never
+touches the CN canopy seed, and their root zones never sit at the floor. Bow's cells
+move by hundredths of a percent (FPSN annual −2.73 % → −2.87 %, BTRANMN +3.92 % →
++4.11 %, still its one failing cell; FCEV and SOILICE move toward Fortran).
+
+**Still open.** The October grass and gridcell GPP in cn_annual (−14 % / −9.7 %)
+follows a soil-water BTRAN difference after a rain/snow event on days 279-294
+(Fortran's daily-min BTRAN rises to 0.18-0.73 there, Julia's lags). That is
+hydrology, not CN, and it is the same cell that fails Bow's SP gate (BTRANMN). Year-2
+cold-start GPP is still +2.8 %, mostly in April-May (+36 % / +8 %, against −13 to −19 %
+in Jan-Mar), and these months are essentially unchanged by this fix. Not traced yet;
+a year-2 per-patch diff is the next step. Year-1 monthly GPP is now within 6 % in every
+month (it was +64 % to +96000 % in Jan-Apr). The cold harness passes `doalb = true`
+on every step, while a Fortran cold start skips the albedo (and so CNVegStructUpdate)
+on its first steps. So Julia's step-1 TLAI is 0.71 where Fortran's is 0, a one-step
+difference.
+
 ## Scorecard
 
 | Category | Count |

@@ -116,15 +116,22 @@ end
         @test all(isfinite, av)          # availc — the field FUN reads
         @test all(isfinite, npg)         # npp_growth — FUN's carbon-cost output
         @test all(isfinite, lc)          # leafc — the veg pool that used to NaN
-        # canopy actually spins up: some patch develops LAI and photosynthesizes.
+        # canopy actually spins up: some patch develops sunlit LAI. A CN cold start
+        # begins with CanopyStateType::InitCold's zero canopy (CNVegStructUpdate builds
+        # it after step 1) on a 272 K, fully frozen soil column (TemperatureType
+        # InitCold), so the PHS root pathway sits at the 1e-16 conductance floor and
+        # getvegwp's supply-limited solve closes the stomata, as in CTSM: psnsun is 0
+        # here until the soil thaws. It must still be finite and non-negative.
         @test any(>(0.0), lai)
-        @test any(x -> isfinite(x) && x > 0.0, psn)
+        @test all(x -> isfinite(x) && x >= 0.0, psn)
         # leafc seeded from initial_vegC=100 and stays physically sane (Fortran ≈ 99+).
         @test maximum(lc) > 90.0 && maximum(lc) < 101.0
 
         # --- NON-VACUITY: forc_hgt=0 (the old harness bug) DOES NaN availc ---
+        # Two steps: step 1 has no canopy yet (zero InitCold LAI), so the canopy
+        # Monin-Obukhov solve the bug breaks first runs at step 2.
         av_bug, _, _, _, _ = Base.invokelatest(_fun_coldstart_run;
-            nsteps=1, zero_hgt=true,
+            nsteps=2, zero_hgt=true,
             FSURDAT=FSURDAT, FPARAM=FPARAM, FFORCING=FFORCING,
             FSNOWOPT=FSNOWOPT, FSNOWAGE=FSNOWAGE, INT_SNOW_MAX=INT_SNOW_MAX)
         @test any(isnan, av_bug)

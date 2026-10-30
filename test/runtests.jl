@@ -498,6 +498,7 @@ const INPROCESS_TEST_FILES = [
             "test_cn_active_layer_roll.jl",      # 1 Jan active-layer roll reaches the CN vertical profiles (C gated)
             "test_fates_snow_burial.jl",         # host snow depth reaches FATES canopy burial; case snow namelist (B gated)
             "test_fun_coldstart_finite.jl",      # use_fun=true cold start stays finite (gated)
+            "test_cn_coldstart_canopy.jl",       # use_cn cold start keeps CanopyStateType InitCold zeros (gated)
             "test_fortran_parity_luna_decomp.jl",# LUNA cadence + decomp N-source (gated)
             "test_fortran_parity_freewins.jl",   # soilresis, aerosol free-wins (gated)
             "test_fortran_parity_luna_update.jl",# LUNA EOD vcmax/jmax update (gated)
