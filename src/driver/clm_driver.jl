@@ -836,6 +836,16 @@ function clm_drv_core!(config::CLMDriverConfig,
     # here instead.
     if inst.fates !== nothing
         fates_apply_deferred_activation!(inst)
+        # dyn_ED only rewrites patch%wtcol. CTSM then runs
+        # dynSubgrid_wrapup_weight_changes -> compute_higher_order_weights
+        # (dynSubgridDriverMod.F90:313 dyn_ED, :333 wrapup, :389 compute), which
+        # re-derives patch%wtlunit / patch%wtgcell (and col%wtgcell) from the new
+        # wtcol before reweight_wrapup/setFilters (:395). Without it the FATES patches
+        # kept their surfdata wtgcell (an inactive slot kept a nonzero gridcell weight,
+        # a vegetated patch kept a stale one), which every p2g consumer -- history,
+        # lnd2atm, drydep -- reads. FATES never moves landunit weights, so
+        # update_landunit_weights (:387) has nothing to do here.
+        compute_higher_order_weights!(bc, col, lun, pch)
         # setFiltersOneGroup asserts CLUMP-level bounds; in single-clump mode the clump
         # bounds ARE the proc bounds, so present a CLUMP-level view (the mirror of the
         # `_bc_proc` view built for dyn_subgrid below).

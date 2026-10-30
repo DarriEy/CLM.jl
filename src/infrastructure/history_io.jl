@@ -282,6 +282,15 @@ function _hist_subgrid_to_gridcell_maps(fld::HistField, inst)
     end
 end
 
+# Active flags of the field's subgrid level (empty => treat every unit as active).
+function _hist_subgrid_active(fld::HistField, inst)
+    sub = fld.level == HIST_PATCH    ? inst.patch :
+          fld.level == HIST_COLUMN   ? inst.column :
+          fld.level == HIST_LANDUNIT ? inst.landunit : nothing
+    (sub === nothing || !hasproperty(sub, :active)) && return Bool[]
+    return sub.active
+end
+
 """
     hist_dov2xy(fld, vals, ng, inst) -> Vector or Matrix on the gridcell dim
 
@@ -307,9 +316,12 @@ function hist_dov2xy(fld::HistField, vals, ng::Int, inst)
     gval = zeros(Float64, ng, nlev)
     gwt  = zeros(Float64, ng, nlev)
     src  = nlev > 1 ? vals : reshape(vals, :, 1)
+    # p2g/c2g/l2g (subgridAveMod.F90:531 etc.) only average ACTIVE subgrid units.
+    act = _hist_subgrid_active(fld, inst)
 
     @inbounds for ell in 1:nlev, e in 1:nelem
         (e <= length(idx) && e <= length(wt)) || continue
+        (e <= length(act) && !act[e]) && continue
         g = idx[e]
         (g >= 1 && g <= ng) || continue
         v = src[e, ell]
