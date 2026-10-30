@@ -354,6 +354,56 @@ function phen_evergreen!(bglfr, bgtr, lgsf,
     return nothing
 end
 
+# --- cn_evergreen_phenology!: transfer→display for evergreen patches ------
+# CNPhenologyMod.F90:785-829 (non-matrix branch, CN_evergreen_phenology_opt == 1):
+# every step the whole transfer pool is displayed, t1 = 1/dt. One launch per
+# element (C or N): leaf + froot always, the four wood pools only when woody.
+@kernel function _phen_evergreen_xfer_kernel!(
+        leaf_to, froot_to, livestem_to, deadstem_to, livecroot_to, deadcroot_to,
+        @Const(leaf_x), @Const(froot_x), @Const(livestem_x), @Const(deadstem_x),
+        @Const(livecroot_x), @Const(deadcroot_x),
+        @Const(mask), @Const(itype), @Const(evergreen), @Const(woody), t1)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(leaf_to)
+        ivt = itype[p] + 1
+        if evergreen[ivt] == one(T)
+            leaf_to[p]  = t1 * leaf_x[p]
+            froot_to[p] = t1 * froot_x[p]
+            if woody[ivt] == one(T)
+                livestem_to[p]  = t1 * livestem_x[p]
+                deadstem_to[p]  = t1 * deadstem_x[p]
+                livecroot_to[p] = t1 * livecroot_x[p]
+                deadcroot_to[p] = t1 * deadcroot_x[p]
+            end
+        end
+    end
+end
+
+function phen_evergreen_xfer!(cnveg_cs::CNVegCarbonStateData, cnveg_ns::CNVegNitrogenStateData,
+        cnveg_cf::CNVegCarbonFluxData, cnveg_nf::CNVegNitrogenFluxData,
+        mask, itype, evergreen, woody, dt)
+    cs = cnveg_cs; ns = cnveg_ns; cf = cnveg_cf; nf = cnveg_nf
+    t1 = eltype(cf.leafc_xfer_to_leafc_patch)(1 / dt)
+    _launch!(_phen_evergreen_xfer_kernel!,
+        cf.leafc_xfer_to_leafc_patch, cf.frootc_xfer_to_frootc_patch,
+        cf.livestemc_xfer_to_livestemc_patch, cf.deadstemc_xfer_to_deadstemc_patch,
+        cf.livecrootc_xfer_to_livecrootc_patch, cf.deadcrootc_xfer_to_deadcrootc_patch,
+        cs.leafc_xfer_patch, cs.frootc_xfer_patch,
+        cs.livestemc_xfer_patch, cs.deadstemc_xfer_patch,
+        cs.livecrootc_xfer_patch, cs.deadcrootc_xfer_patch,
+        mask, itype, evergreen, woody, t1)
+    _launch!(_phen_evergreen_xfer_kernel!,
+        nf.leafn_xfer_to_leafn_patch, nf.frootn_xfer_to_frootn_patch,
+        nf.livestemn_xfer_to_livestemn_patch, nf.deadstemn_xfer_to_deadstemn_patch,
+        nf.livecrootn_xfer_to_livecrootn_patch, nf.deadcrootn_xfer_to_deadcrootn_patch,
+        ns.leafn_xfer_patch, ns.frootn_xfer_patch,
+        ns.livestemn_xfer_patch, ns.deadstemn_xfer_patch,
+        ns.livecrootn_xfer_patch, ns.deadcrootn_xfer_patch,
+        mask, itype, evergreen, woody, t1)
+    return nothing
+end
+
 # --- crop_phase!: derive current crop phase into an output array ----------
 @kernel function _phen_crop_phase_kernel!(crop_phase_out, @Const(mask),
         @Const(croplive), @Const(gddtsoi), @Const(hui),
@@ -1085,7 +1135,8 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
 
         cn_evergreen_phenology!(pstate, mask_soilp, pftcon, cnveg_state,
                                 cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
-                                patch_data, avg_dayspyr)
+                                patch_data, avg_dayspyr;
+                                evergreen_phenology_opt = varctl.CN_evergreen_phenology_opt)
 
         cn_season_decid_phenology!(pstate, params, mask_soilp, pftcon,
                                    temperature, water_diag, cnveg_state,
@@ -1192,28 +1243,27 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
                                  cnveg_cf::CNVegCarbonFluxData,
                                  cnveg_nf::CNVegNitrogenFluxData,
                                  patch_data::PatchData,
-                                 avg_dayspyr::Real)
+                                 avg_dayspyr::Real;
+                                 evergreen_phenology_opt::Int = varctl.CN_evergreen_phenology_opt)
     dt         = pstate.dt
-    # The evergreen storage→transfer uses Fortran's FIXED tranr = 0.0002
-    # (CNPhenologyMod CNEvergreenPhenology), NOT fstor2tran=0.5 — that 0.5 is the
-    # DECIDUOUS onset fraction. Using fstor2tran here drained evergreen storage
-    # 2500x too fast (halving leafc_storage every step).
-    #
-    # KNOWN DIVERGENCE (deliberate, not an oversight — do not "fix" casually):
-    # Fortran applies this transfer ONLY when `cn_evergreen_phenology_opt == 1`;
-    # with opt == 0 it skips the storage→transfer entirely. `varctl` HAS the flag
-    # (`CN_evergreen_phenology_opt::Int = 0`, varctl.jl:112) and its default is 0 —
-    # so a faithful port would skip. CLM.jl instead applies tranr = 0.0002
-    # UNCONDITIONALLY. The rate is small, but "small" is not "zero", and this is a
-    # real fidelity gap, not a rounding detail.
-    #
-    # It is NOT gated here because the whole 16-biome parity scorecard (1102/1104
-    # vars within tol) was validated against the current always-on behaviour;
-    # switching it off is a result-changing change that needs its own re-validation
-    # against the Fortran reference, not a rider on an unrelated PR. Gating it =
-    # `tranr = (varctl.CN_evergreen_phenology_opt == 1) ? 0.0002 : 0.0`, then re-run
-    # scripts/parity_run_domain.jl across the scorecard.
-    tranr = 0.0002
+    # CNEvergreenPhenology (CNPhenologyMod.F90:724-831). bglfr/bgtr/lgsf are set for
+    # every evergreen patch; everything else is the `CN_evergreen_phenology_opt == 1`
+    # block (the CTSM namelist default whenever use_flexibleCN, :587):
+    #   * storage -> transfer at Fortran's FIXED tranr = 0.0002 per step (not
+    #     fstor2tran = 0.5, the DECIDUOUS onset fraction), :739-776;
+    #   * transfer -> display, t1 = 1/dt, i.e. the whole transfer pool every step,
+    #     :778-829.
+    # The port used to apply the first half unconditionally and never the second, so
+    # evergreen transfer pools only filled. That was invisible while use_flexibleCN
+    # was off (the CLM4.5 allocation sends evergreen growth straight to display via
+    # fcur), but FlexibleCN sets fcur = 0 for evergreens
+    # (NutrientCompetitionFlexibleCNMod.F90:412-414), so ALL new evergreen leaf and
+    # fine-root growth goes to storage and reaches display only through this block.
+    # With opt == 0 Fortran skips both transfers; tranr = 0 below makes the
+    # storage -> transfer fluxes zero (their per-step zeroed value) and the
+    # transfer -> display kernel is not launched.
+    _opt1 = evergreen_phenology_opt == 1
+    tranr = _opt1 ? 0.0002 : 0.0
 
     # Per-patch independent: evergreen background rates + storage→transfer.
     phen_evergreen!(
@@ -1234,6 +1284,10 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
         cnveg_ns.livestemn_storage_patch, cnveg_ns.deadstemn_storage_patch,
         cnveg_ns.livecrootn_storage_patch, cnveg_ns.deadcrootn_storage_patch,
         dt, tranr, Float64(avg_dayspyr), SECSPDAY)
+
+    # Transfer -> display (CNPhenologyMod.F90:778-829, non-matrix branch).
+    _opt1 && phen_evergreen_xfer!(cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
+        mask_soilp, patch_data.itype, pftcon.evergreen, pftcon.woody, dt)
 
     return nothing
 end

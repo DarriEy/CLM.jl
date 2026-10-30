@@ -780,7 +780,7 @@ the FATES harnesses) did not get them. They now live only in `clm_initialize!`.
 | 4 | `vcmax_opt` | `0` | `3` when `use_flexibleCN` | `:586`; lnd_in `vcmax_opt = 3` | CN |
 | 5 | `MM_Nuptake_opt` | `false` | `true` when `use_flexibleCN` | `:583` | CN (varctl only: the port's cold init already hard-codes the `.true.` branch of `CNVeg{Carbon,Nitrogen}StateType` InitCold) |
 | 6 | `CNratio_floating` | `false` | `true` when `use_flexibleCN` | `:584` | CN (live: `phenology.jl` litterfall C:N) |
-| 7 | `CN_evergreen_phenology_opt` | `0` | `1` when `use_flexibleCN` | `:587` | CN (varctl only: the port's phenology already runs the `=1` branch unconditionally) |
+| 7 | `CN_evergreen_phenology_opt` | `0` | `1` when `use_flexibleCN` | `:587` | CN (live since the evergreen follow-up below: gates `cn_evergreen_phenology!`'s storage → transfer and transfer → display) |
 | 8 | `carbon_resp_opt` | `0` | `0` with FUN, `1` for flexibleCN without FUN | `:588-589` | CN (unchanged in the default case) |
 | 9 | `use_nguardrail` | `false` | `true` when `use_cn` | `:642-643` | CN |
 | 10 | `leafresp_method` | `1` (Ryan 1991) | `2` (Atkin 2015) when `use_cn` | `:102-104`; lnd_in `leafresp_method = 2` | CN (SP never reads it) |
@@ -983,14 +983,83 @@ the FATES parity tests, `test_fun_coldstart_finite.jl`, `test_cn_active_layer_ro
 moved.
 
 ### Open findings from this campaign
-1. **flexibleCN leaf allocation residual** (cn_annual LEAFC −5 % by December with
-   `use_flexibleCN`, −0.5 % without). Fortran runs flexibleCN; the port's flexible
-   allocation path needs a step-level comparison.
-2. **Cold-start TG +0.24 K in year 2** once the canopy is Fortran-sized.
+1. ~~**flexibleCN leaf allocation residual**~~ — closed, see "Follow-up: evergreen
+   transfer → display" below.
+2. ~~**Cold-start TG +0.24 K in year 2**~~ — closed by the same fix.
 3. **The old snow pair NaNs the 250 K FD perturbation** in `test_ad_robustness.jl`;
    that test silently skipped its strict check under the old defaults.
 4. `fortran_parity_common.jl` falls back to empty SNICAR paths when
    `CESM_INPUTDATA` is unset, so CN harness runs without it use zeroed snow optics.
+
+### Follow-up: evergreen transfer → display (closes findings 1 and 2)
+
+**Root cause.** `CNEvergreenPhenology` with `CN_evergreen_phenology_opt == 1` does two
+things for evergreen patches every step (`CNPhenologyMod.F90:736-831`): storage →
+transfer at the fixed `tranr = 0.0002` (`:739-776`), then transfer → display with
+`t1 = 1/dt`, i.e. the whole transfer pool (`:778-829`). The port
+(`phenology.jl` `cn_evergreen_phenology!`) did the first unconditionally and never the
+second, so `leafc_xfer` / `frootc_xfer` (and the wood and N transfer pools) of an
+evergreen patch only ever filled: `LEAFC_XFER_TO_LEAFC` was 0 all year on the Bow
+needleleaf tree where Fortran's is ~6e-8 gC/m2/s, and by December the tree's
+`leafc_xfer` was ~8000× Fortran's.
+
+This was hidden while `use_flexibleCN` was off. The CLM4.5 allocation uses the PFT's
+`fcur` for evergreens, so their growth went straight to display. FlexibleCN sets
+`fcur = 0` for evergreens (`NutrientCompetitionFlexibleCNMod.F90:412-414`, ported
+faithfully at `nutrient_competition_flexiblecn.jl:206`), so all new evergreen leaf and
+fine-root C and N go to storage and reach display only through the missing block. The
+flexibleCN allocation, demand and FUN branches themselves were checked line by line
+against Fortran and match. The difference was found with a second, patch-level
+daily-mean history tape on the pristine ctsm5.3.012 exe (no rebuild: `hist_fincl2`
+with ~90 CN fields, `hist_dov2xy = .false.`) diffed against the same fields dumped
+per patch from the Julia harness. The first field that is wrong is
+`LEAFC_XFER_TO_LEAFC` (−100 % from day 1). Everything downstream on the tree patch
+(`LEAFC`, `TLAI`, `FROOTC`, `GPP`) follows it.
+
+**Fix.** `cn_evergreen_phenology!` now runs both halves when
+`CN_evergreen_phenology_opt == 1` (new `phen_evergreen_xfer!` kernel for the
+transfer → display fluxes) and neither when it is 0, as Fortran does. The value comes
+from `varctl`, which `clm_initialize!` sets to 1 whenever `use_flexibleCN`
+(`namelist_defaults_ctsm.xml:587`). So the previously deliberate "always-on tranr"
+divergence is gone too. The SP strict gate does not run CN phenology and is
+unaffected.
+
+**cn_annual** (Fortran 2202 restart, 365 days, real SNICAR; rel = |J−F|/(1+|F|),
+annual mean of monthly means):
+
+| field | Fortran | before (#371) | after | rel before | rel after |
+|---|---|---|---|---|---|
+| LEAFC (gC/m2) | 9.8907 | 9.3737 (−4.8 %) | 9.8877 (−0.03 %) | 4.8e-2 | **2.7e-4** |
+| TLAI | 0.066109 | 0.062631 | 0.066081 | 3.3e-3 | **2.7e-5** |
+| GPP (gC/m2/s) | 2.4542e-6 | 2.4151e-6 (−1.6 %) | 2.4346e-6 (−0.8 %) | 3.9e-8 | 2.0e-8 |
+| NPP (gC/m2/s) | 1.6903e-6 | 1.6760e-6 (−0.8 %) | 1.6728e-6 (−1.0 %) | 1.4e-8 | 1.8e-8 |
+| TOTVEGC (gC/m2) | 374.37 | 374.22 | 374.14 | 4.0e-4 | 6.0e-4 |
+| EFLX_LH_TOT (W/m2) | 8.3172 | 8.2654 | 8.3148 | 5.6e-3 | 2.6e-4 |
+| FSH (W/m2) | 39.644 | 39.587 | 39.627 | 1.4e-3 | 4.0e-4 |
+| TG (K) | 273.62 | 273.64 | 273.62 | 6e-5 | <1e-5 |
+
+On the tree patch alone, LEAFC is now within 0.3 % in every month (it was −25 % by
+December). The remaining grass-patch differences are onset/offset timing in April and
+October, which predate this change.
+
+**Cold-start 2-year** (#362 harness vs `fortran_cold2y`, annual means):
+
+| field | year | Fortran | before (#371) | after |
+|---|---|---|---|---|
+| TG (K) | 1 | 273.10 | 273.31 (+0.21) | 273.04 (**−0.06**) |
+| TG (K) | 2 | 273.78 | 274.27 (+0.49) | 273.75 (**−0.03**) |
+| TOTVEGC (gC/m2) | 1 | 175.04 | 177.20 (1.2e-2) | 177.57 (1.4e-2) |
+| TOTVEGC (gC/m2) | 2 | 136.25 | 139.84 (2.6e-2) | 140.06 (2.8e-2) |
+| TLAI | 1 / 2 | 0.4024 / 0.2982 | 0.3993 / 0.2871 | 0.4032 / 0.3030 |
+| FROOTC (gC/m2) | 2 | 46.61 | 41.62 (−11 %) | 47.88 (+2.7 %) |
+| GPP (gC/m2/s) | 2 | 2.2825e-6 | 2.1701e-6 (−4.9 %) | 2.3640e-6 (+3.6 %) |
+| EFLX_LH_TOT (W/m2) | 2 | 8.5665 | 8.5061 | 8.6009 |
+
+So the cold-start TG bias came from the evergreen canopy too. With leaf C stranded in
+transfer, the tree's displayed canopy and fine roots were too small, and they shaded
+and transpired too little. TOTVEGC moves slightly away (by 0.2 percentage points)
+because carbon that used to sit in the transfer pool, which counts in TOTVEGC, is now
+displayed leaf that turns over.
 
 ## Scorecard
 
