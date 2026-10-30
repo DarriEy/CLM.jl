@@ -188,6 +188,67 @@ function batched_band_solve!(tvector::AbstractMatrix{T}, bmatrix, rvector,
     return nothing
 end
 
+# --------------------------------------------------------------------------
+# Adjoint helpers for batched_band_solve! (used by its GPU reverse rule in
+# enzyme_rules.jl). For each active column system A x = r:
+#   λ = A⁻ᵀ x̄ ;  r̄ += λ ;  Ā[i,j] -= λ[i] x[j]  (band entries) ;  x̄ consumed.
+# The transpose is formed in the same band storage (kl == ku), so λ comes from the
+# primal batched solver itself.
+# --------------------------------------------------------------------------
+@kernel function _band_transpose_kernel!(bT, @Const(bmatrix), @Const(jtop), @Const(jbot),
+                                         @Const(mask), kl::Int, ku::Int, nlevsno_off::Int)
+    c = @index(Global)
+    @inbounds if mask[c]
+        jt = jtop[c] + nlevsno_off + 1
+        n = jbot[c] - jtop[c] + 1
+        for j in 1:n
+            for i in max(1, j - kl):min(n, j + ku)
+                # Aᵀ[i,j] = A[j,i] = bmatrix[c, (j-i)+kl+1, jt+j-1]
+                bT[c, (i - j) + kl + 1, jt + i - 1] = bmatrix[c, (j - i) + kl + 1, jt + j - 1]
+            end
+        end
+    end
+end
+
+@kernel function _band_solve_adjoint_kernel!(drv, dbm, dtv, @Const(lam), @Const(xsol),
+        @Const(jtop), @Const(jbot), @Const(mask), kl::Int, ku::Int, nlevsno_off::Int,
+        acc_r::Bool, acc_b::Bool)
+    c = @index(Global)
+    @inbounds if mask[c]
+        jt = jtop[c] + nlevsno_off + 1
+        n = jbot[c] - jtop[c] + 1
+        for i in 1:n
+            li = lam[c, jt + i - 1]
+            acc_r && (drv[c, jt + i - 1] += li)
+            if acc_b
+                for j in max(1, i - ku):min(n, i + kl)
+                    dbm[c, (i - j) + kl + 1, jt + i - 1] -= li * xsol[c, jt + j - 1]
+                end
+            end
+        end
+        for i in 1:n
+            dtv[c, jt + i - 1] = zero(eltype(dtv))
+        end
+    end
+end
+
+function _batched_band_solve_pullback!(dtv, drv, dbm, xsol, bmatrix, jtop, jbot, mask,
+                                       kl::Int, ku::Int, nlevsno_off::Int)
+    kl == ku || error("batched_band_solve! adjoint assumes a symmetric bandwidth")
+    nc = size(xsol, 1)
+    bT = similar(bmatrix); fill!(bT, zero(eltype(bT)))
+    _launch!(_band_transpose_kernel!, bT, bmatrix, jtop, jbot, mask, kl, ku, nlevsno_off;
+             ndrange = nc)
+    lam = copy(dtv)
+    xbar = copy(dtv)
+    batched_band_solve!(lam, bT, xbar, jtop, jbot, mask, kl, ku, nlevsno_off)
+    # (`drv`/`dbm` placeholders are never written when their flag is false.)
+    _launch!(_band_solve_adjoint_kernel!, drv === nothing ? lam : drv,
+             dbm === nothing ? bT : dbm, dtv, lam, xsol, jtop, jbot, mask,
+             kl, ku, nlevsno_off, drv !== nothing, dbm !== nothing; ndrange = nc)
+    return nothing
+end
+
 """
     band_diagonal_solve!(u, b_matrix, r, jtop, jbot, nband, ncols)
 

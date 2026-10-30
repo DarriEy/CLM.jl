@@ -119,6 +119,39 @@ _launch_scalar_grad(a::Active) = Enzyme.make_zero(a.val)
 _launch_scalar_grad(a) = nothing
 
 # --------------------------------------------------------------------------
+# batched_band_solve! on GPU arrays — exact linear-solve adjoint.
+#
+# Enzyme's reverse of the batched kernel (per-thread pivoted Gaussian elimination
+# with a data-dependent system size, overwriting its scratch in place) runs on CUDA
+# but returns wrong adjoints: the per-phase CUDA-vs-CPU check of the soil-temperature
+# solve phase disagreed by O(1) while every other soil-temperature phase matched to
+# 1e-15. This rule supplies the adjoint directly — λ = A⁻ᵀ x̄ (solved with the same
+# batched solver on the transposed band), r̄ += λ, Ā -= λ xᵀ on the band, x̄ consumed.
+# Restricted to GPU arrays, so the CPU reverse path is unchanged.
+# --------------------------------------------------------------------------
+_dval_or_nothing(a) = a isa Union{Duplicated, Enzyme.DuplicatedNoNeed} ? a.dval : nothing
+
+function augmented_primal(config, func::Const{typeof(batched_band_solve!)}, ::Type{RT},
+        tvector::Duplicated{<:GPUArraysCore.AbstractGPUArray}, bmatrix::Enzyme.Annotation,
+        rvector::Enzyme.Annotation, jtop::Enzyme.Annotation, jbot::Enzyme.Annotation,
+        mask::Enzyme.Annotation, kl::Const, ku::Const, off::Const) where {RT}
+    func.val(tvector.val, bmatrix.val, rvector.val, jtop.val, jbot.val, mask.val,
+             kl.val, ku.val, off.val)
+    return AugmentedReturn(nothing, nothing, (copy(tvector.val), copy(bmatrix.val)))
+end
+
+function reverse(config, func::Const{typeof(batched_band_solve!)}, ::Type{RT}, tape,
+        tvector::Duplicated{<:GPUArraysCore.AbstractGPUArray}, bmatrix::Enzyme.Annotation,
+        rvector::Enzyme.Annotation, jtop::Enzyme.Annotation, jbot::Enzyme.Annotation,
+        mask::Enzyme.Annotation, kl::Const, ku::Const, off::Const) where {RT}
+    xsol, bm = tape
+    _batched_band_solve_pullback!(tvector.dval, _dval_or_nothing(rvector),
+        _dval_or_nothing(bmatrix), xsol, bm, jtop.val, jbot.val, mask.val,
+        kl.val, ku.val, off.val)
+    return (nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+end
+
+# --------------------------------------------------------------------------
 # hydrond_snow_persistence! — launch-level overwrite/add adjoint.
 #
 # Differentiating the KA launch directly makes the scalar `dtime` argument

@@ -251,6 +251,8 @@ const INPROCESS_TEST_FILES = [
     # (src/driver/driver_reverse.jl). Builds a real inst → placed with the other
     # clm_initialize!-using integration tests, not the fresh-global unit block.
     "test_driver_reverse.jl",
+    # FD check of the batched_band_solve! adjoint behind its GPU reverse rule.
+    "test_band_solve_adjoint.jl",
     "test_multisite_calibration.jl",
     "test_cn_integration.jl",
 
