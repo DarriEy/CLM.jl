@@ -72,7 +72,7 @@ function cf_rev_init!(b, aux)
     _launch!(_cf_no_biomass_kernel!, sc.frac_rad_abs_by_stem, sc.sa_leaf, sc.sa_stem,
         sc.sa_internal, sc.cp_leaf, cp_stem, sc.rstem, fp, cs.elai_patch,
         cs.esai_patch; ndrange = fn)
-    fv.rb1_patch[1:length(sc.air)] .= zero(FT)
+    _zero_all!(view(fv.rb1_patch, 1:length(sc.air)))
     if aux.use_psn
         _launch!(_cf_daylength_kernel!, sc.dayl_factor, fp, pd.gridcell, fc.dayl, fc.max_dayl;
             ndrange = fn)
