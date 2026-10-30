@@ -45,6 +45,7 @@ const NAME2IH = Dict(t[2] => t[10] for t in CLM._HISTORY_VAR_REGISTRY)
 const PARTEH = parse(Int, get(ENV, "FATES_CNP_PARTEH", "2"))
 
 function build_cnp()
+    fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, fates_parteh_mode=PARTEH, start_date=START, dtime=Int(DTIME),

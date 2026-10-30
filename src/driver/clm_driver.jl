@@ -1705,6 +1705,22 @@ function clm_drv_core!(config::CLMDriverConfig,
         # 15 °C): the FATES cold-deciduous phenology then reads a constant, wrong 15 °C veg
         # temperature and eventually fires a spurious synchronized leaf-off that never re-
         # flushes → carbon starvation → a phantom boom/bust die-back on multi-year runs.
+        # Fortran clm_fates%WrapUpdateFatesRmean (clmfates_interfaceMod.F90:3227-3245)
+        # first packs EVERY FATES patch's own leaf temperature,
+        #     bc_in(s)%t_veg_pa(ifp) = temperature_inst%t_veg_patch(p),  p = ifp + patchi(c)
+        # so each patch's tveg24 follows its own canopy.
+        let s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                fbc = inst.fates.bc_in[s]
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    ifp <= length(fbc.t_veg_pa) || continue
+                    fbc.t_veg_pa[ifp] = inst.temperature.t_veg_patch[p]
+                end
+            end
+        end
         UpdateFatesRMeansTStep(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
 
         # (The per-timestep "hifrq" FATES history fill runs in the FATES dynamics

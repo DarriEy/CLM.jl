@@ -1040,6 +1040,7 @@ function clm_fates_init!(inst::CLMInstances; nsites::Int = 1,
             s0 <= nsites || break
             site_col0[s0] = c
         end
+        fates_update_snow_burial!(inst, site_col0)   # wrap_update_hlmfates_dyn snow block
         canopy_summarization!(nsites, sites, bc_in)
         update_hlm_dynamics!(nsites, sites, site_col0, fates.bc_out)
         for s in 1:nsites

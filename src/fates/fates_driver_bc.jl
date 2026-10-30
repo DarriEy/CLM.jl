@@ -871,6 +871,43 @@ function fates_pack_bcin_sp!(inst::CLMInstances; s::Int, c::Int)
 end
 
 """
+    fates_update_snow_burial!(inst, site_col; is_initing_from_restart=false)
+
+The snow block that opens Fortran `wrap_update_hlmfates_dyn`
+(clmfates_interfaceMod.F90:1494-1504):
+
+    bc_in(s)%snow_depth_si   = snow_depth(c)       ! waterdiagnosticbulk%snow_depth_col
+    bc_in(s)%frac_sno_eff_si = frac_sno_eff(c)
+    if (.not. is_initing_from_restart) call UpdateFatesAvgSnowDepth(sites, bc_in)
+
+`UpdateFatesAvgSnowDepth` (EDCanopyStructureMod.F90:1478) sets `site%snow_depth =
+snow_depth_si * frac_sno_eff_si`, which the leaf-area profile uses to bury the canopy
+layers below the snow surface (`elai`/`esai` vs `tlai`/`tsai`,
+EDCanopyStructureMod.F90 leaf_area_profile) and which photosynthesis and radiation
+read. The port never packed these, so FATES saw no snow: the exposed LAI equalled the
+total LAI all winter (Bow, March 2003: tree-patch `elai` 0.41 vs Fortran 0.24, the
+small patch 0.14 vs the 0.1 floor), the canopy absorbed 2-15x the SW and the
+melt-season leaf ran 0.3-1.1 K warm. Runs in the daily step and the cold start,
+where Fortran calls `wrap_update_hlmfates_dyn` (:1266, :2202).
+"""
+function fates_update_snow_burial!(inst::CLMInstances, site_col::AbstractVector{<:Integer};
+                                   is_initing_from_restart::Bool = false)
+    fates = inst.fates
+    fates === nothing && return inst
+    wdb = inst.water.waterdiagnosticbulk_inst
+    for s in 1:fates.nsites
+        c = s <= length(site_col) ? site_col[s] : 0
+        (c == 0 || c > length(wdb.snow_depth_col)) && continue
+        # (non-finite only if the host water state is not cold-started yet)
+        sd = wdb.snow_depth_col[c]; fs = wdb.frac_sno_eff_col[c]
+        fates.bc_in[s].snow_depth_si   = isfinite(sd) ? sd : 0.0
+        fates.bc_in[s].frac_sno_eff_si = isfinite(fs) ? fs : 0.0
+    end
+    is_initing_from_restart || UpdateFatesAvgSnowDepth!(fates.sites, fates.bc_in)
+    return inst
+end
+
+"""
     fates_daily_dynamics_step!(inst; nlevsoil, nlevdecomp, use_fates_bgc=false)
 
 Run one FATES *daily demographic step* for every FATES site attached to `inst`,
@@ -992,6 +1029,7 @@ function fates_daily_dynamics_step!(inst::CLMInstances; nlevsoil::Int,
     #    Mirrors the Fortran host (canopy summarization precedes update_hlm_dynamics
     #    in wrap_update_hlmfates_dyn after dynamics). `fcolumn` (site->column map) is
     #    unused by the body, which indexes only by site.
+    fates_update_snow_burial!(inst, site_col)
     canopy_summarization!(fates.nsites, fates.sites, fates.bc_in)
     fates_wrap_seed_outgoing!(fates)
     update_hlm_dynamics!(fates.nsites, fates.sites, site_col, fates.bc_out)
