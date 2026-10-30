@@ -110,6 +110,18 @@ end
     return nothing
 end
 
+# Fill `x` with `v`. Host arrays use `fill!` (unchanged). Device arrays use a CLM
+# kernel launched through `_kcall!`, so the fill value reaches the GPU as a scalar
+# kernel argument the `_gpu_launch!` reverse rule handles; GPUArrays' generic
+# `fill!` / scalar broadcast kernels hit the "Active kernel arguments" error under
+# CUDA reverse AD (seen for `bmatrix .= 0` / `fill!(bmatrix, 0)` in set_matrix!).
+@kernel function _fill_value_kernel!(out, v)
+    i = @index(Global)
+    @inbounds out[i] = v
+end
+_fill_dev!(x::Union{Array,BitArray}, v) = fill!(x, v)
+_fill_dev!(x, v) = _launch!(_fill_value_kernel!, x, v; ndrange = length(x))
+
 _gpu_launch_inner!(kernel, backend, ndrange, args...) =
     (kernel(backend)(args...; ndrange = ndrange); KA.synchronize(backend); nothing)
 _gpu_launch!(kernel, backend, ndrange, args...) =
