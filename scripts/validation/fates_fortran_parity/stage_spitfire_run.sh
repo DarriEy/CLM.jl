@@ -34,7 +34,14 @@ STEPS=${STEPS:-17520}
 # synthetic spatially-uniform CLM.jl parity streams in $IN/lnd/clm2/firedata
 # (scripts/validation/make_fire_streams.jl), on the 0.9x1.25 ESMF mesh.
 SPITFIRE_MODE=${SPITFIRE_MODE:-1}
-export SPITFIRE_MODE
+# REAL_STREAMS=1 (modes > 1) uses the CTSM default streams instead of the synthetic
+# ones: the NASA LIS/OTD 3-hourly lightning climatology (stream year 1, cycled) and
+# the HYDE 3.2 population density at stream year 2000 (the archived lnd_in setting).
+#   $IN/atm/datm7/NASA_LIS/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc
+#   $IN/lnd/clm2/firedata/clmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc
+# (+ their ESMF meshes; ~400 MB from the CESM inputdata server).
+REAL_STREAMS=${REAL_STREAMS:-0}
+export SPITFIRE_MODE REAL_STREAMS
 START_YMD=${START_YMD:-20020701}
 CDL=${CDL:-$D/installs/clm/ctsm5.3.012/src/fates/parameter_files/fates_params_default.cdl}
 # Paths baked into the archived namelists (the machine the case was built on).
@@ -72,7 +79,9 @@ over = {'fsurdat': f"'{P}/surfdata_clm.nc'", 'paramfile': f"'{P}/clm5_params.nc'
 mode = int(os.environ['SPITFIRE_MODE'])
 FD = f'{IN}/lnd/clm2/firedata'
 MESH = f"'{IN}/share/meshes/fv0.9x1.25_141008_polemod_ESMFmesh.nc'"
-if mode >= 2:   # FATESFireData reads BOTH streams for every mode > 1 (hdm_init)
+real = os.environ['REAL_STREAMS'] == '1'
+LIS = f'{IN}/atm/datm7/NASA_LIS'
+if mode >= 2 and not real:   # FATESFireData reads BOTH streams for every mode > 1 (hdm_init)
     over['stream_fldfilename_popdens'] = f"'{FD}/clmforc.UNIFORM_hdm_0.9x1.25_CLMjl-parity.nc'"
     over['stream_meshfile_popdens'] = MESH
 FIELDS = ['FATES_NESTEROV_INDEX', 'FATES_IGNITIONS', 'FATES_FDI', 'FATES_ROS',
@@ -83,6 +92,8 @@ FIELDS = ['FATES_NESTEROV_INDEX', 'FATES_IGNITIONS', 'FATES_FDI', 'FATES_ROS',
           'FATES_FUEL_MOISTURE_FC', 'FATES_FUEL_AMOUNT_FC', 'FATES_TVEG24', 'FATES_VEGC',
           'FATES_NPATCHES', 'FATES_GPP', 'FATES_LITTER_AG_CWD_EL', 'FATES_LITTER_AG_FINE_EL',
           'WIND', 'RH', 'RAIN', 'SNOW', 'TBOT', 'TOTSOMC', 'TOTLITC', 'HR']
+if mode >= 2:   # the host stream values (FireDataBaseType hist_addfld1d, mode > 1 only)
+    FIELDS += ['LNFM', 'HDM']
 seen, out = set(), []
 for line in open(f'{ARCH}/lnd_in'):
     line = fix(line)
@@ -92,7 +103,13 @@ for line in open(f'{ARCH}/lnd_in'):
         out.append(f"{m.group(1)}{k}{m.group(3)}{over[k]}\n")
     else:
         out.append(line)
-    if line.strip() == '&light_streams' and mode >= 2:
+    if line.strip() == '&light_streams' and mode >= 2 and real:
+        # CTSM defaults (namelist_defaults_ctsm.xml): 3-hourly climatology, year 1.
+        out.append(f" lightngmapalgo = 'bilinear'\n stream_fldfilename_lightng = "
+                   f"'{LIS}/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc'\n"
+                   f" stream_meshfile_lightng = '{LIS}/clmforc.Li_2012_climo1995-2011.T62_ESMFmesh_cdf5_110621.nc'\n"
+                   " stream_year_first_lightng = 1\n stream_year_last_lightng = 1\n")
+    elif line.strip() == '&light_streams' and mode >= 2:
         out.append(f" lightngmapalgo = 'bilinear'\n stream_fldfilename_lightng = "
                    f"'{FD}/clmforc.UNIFORM_lnfm_0.9x1.25_CLMjl-parity.nc'\n"
                    f" stream_meshfile_lightng = {MESH}\n"

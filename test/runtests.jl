@@ -319,6 +319,7 @@ const INPROCESS_TEST_FILES = [
     # FATES (Tier F) Batch 11 — SPITFIRE main fire driver (SFMainMod).
     "test_fates_sfmain.jl",
     "test_fates_fire_weather_host.jl",
+    "test_fates_spitfire_modes.jl",
     # FATES (Tier F) Batch 11 — two-stream radiation glue (FatesTwoStreamUtilsMod)
     # + land-use-change transitions (FatesLandUseChangeMod).
     "test_fates_twostreamutils_landuse.jl",

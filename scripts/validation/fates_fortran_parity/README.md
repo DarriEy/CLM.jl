@@ -1989,10 +1989,72 @@ The absolute burned area again carries the 2.65x fuel-driven factor. The ratio i
 the ignition path, which is the host lightning stream -> `lnfm24` -> `lightning24` ->
 `NF`, and it agrees to 0.4 %.
 
-Not compared against Fortran: modes 3-5 (population density, anthropogenic ignitions).
-The host path is ported and unit-tested, and the enumeration fix makes the mode numbers
-correct. The real `clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc` climatology
-is not staged on this box; only the synthetic uniform stream is.
+## Modes 2-5 on the real CTSM streams (2026-10-30), threshold 5 kW/m, 450 days
+
+Enumeration (FATESFireFactoryMod.F90:25-30, passed at clmfates_interfaceMod.F90:464-467):
+2 lightning_from_data, 3 successful_ignitions (FDI forced to 1, cloud-to-ground 1),
+4 anthro_ignitions (adds Li et al. 2012 human ignitions from `pop_density`),
+5 anthro_suppression. FATES has no mode-5 branch (SFMainMod.F90:499-535); the host only
+also packs `pop_density` (>= 4), so mode 5 runs as mode 2. The Fortran mode-5 h0 is
+byte-identical to mode 2 in every field, so no mode-5 extract is committed.
+
+Streams: the CTSM defaults, from the CESM inputdata server (~400 MB, under
+`$SYMFLUENCE_DATA/installs/cesm-inputdata`):
+`atm/datm7/NASA_LIS/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc` (3-hourly
+climatology, T62, stream year 1 cycled) and
+`lnd/clm2/firedata/clmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc`
+(`stream_year_first/last_popdens` = 2000, as in the archived lnd_in), plus their meshes.
+
+```bash
+# Fortran (own RUN dir; adds LNFM/HDM to the h0 for modes > 1)
+SPITFIRE_MODE=4 REAL_STREAMS=1 CDL=thr5.cdl STEPS=10800 RUN=... ./stage_spitfire_run.sh
+# Julia, one mode at a time
+REAL_STREAMS=1 FIRE_THRESHOLD=5 SPITFIRE_MODE=4 julia --project=. fates_spitfire_parity.jl \
+    fates_spitfire_m4real_thr5_fortran.csv 450 out.csv
+```
+(`thr5.cdl`: `make_param_variant.py fates_params_default.cdl thr5.cdl fates_fire_threshold=5`.)
+
+**Two host-stream bugs**, both found only with the real files:
+* **HDM year window.** The port ignored `stream_year_first/last_popdens` and
+  `model_year_align_popdens`. HYDE has one mid-year record per year, 1850-2016, all on the
+  same day of year, so the port always took record 1: Bow got the 1850 density
+  (0.020 /km2) instead of the year-2000 1.399 /km2, which is 70x fewer human ignitions in
+  mode 4. `fire_stream_init!` now applies the CDEPS window (dshr_stream_mod.F90
+  `shr_stream_findBounds`, taxmode 'extend': data year = first + year - align, held at
+  the first/last valid record outside the window; dshr_tinterp_mod.F90:108-119 'nearest',
+  ties to the lower bound). It is opt-in through `clm_initialize!` kwargs of the same
+  names, so runs without them are unchanged.
+* **Stream time.** Fortran advances the streams at `get_curr_date`, the end of the step
+  (FireDataBaseType.F90 `lnfm_interp`). `clm_run` passes that time; this harness passes
+  the start of the step. For the 3-hourly lightning a one-step lag moves day-mean LNFM by
+  1.5 % (max 2.4x on single days). `FATESFireData.tod_offset` (default 0) is set to
+  dtime by the harness.
+
+Host streams (every mode): day-mean LNFM 6.3e-5 mean / 1.9e-3 max relative error;
+HDM 1.39809 vs 1.39904 (6.8e-4, ESMF bilinear on the sphere vs lon/lat bilinear).
+
+On main after #363 (host canopy temperature under snow), the fuel residual is gone and
+the absolute fire chain now tracks Fortran:
+
+| mode | burn days F / J | total burned fraction F | J | J/F | fuel mean J/F |
+|---|---|---|---|---|---|
+| 2 lightning from data | 11 / 11 (402-412, same days) | 7.527e-5 | 7.580e-5 | 1.007 | 1.0018 |
+| 3 successful ignitions | 11 / 11 | 4.479e-4 | 4.500e-4 | 1.005 | 1.0017 |
+| 4 anthro ignitions | 11 / 11 | 8.961e-5 | 9.025e-5 | 1.007 | 1.0017 |
+| 5 anthro suppression | = mode 2 (Fortran bitwise) | | | | |
+
+Mode effects (ratio to mode 2), Fortran / Julia:
+
+| | burned fraction, 450 days | FATES_IGNITIONS, day 402 |
+|---|---|---|
+| mode 3 / mode 2 | 5.9515 / 5.9364 | 6.1977 / 6.1994 (= 1/(cg FDI)) |
+| mode 4 / mode 2 | 1.1906 / 1.1906 | 1.1598 / 1.1597 |
+
+Other fields over 450 days (mode 2; modes 3-4 alike): mean relative error NI 5.4e-4, FDI
+5.2e-4, ignitions 3.9e-5, ROS 2.0e-4, FI 3.0e-4, fire C loss 5.0e-4, fire mortality
+2.8e-4, VEGC 5.5e-4, FATES_NPATCHES exact. `test_fates_spitfire_modes.jl` pins the year
+window, the per-mode ignition logic, and (data-gated) LNFM/HDM and the day-402 ignition
+ratios against the committed extracts.
 
 ## Fuel-load residual localized (2026-10-29): litter and live grass, not fuel
 
