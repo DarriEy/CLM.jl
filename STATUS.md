@@ -124,7 +124,14 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   passes four timesteps over mixed soil/lake columns: 36 fields and 427 finite values compared,
   with maximum relative difference 1.862e-03 (integration tolerance 1e-02).
   `scripts/gpu_validate_cuda.jl` includes all three whole-driver gates.
-- **AMDGPU (ROCm)** — ⚠️ CPU-proxy-validated only; not yet run on real AMD silicon.
+- **AMDGPU (ROCm)** — ⚠️ **not yet run on AMD hardware** (none reachable). `ext/CLMAMDGPUExt.jl`
+  registers `:amdgpu` (ROCArray / ROCBackend, Float64), and AMDGPU stays a weakdep. Checked without a
+  device (AMDGPU.jl installed, `functional() == false`): the extension precompiles, loads and registers,
+  and the device-side `_smooth_f64` overlay (the CUDA illegal-address fix) is installed. It had
+  previously been skipped silently because the guard looked for `@device_override` in the wrong module.
+  `test/test_amdgpu_backend.jl` gates a one-step `clm_drv!` device-vs-CPU run on
+  `AMDGPU.functional()`, and `scripts/gpu_validate_amdgpu.jl` is the one-command ROCm validator.
+  AMDGPU.jl 2.x needs KernelAbstractions 0.10, so compat is `AMDGPU = "1"`. See `docs/GPU_AMDGPU.md`.
 - **Reverse-AD on GPU** — ✅ the CUDA kernel-shape suite passes **4/4**. Atomic scatter is
   differentiated at the host launch boundary: `scatter_add_1d!` keeps the portable Atomix
   primal, while its reverse rule launches a race-free gather kernel instead of asking Enzyme
@@ -157,7 +164,7 @@ Re-run the README recipe once the CTSM case is restored.
 | Reverse AD | ✅ whole-driver incl. **photosynthesis** (`use_psn=1`) on 1.10 **and 1.12** | PHS-coupled (`use_hydrstress`) reverse + whole-*function* canopy still 1.12-blocked (latter avoided by decomposition) |
 | GPU Metal | ✅ validated 0.0 | — |
 | GPU CUDA | ✅ real-hardware validated | synthetic + CN + portable real-NetCDF mixed soil/lake full-driver gates pass |
-| GPU AMD | ⚠️ proxy only | unrun on real AMD hardware |
+| GPU AMD | ⚠️ extension loads/registers; no hardware run | device-gated test + `scripts/gpu_validate_amdgpu.jl` ready; unrun on real AMD hardware |
 
 ## Concrete remaining work to claim "fully validated AD + GPU"
 

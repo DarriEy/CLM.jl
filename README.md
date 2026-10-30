@@ -167,6 +167,9 @@ API reference while a Documenter site is being prepared.
 The base package has no hard GPU dependency. CUDA and AMDGPU register through
 package extensions; Metal is carried by the dedicated script environment and
 uses `Float32` because Apple GPUs do not support `Float64` compute.
+AMD ROCm (`import AMDGPU`, then `clm_set_backend(:amdgpu)`) is wired up the same
+way as CUDA but has not yet run on AMD hardware. See
+[`docs/GPU_AMDGPU.md`](docs/GPU_AMDGPU.md).
 
 To validate the available GPU on a machine:
 
