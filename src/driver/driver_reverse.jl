@@ -41,6 +41,7 @@ function soiltemp_rev_scratch(inst)
        lwrad_emit=z(nc), dlwrad_emit=z(nc), lwrad_emit_snow=z(nc),
        lwrad_emit_soil=z(nc), lwrad_emit_h2osfc=z(nc),
        hs_patch=z(np), dhsdT_patch=z(np), hs_soil_patch=z(np), hs_h2osfc_patch=z(np),
+       snicar_top_patch=z(np), snicar_snow_patch=z(np), snicar_sabg_patch=z(np,ns+1),
        dz_h2osfc=z(nc), c_h2osfc=z(nc),
        cool_on=fill!(similar(pf, Bool, length(inst.landunit.itype)), false),
        heat_on=fill!(similar(pf, Bool, length(inst.landunit.itype)), false),
@@ -538,16 +539,65 @@ function soiltemp_gnet_patch_rural_contrib_view(b)
        urbpoi=x.urbpoi, frac_veg_nosno=x.frac_veg_nosno)
 end
 
+# SNICAR top-layer heat flux for the device reverse. Production compute_gnet_snicar!
+# scatters patch→column with per-thread atomics inside its kernel, and Enzyme cannot
+# lower the reverse of Atomix's CAS loop on CUDA ("Cannot select ... AtomicLoad").
+# Here the same per-patch values are written to patch scratch by one kernel and
+# reduced to columns by scatter_add_1d!, whose launch-level rule is a race-free
+# gather. Forward results equal compute_gnet_snicar! up to summation order.
+@kernel function _gnet_snicar_patch_kernel!(top_p, snow_p, sab_p, pin, cin, @Const(mask),
+        @Const(column), @Const(landunit), @Const(urbpoi), @Const(frac_veg_nosno),
+        @Const(snl), @Const(sabg_lyr), @Const(eflx_gnet), nlevsno::Int)
+    p = @index(Global)
+    @inbounds begin
+        T = eltype(top_p)
+        top_p[p] = zero(T); snow_p[p] = zero(T)
+        for k in 1:(nlevsno + 1)
+            sab_p[p, k] = zero(T)
+        end
+        if mask[p]
+            c = column[p]; l = landunit[p]; wt = pin.wtcol[p]; joff = nlevsno
+            lyr_top = snl[c] + 1
+            if !urbpoi[l]
+                base = pin.dlrad[p] + (one(T) - frac_veg_nosno[p]) * cin.emg[c] * cin.forc_lwrad[c]
+                sab = sabg_lyr[p, lyr_top + joff]
+                top_p[p] = (sab + base - cin.lwrad_emit[c] -
+                    (pin.eflx_sh_grnd[p] + pin.qflx_evap_soi[p] * cin.htvp[c])) * wt
+                snow_p[p] = (sab + base - cin.lwrad_emit_snow[c] -
+                    (pin.eflx_sh_snow[p] + pin.qflx_ev_snow[p] * cin.htvp[c])) * wt
+                for j in lyr_top:1
+                    sab_p[p, j + nlevsno] = sabg_lyr[p, j + joff] * wt
+                end
+            else
+                g = eflx_gnet[p]
+                top_p[p] = g * wt
+                snow_p[p] = g * wt
+                sab_p[p, lyr_top + nlevsno] = pin.sabg[p] * wt
+            end
+        end
+    end
+end
+
 function soiltemp_gnet_snicar_rev_phase!(b, aux)
-    i=b.inst; s=b.soiltemp
-    _zero_all!(s.sabg_lyr_col); _zero_all!(s.hs_top); _zero_all!(s.hs_top_snow)
-    compute_gnet_snicar!(i.energyflux, i.solarabs, i.canopystate,
-        i.water.waterfluxbulk_inst, i.column, i.landunit, i.patch, aux.nolakep,
-        s.lwrad_emit, s.dlwrad_emit, s.lwrad_emit_snow, s.lwrad_emit_soil,
-        s.lwrad_emit_h2osfc, i.temperature.emg_col,
-        i.atm2lnd.forc_lwrad_downscaled_col, i.energyflux.htvp_col,
-        i.water.waterdiagnosticbulk_inst.frac_sno_eff_col, s.hs_top, s.hs_top_snow,
-        s.sabg_lyr_col, varpar.nlevsno)
+    i=b.inst; s=b.soiltemp; ns=varpar.nlevsno
+    ef=i.energyflux; sa=i.solarabs; wf=i.water.waterfluxbulk_inst
+    pin = (; dlrad=ef.dlrad_patch, eflx_sh_grnd=ef.eflx_sh_grnd_patch,
+        eflx_sh_snow=ef.eflx_sh_snow_patch, qflx_evap_soi=wf.wf.qflx_evap_soi_patch,
+        qflx_ev_snow=wf.qflx_ev_snow_patch, sabg=sa.sabg_patch, wtcol=i.patch.wtcol)
+    cin = (; emg=i.temperature.emg_col, forc_lwrad=i.atm2lnd.forc_lwrad_downscaled_col,
+        lwrad_emit=s.lwrad_emit, lwrad_emit_snow=s.lwrad_emit_snow,
+        htvp=ef.htvp_col)
+    np = length(aux.nolakep)
+    _launch!(_gnet_snicar_patch_kernel!, s.snicar_top_patch, s.snicar_snow_patch,
+        s.snicar_sabg_patch, pin, cin, aux.nolakep, i.patch.column, i.patch.landunit,
+        i.landunit.urbpoi, i.canopystate.frac_veg_nosno_patch, i.column.snl,
+        sa.sabg_lyr_patch, ef.eflx_gnet_patch, ns; ndrange=np)
+    scatter_add_1d!(s.hs_top, s.snicar_top_patch, i.patch.column)
+    scatter_add_1d!(s.hs_top_snow, s.snicar_snow_patch, i.patch.column)
+    for k in 1:(ns + 1)
+        scatter_add_1d!(view(s.sabg_lyr_col, :, k), view(s.snicar_sabg_patch, :, k),
+                        i.patch.column)
+    end
     nothing
 end
 

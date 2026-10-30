@@ -30,26 +30,26 @@ using Enzyme: Const, Active, Duplicated
 # GPU-lowerable and Atomix's CAS loop exposes an unsupported AtomicLoad.
 # --------------------------------------------------------------------------
 function augmented_primal(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT},
-                          out::Duplicated, values::Duplicated, dest::Const) where {RT}
+                          out::Duplicated, values::Duplicated, dest::Enzyme.Annotation) where {RT}
     func.val(out.val, values.val, dest.val)
     return AugmentedReturn(nothing, nothing, nothing)
 end
 
 function reverse(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT}, tape,
-                 out::Duplicated, values::Duplicated, dest::Const) where {RT}
+                 out::Duplicated, values::Duplicated, dest::Enzyme.Annotation) where {RT}
     _scatter_add_1d_pullback!(values.dval, out.dval, dest.val)
     fill!(out.dval, zero(eltype(out.dval)))
     return (nothing, nothing, nothing)
 end
 
 function augmented_primal(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT},
-                          out::Duplicated, values::Const, dest::Const) where {RT}
+                          out::Duplicated, values::Const, dest::Enzyme.Annotation) where {RT}
     func.val(out.val, values.val, dest.val)
     return AugmentedReturn(nothing, nothing, nothing)
 end
 
 function reverse(config, func::Const{typeof(scatter_add_1d!)}, ::Type{RT}, tape,
-                 out::Duplicated, values::Const, dest::Const) where {RT}
+                 out::Duplicated, values::Const, dest::Enzyme.Annotation) where {RT}
     fill!(out.dval, zero(eltype(out.dval)))
     return (nothing, nothing, nothing)
 end
