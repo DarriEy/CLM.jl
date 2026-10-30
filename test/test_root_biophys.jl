@@ -12,8 +12,10 @@
 
     @testset "RootingProfileConfig defaults" begin
         cfg = CLM.RootingProfileConfig()
-        @test cfg.rooting_profile_method_water    == CLM.ZENG_2001_ROOT
-        @test cfg.rooting_profile_method_carbon   == CLM.ZENG_2001_ROOT
+        # clm5_0 namelist default (namelist_defaults_ctsm.xml:184,188), not the
+        # RootBiophysMod.F90 code fallback (Zeng 2001).
+        @test cfg.rooting_profile_method_water    == CLM.JACKSON_1996_ROOT
+        @test cfg.rooting_profile_method_carbon   == CLM.JACKSON_1996_ROOT
         @test cfg.rooting_profile_varindex_water  == 1
         @test cfg.rooting_profile_varindex_carbon == 2
     end
@@ -34,8 +36,8 @@
 
         # Reset to defaults
         CLM.init_rootprof!(cfg)
-        @test cfg.rooting_profile_method_water    == CLM.ZENG_2001_ROOT
-        @test cfg.rooting_profile_method_carbon   == CLM.ZENG_2001_ROOT
+        @test cfg.rooting_profile_method_water    == CLM.JACKSON_1996_ROOT
+        @test cfg.rooting_profile_method_carbon   == CLM.JACKSON_1996_ROOT
         @test cfg.rooting_profile_varindex_water  == 1
         @test cfg.rooting_profile_varindex_carbon == 2
     end

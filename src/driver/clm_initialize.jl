@@ -102,6 +102,17 @@ function clm_initialize!(;
     # clm_initialize! + clm_drv! directly (the FATES parity harnesses) ran with the
     # CLM4 interception and held ~1/10 of Fortran's intercepted rain on the canopy.
     use_clm5_fpi::Bool = true,
+    # CN namelist defaults, resolved the way CTSM 5.3 build-namelist resolves them for a
+    # phys=clm5_0 BGC case (namelist_defaults_ctsm.xml):
+    #   use_fun        :2020-2022  .true. when use_cn .and. use_nitrif_denitrif
+    #   use_flexibleCN :573-575    .true. when use_cn
+    # `nothing` resolves the condition; both are ignored (false) when use_cn is false.
+    # The flexibleCN cascade (lnc_opt, vcmax_opt, MM_Nuptake_opt, CNratio_floating,
+    # CN_evergreen_phenology_opt, carbon_resp_opt) and the other use_cn namelist
+    # defaults (leafresp_method, use_nguardrail, constrain_stress_deciduous_onset) are
+    # derived from these in the CN block below. See docs/DRIVER_DEFAULTS_AUDIT.md.
+    use_fun::Union{Bool,Nothing} = nothing,
+    use_flexibleCN::Union{Bool,Nothing} = nothing,
     use_lch4::Bool = false,
     use_cndv::Bool = false,
     use_c13::Bool = false,
@@ -486,23 +497,12 @@ function clm_initialize!(;
     inst.bgc_vegetation.driver_config.use_fates = use_fates
     inst.bgc_vegetation.driver_config.use_fates_bgc = _fates_bgc
     # clm5_0 BGC also defaults to FUN (Fixation & Uptake of Nitrogen) + flexible
-    # leaf C:N ON (the Bow run's lnd_in has use_fun=.true., use_flexiblecn=.true.).
-    # FUN is left OFF by default here ONLY to keep the default (use_fun=false) path
-    # byte-identical; it is fully wired (see cn_driver.jl) and works at COLD START.
-    #
-    # HISTORY (corrected 2026-07-23): this comment previously claimed defaulting FUN
-    # on for a cold start "surfaces the separate cold-start canopy-NaN blocker (FUN
-    # reads availc/canopy which are NaN before the canopy spins up)". That reason is
-    # DISPROVEN. On the LIVE path calc_gpp_mr_availc! (cn_driver.jl ~L523) runs over
-    # mask_bgc_vegp and populates a FINITE availc BEFORE cnfun! (~L757, same mask)
-    # reads it, so the availc NaN-init is never actually read. A real Bow cold start
-    # with use_fun=true + real forcing photosynthesizes and keeps availc/npp_growth/
-    # leafc finite over many steps (test/test_fun_coldstart_finite.jl). The earlier
-    # "FUN cold-start NaN" was the SAME harness bug as the general canopy NaN: an
-    # UNSET forc_hgt_{u,t,q}_grc=0 → ustar=0 → the canopy Monin-Obukhov solve diverged
-    # → t_veg NaN → maintenance respiration NaN → availc = gpp - mr = NaN. The real
-    # forcing path derives forc_hgt (forcing_reader.jl), so the cold start converges.
-    # Callers with a finite (warm) state set inst.bgc_vegetation.config.use_fun = true.
+    # leaf C:N ON (namelist_defaults_ctsm.xml:2020-2022 and :573-575). These are now
+    # the DEFAULTS here (resolved from the use_fun / use_flexibleCN kwargs in the CN
+    # namelist block after the soil-BGC parameter read below); FUN is fully wired
+    # (cn_driver.jl), validated against ctsm5.3.012 (PR #365) and works at COLD START
+    # (test/test_fun_coldstart_finite.jl: on the live path calc_gpp_mr_availc! fills a
+    # finite availc before cnfun! reads it).
     nlevdecomp_full = varpar.nlevdecomp_full
     # MIMICS (decomp_method==2) needs 8 pools / 15 transitions; CENTURY keeps 7/10
     # (use_cn) or the SP fallback 7/5. Sizing the soil-BGC state arrays here is the
@@ -716,6 +716,14 @@ function clm_initialize!(;
     lake_con_init!()
 
     # ---- Step 15b: Initialize SNICAR optics and aging tables ----
+    # CTSM's default fsnowoptics / fsnowaging are inputdata files
+    # (namelist_defaults_ctsm.xml:2044 snicar_optics_5bnd_c013122.nc, :2039
+    # snicar_drdt_bst_fit_60_c070416.nc). The port has no inputdata root, so like
+    # fsurdat they are caller-supplied paths; an empty path leaves the SNICAR tables zero.
+    (isempty(fsnowoptics) || isempty(fsnowaging)) && @warn(
+        "clm_initialize!: fsnowoptics/fsnowaging not given — SNICAR snow optics/aging " *
+        "tables stay zero. A CTSM case reads lnd/clm2/snicardata/" *
+        "snicar_optics_5bnd_c013122.nc and snicar_drdt_bst_fit_60_c070416.nc.", maxlog = 1)
     snow_optics_init!(snicar_optics; fsnowoptics=fsnowoptics)
     snowage_init!(snicar_aging; fsnowaging=fsnowaging)
 
@@ -847,6 +855,19 @@ function clm_initialize!(;
                                     dt=Float64(dtime),
                                     suplnitro = _fates_bgc ? SUPLN_ALL : SUPLN_NONE)
     end
+
+    # ---- namelist defaults that CTSM build-namelist resolves ----
+    # The struct defaults of PhotosynthesisData / CNSharedParamsData / the CN facade
+    # mirror CTSM's CODE fallbacks (the value a module holds before its namelist is
+    # read). A real CTSM case never runs on those: build-namelist always writes the
+    # namelist default. This block applies the namelist defaults for a standard
+    # phys=clm5_0 case (namelist_defaults_ctsm.xml line numbers in each comment) —
+    # the #265 principle used for create_crop_landunit: structs keep the code
+    # fallback, the DERIVATION carries the namelist default. Callers still override
+    # any of these on `inst` after clm_initialize! returns.
+    _clm5_namelist_defaults!(inst; use_cn = use_cn, use_fates = use_fates,
+                             use_nitrif_denitrif = _soil_bgc,
+                             use_fun = use_fun, use_flexibleCN = use_flexibleCN)
 
     # ---- Step 15g: InitCold for the soil-BGC / CN-vegetation state ----------
     # Fortran runs soilbiogeochem_carbonstate_inst%Init (→ InitCold, which seeds
@@ -1192,4 +1213,94 @@ function _read_latlon(fsurdat::String, varname::String, default::Real)
     finally
         close(ds)
     end
+end
+
+"""
+    _clm5_namelist_defaults!(inst; use_cn, use_fates, use_nitrif_denitrif,
+                             use_fun, use_flexibleCN)
+
+Apply the namelist defaults that CTSM 5.3.012 build-namelist resolves for a standard
+`phys=clm5_0` case (`bld/namelist_files/namelist_defaults_ctsm.xml`, line numbers
+below) onto the per-instance structs and `varctl`. The structs themselves keep CTSM's
+module CODE fallbacks (`clm_varctl.F90`, `PhotosynthesisMod.F90:952-953`,
+`CNSharedParamsMod.F90:170`, ...), which no real CTSM case runs with.
+
+`use_fun` / `use_flexibleCN` are `nothing` (resolve the CTSM condition) or an explicit
+Bool. Everything CN-specific is forced off when `use_cn` is false, mirroring the
+`use_cn=".false."` branches of the defaults file. See docs/DRIVER_DEFAULTS_AUDIT.md
+"Campaign #3".
+"""
+function _clm5_namelist_defaults!(inst::CLMInstances; use_cn::Bool, use_fates::Bool,
+                                  use_nitrif_denitrif::Bool,
+                                  use_fun::Union{Bool,Nothing},
+                                  use_flexibleCN::Union{Bool,Nothing})
+    # &atm2lnd_inparm (:209-234). The Atm2LndParamsData struct holds the code
+    # fallback (no repartitioning, NaN lapse rates); every clm5_0 case writes these.
+    # glcmec_downscale_longwave (:212, .true.) is deliberately left .false.: CTSM
+    # downscales longwave only over TopoMod's downscale filter (glacier-MEC and
+    # hillslope columns, needs_downscaling_col), which the port never populates in the
+    # driver (topo_update! is not called; clm_run! sets topo_col = forc_topo), and the
+    # port's downscale_longwave! applies to every column without CTSM's
+    # build_normalization step. Turning it on would be less faithful, not more.
+    atm2lnd_read_namelist!(inst.atm2lnd;
+        repartition_rain_snow = true,                 # :209
+        lapse_rate = 0.006,                           # :215
+        lapse_rate_longwave = 0.032,                  # :218 (unused while glcmec is off)
+        precip_repartition_nonglc_all_snow_t = 0.0,   # :222
+        precip_repartition_nonglc_all_rain_t = 2.0,   # :223
+        precip_repartition_glc_all_snow_t = -2.0,     # :230
+        precip_repartition_glc_all_rain_t = 0.0)      # :231
+    # &lnd2atm_inparm melt_non_icesheet_ice_runoff (:237, .true.; .false. only clm4_5):
+    # ice runoff from non-icesheet columns (snow capping, excess ice) leaves as liquid
+    # with the latent heat taken from the sensible heat flux to the atmosphere.
+    lnd2atm_read_namelist!(inst.lnd2atm; melt_non_icesheet_ice_runoff = true)
+
+    ps = inst.photosyns
+    # &photosyns_inparm. Code fallbacks are .false. (PhotosynthesisMod.F90:952-953).
+    ps.light_inhibit = true                    # :98   (.false. only for clm4_5)
+    ps.modifyphoto_and_lmr_forcrop = true      # :107  (.false. only for clm4_5)
+    # leafresp_method :102-104 -> 2 (Atkin 2015) under use_cn. The SP value (0) is
+    # never read: lmr25top is vcmax-scaled whenever use_cn is false.
+    use_cn && (ps.leafresp_method = LEAFRESP_MTD_ATKIN2015)
+
+    # use_flexibleCN :573-575 (.true. for use_cn); use_fun :2020-2022 (.true. for
+    # use_cn .and. use_nitrif_denitrif). Both only exist under use_cn.
+    _flex = use_cn && (use_flexibleCN === nothing ? true : use_flexibleCN)
+    _fun  = use_cn && (use_fun === nothing ? use_nitrif_denitrif : use_fun)
+
+    # The use_flexibleCN cascade (:583-589) and lnc_opt (:596-597).
+    ps.lnc_opt   = use_cn                      # :596  lnc_opt = .true. when use_cn
+    ps.vcmax_opt = _flex ? 3 : 0               # :586  vcmax_opt = 3 when use_flexibleCN
+    varctl.use_flexibleCN             = _flex
+    varctl.MM_Nuptake_opt             = _flex  # :583
+    varctl.CNratio_floating           = _flex  # :584 (live: phenology.jl litterfall C:N)
+    varctl.reduce_dayl_factor         = false  # :585
+    varctl.lnc_opt                    = ps.lnc_opt
+    varctl.vcmax_opt                  = ps.vcmax_opt
+    varctl.CN_evergreen_phenology_opt = _flex ? 1 : 0   # :587
+    # :588-589: carbon_resp_opt = 1 only for flexibleCN WITHOUT FUN, 0 with FUN.
+    _cresp = (_flex && !_fun) ? 1 : 0
+    varctl.carbon_resp_opt            = _cresp
+    varctl.use_nguardrail             = use_cn # :642-643
+
+    if use_cn
+        veg = inst.bgc_vegetation
+        # Set BOTH the facade config and the CN driver config: _sync_driver_config!
+        # already ran inside cn_vegetation_init! (clm_instInit!).
+        veg.config.use_fun        = _fun
+        veg.config.use_flexiblecn = _flex
+        dc = veg.driver_config
+        dc.use_fun         = _fun
+        dc.use_flexiblecn  = _flex
+        dc.carbon_resp_opt = _cresp
+        dc.use_nguardrail  = true              # :643
+        sp = inst.cn_shared_params
+        # allocation / N demand / availc read cn_shared_params.use_fun, a separate copy
+        # of the flag; it must agree with the driver or FUN draws the wrong N.
+        sp.use_fun        = _fun
+        sp.use_flexiblecn = _flex
+        sp.br_root = 0.83e-6                   # :2027 &cnmresp_inparm br_root
+        sp.constrain_stress_deciduous_onset = true   # :635 (.false. only clm4_5)
+    end
+    return nothing
 end

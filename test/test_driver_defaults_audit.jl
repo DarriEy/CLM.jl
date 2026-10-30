@@ -302,10 +302,10 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         # closing one is an explicit, reviewed act rather than an accident.
         # Severity is recorded in docs/DRIVER_DEFAULTS_AUDIT.md.
 
-        # LIVE (read on a real path) — highest priority to fix:
-        @test v.convert_ocean_to_land == false   # CTSM defaults:2382 → .true.  (live: surfdata.jl:306)
-        @test v.co2_ppmv == 355.0                # CTSM defaults:25   → 379.0 at sim_year=2000
-        @test v.glc_snow_persistence_max_days == 7300  # CTSM defaults:540 → 0; 7300 is the clm4_5 variant
+        # LIVE tranche — CLOSED to the CTSM values (defaults campaign #3).
+        @test v.convert_ocean_to_land == true    # CTSM defaults:2382 (code fallback .false.; live: surfdata.jl:361)
+        @test v.co2_ppmv == 367.0                # I2000 CCSM_CO2_PPMV (`-co2_ppmv 367.0` in every reference lnd_in); unread — forcing_reader.jl uses 367e-6*pbot
+        @test v.glc_snow_persistence_max_days == 0  # CTSM defaults:540; 7300 is the clm4_5 variant (live: clm_driver.jl SMB call)
 
         # INERT tranche — CLOSED to the CTSM values (defaults campaign #2).
         # Inertness was PROVEN, not asserted: with these twelve flipped, the full
@@ -327,19 +327,145 @@ const _RUN_KW  = _kwarg_defaults(joinpath(_SRC, "driver", "clm_run.jl"), :clm_ru
         @test v.z0param_method == "ZengWang2007" # CTSM clm5_0; cosmetic — friction_velocity.jl:322 branches only on "Meier2022"
     end
 
-    @testset "varctl — the use_flexibleCN cascade is OFF (open finding M6)" begin
-        # Under phys=clm5_0 WITH use_cn=.true., CTSM turns use_flexibleCN on,
-        # which cascades to all of the below. CLM.jl hardcodes the SP-mode
-        # values. Pinned so that enabling flexible-CN is a deliberate campaign
-        # with its own Fortran validation, not a silent drift.
+    @testset "varctl STRUCT keeps the use_flexibleCN cascade at the code fallback" begin
+        # The VarCtl struct mirrors clm_varctl.F90's initialisers (the #265
+        # principle). The namelist defaults are applied by clm_initialize!'s
+        # _clm5_namelist_defaults! (testset below) — closed finding M6.
         v = CLM.VarCtl()
-        @test v.use_flexibleCN == false             # CTSM (clm5_0 + use_cn) → .true.
-        @test v.MM_Nuptake_opt == false             # → .true.
-        @test v.CNratio_floating == false           # → .true.
-        @test v.lnc_opt == false                    # → .true.
-        @test v.vcmax_opt == 0                      # → 3
-        @test v.CN_evergreen_phenology_opt == 0     # → 1
-        @test v.carbon_resp_opt == 0                # → 1 (0 if FUN on)
-        @test v.use_nguardrail == false             # → .true.
+        @test v.use_flexibleCN == false
+        @test v.MM_Nuptake_opt == false
+        @test v.CNratio_floating == false
+        @test v.lnc_opt == false
+        @test v.vcmax_opt == 0
+        @test v.CN_evergreen_phenology_opt == 0
+        @test v.carbon_resp_opt == 0
+        @test v.use_nguardrail == false
+    end
+
+    @testset "CN namelist defaults resolve as CTSM build-namelist does (M6 CLOSED)" begin
+        @test _INIT_KW[:use_fun] === :nothing          # defaults:2020-2022
+        @test _INIT_KW[:use_flexibleCN] === :nothing   # defaults:573-575
+        saved = (CLM.varctl.use_flexibleCN, CLM.varctl.MM_Nuptake_opt, CLM.varctl.CNratio_floating,
+                 CLM.varctl.lnc_opt, CLM.varctl.vcmax_opt, CLM.varctl.CN_evergreen_phenology_opt,
+                 CLM.varctl.carbon_resp_opt, CLM.varctl.use_nguardrail, CLM.varctl.reduce_dayl_factor)
+        try
+            # --- clm5_0 BGC (use_cn) ---
+            inst = CLM.CLMInstances()
+            CLM._clm5_namelist_defaults!(inst; use_cn = true, use_fates = false,
+                use_nitrif_denitrif = true, use_fun = nothing, use_flexibleCN = nothing)
+            ps = inst.photosyns; veg = inst.bgc_vegetation; sp = inst.cn_shared_params
+            @test veg.config.use_fun && veg.driver_config.use_fun && sp.use_fun          # :2021
+            @test veg.config.use_flexiblecn && veg.driver_config.use_flexiblecn && sp.use_flexiblecn  # :574
+            @test ps.lnc_opt == true                                   # :596
+            @test ps.vcmax_opt == 3                                    # :586
+            @test ps.leafresp_method == CLM.LEAFRESP_MTD_ATKIN2015     # :102
+            @test veg.driver_config.use_nguardrail == true             # :643
+            @test veg.driver_config.carbon_resp_opt == 0               # :589 (FUN on)
+            @test sp.br_root == 0.83e-6                                # :2027
+            @test sp.constrain_stress_deciduous_onset == true          # :635
+            @test CLM.varctl.use_flexibleCN && CLM.varctl.MM_Nuptake_opt && CLM.varctl.CNratio_floating
+            @test CLM.varctl.CN_evergreen_phenology_opt == 1           # :587
+            @test CLM.varctl.reduce_dayl_factor == false               # :585
+            # flexibleCN without FUN -> carbon_resp_opt 1 (:588)
+            inst2 = CLM.CLMInstances()
+            CLM._clm5_namelist_defaults!(inst2; use_cn = true, use_fates = false,
+                use_nitrif_denitrif = true, use_fun = false, use_flexibleCN = nothing)
+            @test inst2.bgc_vegetation.driver_config.carbon_resp_opt == 1
+            @test inst2.bgc_vegetation.driver_config.use_fun == false
+
+            # --- SP (use_cn = false): the CN cascade is off, the physics namelist on ---
+            inst3 = CLM.CLMInstances()
+            CLM._clm5_namelist_defaults!(inst3; use_cn = false, use_fates = false,
+                use_nitrif_denitrif = false, use_fun = nothing, use_flexibleCN = nothing)
+            ps3 = inst3.photosyns
+            @test ps3.light_inhibit == true                            # :98
+            @test ps3.modifyphoto_and_lmr_forcrop == true              # :107
+            @test ps3.lnc_opt == false && ps3.vcmax_opt == 0           # :597
+            @test inst3.bgc_vegetation.driver_config.use_fun == false
+            @test CLM.varctl.use_flexibleCN == false
+            p = inst3.atm2lnd.params
+            @test p.repartition_rain_snow == true                      # :209
+            @test p.lapse_rate == 0.006                                # :215
+            @test p.glcmec_downscale_longwave == false                 # DELIBERATE (see audit doc)
+            @test inst3.lnd2atm.params.melt_non_icesheet_ice_runoff == true   # :237
+        finally
+            (CLM.varctl.use_flexibleCN, CLM.varctl.MM_Nuptake_opt, CLM.varctl.CNratio_floating,
+             CLM.varctl.lnc_opt, CLM.varctl.vcmax_opt, CLM.varctl.CN_evergreen_phenology_opt,
+             CLM.varctl.carbon_resp_opt, CLM.varctl.use_nguardrail, CLM.varctl.reduce_dayl_factor) = saved
+        end
+        # clm_run! must not re-apply a stale copy of these after clm_initialize!.
+        run_src = read(joinpath(_SRC, "driver", "clm_run.jl"), String)
+        @test !occursin("atm2lnd_read_namelist!", run_src)
+        @test !occursin("photosyns.light_inhibit = true", run_src)
+    end
+
+    @testset "module-global namelist defaults are the clm5_0 values (campaign #3)" begin
+        # initial_vegC: defaults:2033 (100 for use_cn .and. mm_nuptake_opt);
+        # code fallback 20 (CNVegCarbonStateType.F90:232).
+        @test CLM.CNVegCarbonStateParams().initial_vegC == 100.0
+        @test CLM.INITIAL_VEGC == 20.0
+        # &cnprecision_inparm: defaults:646, 649, 652.
+        @test CLM.CN_NCRIT_DEFAULT == 1.0e-9
+        @test CLM.CN_CNEGCRIT_DEFAULT == -60.0
+        @test CLM.CN_NNEGCRIT_DEFAULT == -6.0
+        # &rooting_profile_inparm: defaults:184, 188 (Jackson 1996).
+        rp = CLM.RootingProfileConfig()
+        @test rp.rooting_profile_method_water == CLM.JACKSON_1996_ROOT
+        @test rp.rooting_profile_method_carbon == CLM.JACKSON_1996_ROOT
+        # &clm_snowhydrology_inparm: defaults:483, 486, 489. Read the source rather
+        # than the live Ref, which other tests mutate.
+        sh_src = read(joinpath(_SRC, "biogeophys", "snow_hydrology.jl"), String)
+        @test occursin("const WIND_DEPENDENT_SNOW_DENSITY = Ref(true)", sh_src)
+        @test occursin("const OVERBURDEN_COMPACTION_METHOD = Ref(OVERBURDEN_COMPACTION_VIONNET2012)", sh_src)
+        @test occursin("const NEW_SNOW_DENSITY = Ref(LO_TMP_DNS_SLATER2017)", sh_src)
+        # ...and the documented AD opt-in restores the old pair and reports the previous one.
+        old = CLM.snow_hydrology_ad_smooth_namelist!()
+        try
+            @test CLM.WIND_DEPENDENT_SNOW_DENSITY[] == false
+            @test CLM.OVERBURDEN_COMPACTION_METHOD[] == CLM.OVERBURDEN_COMPACTION_ANDERSON1976
+        finally
+            CLM.snow_hydrology_set_control_for_testing!(; old...)
+        end
+    end
+
+    @testset "history fields carry Fortran's scale types; BTRAN vs BTRANMN" begin
+        fd = Dict(f.name => f for f in CLM.default_hist_fields())
+        # EnergyFluxType.F90:661-669
+        @test haskey(fd, "BTRAN") && haskey(fd, "BTRANMN")
+        @test fd["BTRAN"].reduce == :avg && fd["BTRAN"].l2g_scale_type == "veg"
+        @test fd["BTRANMN"].reduce == :snapshot && fd["BTRANMN"].l2g_scale_type == "veg"
+        @test fd["ZWT"].l2g_scale_type == "veg"           # SoilHydrologyType.F90
+        @test fd["TSOI"].l2g_scale_type == "veg"          # TemperatureType.F90
+        @test fd["FSA"].c2l_scale_type == "urbanf"        # SolarAbsorbedType.F90
+        @test fd["QRUNOFF"].c2l_scale_type == "urbanf"    # WaterFluxType.F90
+        @test fd["EFLX_LH_TOT"].c2l_scale_type == "urbanf"
+        @test fd["T_GRND"].c2l_scale_type == "urbans"     # TG, TemperatureType.F90
+        @test fd["TSA"].c2l_scale_type == "unity" && fd["TSA"].l2g_scale_type == "unity"
+        # The 7-argument positional form (used by harnesses) still means c2l = unity.
+        f7 = CLM.HistFieldDef("X", "x", "1", "patch", identity, :avg, "veg")
+        @test f7.l2g_scale_type == "veg" && f7.c2l_scale_type == "unity"
+
+        # The scales are APPLIED (subgridAveMod c2g: value*scale_c2l*scale_l2g*wtgcell,
+        # summed weight wtgcell). One soil column (0.5) + an urban landunit (0.5) with a
+        # roof, a sunwall and an impervious road, canyon_hwr = 0.5.
+        inst = CLM.CLMInstances()
+        lun = inst.landunit; col = inst.column
+        lun.itype = [CLM.ISTSOIL, CLM.ISTURB_MD]; lun.gridcell = [1, 1]
+        lun.wtgcell = [0.5, 0.5]; lun.active = [true, true]
+        lun.urbpoi = [false, true]; lun.canyon_hwr = [0.0, 0.5]
+        col.landunit = [1, 2, 2, 2]; col.gridcell = [1, 1, 1, 1]
+        col.itype = [1, CLM.ICOL_ROOF, CLM.ICOL_SUNWALL, CLM.ICOL_ROAD_IMPERV]
+        col.wtgcell = [0.5, 0.2, 0.1, 0.2]; col.active = trues(4)
+        v = [1.0, 2.0, 4.0, 8.0]
+        wsum = 1.0
+        unity = (0.5*1 + 0.2*2 + 0.1*4 + 0.2*8) / wsum
+        urbanf = (0.5*1 + 0.2*2*1.0 + 0.1*4*(3*0.5) + 0.2*8*3.0) / wsum
+        urbans = (0.5*1 + 0.2*2*1.0 + 0.1*4*(1.5/2.0) + 0.2*8*(3.0/2.0)) / wsum
+        mk(c2l, l2g) = CLM.HistFieldDef("Z", "z", "1", "column", _ -> v; c2l = c2l, l2g = l2g)
+        @test CLM._aggregate_to_gridcell(mk("unity", "unity"), inst, 1)[1] ≈ unity
+        @test CLM._aggregate_to_gridcell(mk("urbanf", "unity"), inst, 1)[1] ≈ urbanf
+        @test CLM._aggregate_to_gridcell(mk("urbans", "unity"), inst, 1)[1] ≈ urbans
+        # 'veg' drops the urban landunit entirely (scale_l2g = spval there).
+        @test CLM._aggregate_to_gridcell(mk("urbanf", "veg"), inst, 1)[1] ≈ 1.0
     end
 end

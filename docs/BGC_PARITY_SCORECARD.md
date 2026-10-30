@@ -174,8 +174,11 @@ non-crop"), never branching on `evergreen`/`noveg`/crop. Consequences:
 - `cnveg_nitrogen_state_init_cold!` seeded **all N pools to zero**, so the cold vegetation
   had carbon but **no nitrogen** (Fortran derives N from the cold C pools via
   `leafcn`/`frootcn`/`deadwdcn`);
-- `initial_vegC` was hardcoded to 20 (the CTSM *default*) with no way to set it. It is a
-  **namelist** variable (`&cnvegcarbonstate`); Bow's `lnd_in` sets `initial_vegc = 100`.
+- `initial_vegC` was hardcoded to 20 with no way to set it. It is a **namelist**
+  variable (`&cnvegcarbonstate`). (Correction, CTSM-defaults audit: 20 is only the
+  `CNVegCarbonStateType.F90` code fallback; the clm5_0 BGC namelist default is 100,
+  `namelist_defaults_ctsm.xml:2033`, which is why Bow's `lnd_in` has 100. The port now
+  defaults to 100.)
 
 All fixed against `CNVegCarbonStateType.F90` / `CNVegNitrogenStateType.F90`. Cold start is
 now bit-exact vs Fortran (§3c).

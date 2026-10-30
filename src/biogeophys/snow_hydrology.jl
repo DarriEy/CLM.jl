@@ -78,18 +78,19 @@ const LO_TMP_DNS_TRUNCATED_ANDERSON1976 = 1
 const OVERBURDEN_COMPACTION_ANDERSON1976 = 1
 const OVERBURDEN_COMPACTION_VIONNET2012  = 2
 
-# Module-level control variables (Ref for mutability)
-# wind_dependent_snow_density: CLM5's lnd_in sets this .true. (it adds the Slater/
-# van-Kampenhout wind-densification term to new-snow bulk density; without it bifall
-# is ~5% too low at modest winds ~1.5 m/s, inflating snow_depth by ~5% — the snow
-# WATER is unaffected). We DEFAULT it false because the term's (·)^8.8 makes the snow
-# path stiff enough to break the strict FD-vs-AD derivative check at deep-winter
-# (250 K) conditions (test_ad_robustness.jl); the Fortran-parity harnesses turn it on
-# via snow_hydrology_set_control_for_testing!(wind_dep_snow_density=true) to match the
-# namelist, while the differentiable path keeps the smoother default.
-const WIND_DEPENDENT_SNOW_DENSITY = Ref(false)
+# Module-level control variables (Ref for mutability). Defaults are the clm5_0
+# &clm_snowhydrology_inparm NAMELIST defaults (namelist_defaults_ctsm.xml):
+#   wind_dependent_snow_density       = .true.        (:483; .false. only clm4_5)
+#   snow_overburden_compaction_method = 'Vionnet2012' (:486; Anderson1976 only clm4_5)
+#   lotmp_snowdensity_method          = 'Slater2017'  (:489)
+# The wind term (Slater / van Kampenhout) adds wind densification to new-snow bulk
+# density; without it bifall is ~5% too low at ~1.5 m/s and snow_depth ~5% too deep.
+# Vionnet2012 is the CLM5 overburden viscosity. The port used to default to the
+# clm4_5 pair (Anderson1976, no wind) "for AD"; that is now an explicit opt-in:
+# `snow_hydrology_ad_smooth_namelist!()` (see docs/FORWARD_AD_SMOOTHNESS_BOUNDARY.md).
+const WIND_DEPENDENT_SNOW_DENSITY = Ref(true)
 const NEW_SNOW_DENSITY = Ref(LO_TMP_DNS_SLATER2017)
-const OVERBURDEN_COMPACTION_METHOD = Ref(OVERBURDEN_COMPACTION_ANDERSON1976)
+const OVERBURDEN_COMPACTION_METHOD = Ref(OVERBURDEN_COMPACTION_VIONNET2012)
 const OVERBURDEN_COMPRESS_TFACTOR = Ref(0.08)
 
 # Snow layer thickness parameters
@@ -2964,4 +2965,23 @@ function snow_hydrology_set_control_for_testing!(;
     SNOW_DZMAX_U_2[] = 0.05
 
     snowhydrology_params.wind_snowcompact_fact = 5.0
+end
+
+"""
+    snow_hydrology_ad_smooth_namelist!() -> NamedTuple
+
+Opt in to the snow namelist the port used to default to for differentiable runs:
+Anderson1976 overburden compaction and no wind-dependent new-snow density (the clm4_5
+values). The CTSM clm5_0 defaults (Vionnet2012 + wind density) are the port's
+defaults; use this only when a forward-AD application needs the snow path that
+docs/FORWARD_AD_SMOOTHNESS_BOUNDARY.md characterised. Module-global state: returns
+the previous `(wind_dep_snow_density, overburden_compaction_method)` so a caller can
+restore them with `snow_hydrology_set_control_for_testing!(; old...)`.
+"""
+function snow_hydrology_ad_smooth_namelist!()
+    old = (wind_dep_snow_density = WIND_DEPENDENT_SNOW_DENSITY[],
+           overburden_compaction_method = OVERBURDEN_COMPACTION_METHOD[])
+    WIND_DEPENDENT_SNOW_DENSITY[] = false
+    OVERBURDEN_COMPACTION_METHOD[] = OVERBURDEN_COMPACTION_ANDERSON1976
+    return old
 end

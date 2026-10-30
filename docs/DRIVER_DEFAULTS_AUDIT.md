@@ -26,6 +26,9 @@ been able to inherit.
 ## Authoritative sources
 
 CTSM tree: `/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/installs/clm/`
+(campaign #3 used the ctsm5.3.012 checkout at
+`/Users/darri/repos/SYMFLUENCE_data/installs/clm/ctsm5.3.012/`; line numbers below
+from that campaign refer to its `namelist_defaults_ctsm.xml`)
 
 1. `bld/namelist_files/namelist_defaults_ctsm.xml` — the real namelist defaults.
    **Many are CONDITIONAL** on `phys` / `use_fates` / `vichydro` /
@@ -404,8 +407,10 @@ anyway: an inert wrong default is a landmine for the first consumer).
 | `use_cn` | `false` | `.true.` for BGC compsets, `.false.` for SP | **MATCH** (compset-level, not a physics default) | — | — |
 | `use_crop` | `false` | compset-level | **MATCH** | — | — |
 | `use_fates` | `false` | compset-level | **MATCH** | — | — |
-| `use_lch4` | `false` | `.true.` unless `soil_decomp_method="None"` | **COND-MISMATCH** (CN runs only) | methane biogeochem off by default in CN runs | — |
+| `use_lch4` | `false` | `.true.` unless `soil_decomp_method="None"` | **COND-MISMATCH — deliberate** (campaign #3: both BGC references override it to `.false.`; TWS_inversion needs the ch4finundated stream) | methane biogeochem off by default in CN runs | — |
 | `use_c13` / `use_c14` | `false` | `.false.` | **MATCH** | — | — |
+| `use_fun` | `nothing` → `use_cn` (campaign #3; was `false`) | `.true.` for `use_cn .and. use_nitrif_denitrif` (`:2020-2022`) | **CLOSED** | FUN N uptake/fixation off in every default CN run | `fortran_parity_common.jl` (now redundant) |
+| `use_flexibleCN` | `nothing` → `use_cn` (campaign #3; was not a kwarg, `false`) | `.true.` for `use_cn` (`:573-575`) | **CLOSED** (cascade: see campaign #3) | flexible leaf C:N off | `fortran_parity_common.jl` (now redundant) |
 | `cnfire_method` | `:nofire` | `li2016crufrc` for CN | **COND-MISMATCH** (documented deliberate: fire needs stream files) | — | — |
 | `soil_layerstruct` | `"20SL_8.5m"` | `20SL_8.5m` (`clm5_0`) | **MATCH** | — | — |
 | `all_active` | `false` | `.false.` | **MATCH** | — | — |
@@ -429,9 +434,9 @@ when build-namelist emits *nothing*, which never happens in a real CTSM run.
 
 | Field | CLM.jl | CTSM (clm5_0, non-FATES) + conditions / code fallback | Verdict | Reads |
 |---|---|---|---|---|
-| `convert_ocean_to_land` | `false` | **`.true.`** (`defaults:2382`, unconditional). Code fallback `.false.` — **disagrees** | **MISMATCH (live)** | 1 |
-| `co2_ppmv` | `355.0` | **`379.0`** at default `sim_year=2000` (`defaults:25`). 1850/PtVg 284.7, 1979 336.6, 2010 388.8, 2015 397.5, 2018 408.83. Code fallback `355.0` — **disagrees** | **MISMATCH** | 0 (but threaded as a plain arg through 19 sites) |
-| `glc_snow_persistence_max_days` | `7300` | **`0`**; `7300` is the **clm4_5** variant (`defaults:540-541`). Code fallback 7300 — disagrees | **MISMATCH (live)** | 0 in varctl, but the live kwarg at `glacier_surface_mass_balance.jl:146` also defaults 7300 |
+| `convert_ocean_to_land` | ~~`false`~~ → **`true`** | **`.true.`** (`defaults:2382`, unconditional). Code fallback `.false.` | **CLOSED** (campaign #3; inert on land-only surfdata) | 1 |
+| `co2_ppmv` | ~~`355.0`~~ → **`367.0`** | I2000 compsets pass `CCSM_CO2_PPMV = 367.0` (every reference build line has `-co2_ppmv 367.0`); `defaults:25` 379.0 only applies when none is given; code fallback 355.0 | **CLOSED** (campaign #3; unread — physics is `forcing_reader.jl`'s `367e-6*pbot`) | 0 |
+| `glc_snow_persistence_max_days` | ~~`7300`~~ → **`0`** | **`0`**; `7300` is the **clm4_5** variant (`defaults:540-541`) | **CLOSED** (campaign #3; the `clm_driver.jl` SMB call now passes `varctl`'s value) | 1 |
 | `nsegspc` | `20` | **`35`** (`defaults:2404`). Code fallback 20; CTSM's own *definition* docs say 20 (stale) | MISMATCH (INERT) | 0 |
 | `nyr_forcing` | `10` | **`1`** (`defaults:688`); 20 under matrix spinup. Code fallback 10 | MISMATCH (INERT) | 0 |
 | `h2osno_max` | `-999.0` | **`10000.0`** (`defaults:465`); fast 5000, clm4_5 1000. No code fallback — `controlMod.F90:557` **hard-errors if `<= 0`** | MISMATCH (INERT — physics correctly uses `varcon.H2OSNO_MAX = 10000.0`; `varctl` copy is a dead duplicate) | 0 |
@@ -448,7 +453,7 @@ when build-namelist emits *nothing*, which never happens in a real CTSM run.
 | `snicar_solarspec`, `snicar_dust_optics`, `snicar_use_aerosol`, `snicar_snobc_intmix`, `snicar_snodst_intmix`, `do_sno_oc`, `snicar_numrad_snw`, `snicar_snw_shape` | as declared | agree for clm5_0 (`snw_shape=sphere` is the clm5_0/clm4_5 variant; `hexagonal_plate` is clm5_1+ — already documented in-source) | **MATCH** ×8 | — |
 | `outnc_large_files`, `ndep_from_cpl`, `bound_h2osoi`, `nhillslope`, `max_columns_hillslope`, `o3_ppbv`, `anoxia`, `nfix_timeconst` | as declared | **not namelist variables in CTSM** — code fallback is the only authority, and CLM.jl matches all | **MATCH** (NOT-IN-CTSM) ×8 | — |
 
-### M6 — the `use_flexibleCN` cascade (CONDITIONAL-MISMATCH cluster, applies to every CN run)
+### M6 — the `use_flexibleCN` cascade (CONDITIONAL-MISMATCH cluster, applies to every CN run) — **CLOSED in campaign #3**
 
 The largest *cluster* found. Under `phys=clm5_0` **with `use_cn=.true.`**, CTSM
 turns on `use_flexibleCN`:
@@ -729,15 +734,273 @@ The remaining three (`CNratio_floating`, `carbon_resp_opt`, `use_nguardrail`)
 are live the moment `use_cn=true`, which is how all BGC work runs. They need the
 CN campaign outright.
 
+## Campaign #3 — the defaults of a standard CTSM 5.3.012 case
+
+Goal (approved by the project owner, knowing it changes default results):
+`clm_initialize!` / `clm_run!` called with default arguments run the configuration a
+standard CTSM 5.3.012 case runs. Every value below was read from the ctsm5.3.012 tree
+(`installs/clm/ctsm5.3.012/bld/namelist_files/namelist_defaults_ctsm.xml`; `:NNN` is a
+line number in that file) and cross-checked against what build-namelist actually
+wrote for the reference cases on this machine: the SP Bow case
+(`domain_Bow_at_Banff_lumped/settings/CLM/lnd_in`, the strict-gate configuration) and
+the two BGC references (`runs/cn_annual_ref/lnd_in` and the cold-start 2-year reference
+of #362, both `-bgc bgc -use_case 2000_control`, `phys=clm5_0`).
+
+### The pattern, again
+
+Every changed row is the #252 pattern: CTSM has a namelist default and a module code
+fallback that disagree, and the port had copied the code fallback. Two were worse than
+a wrong value, because the code said they *were* CTSM's default:
+`cn_veg_carbon_state.jl` ("its CTSM default is 20 gC/m2" — 20 is the fallback; the
+clm5_0 BGC default is 100) and `snow_hydrology.jl` (Anderson1976 + no wind "for AD" —
+the clm4_5 values; the AD tests pass with the clm5_0 values, see below).
+
+**How the values are applied.** Following the #265 principle, per-instance structs
+(`PhotosynthesisData`, `CNSharedParamsData`, the CN facade and driver configs,
+`Atm2LndParamsData`, `Lnd2AtmParamsData`, `VarCtl`) keep CTSM's code fallbacks, and a
+new step in `clm_initialize!` (`_clm5_namelist_defaults!`, just before the cold BGC init) writes the
+namelist defaults onto the instance, the way build-namelist writes them into `lnd_in`.
+Callers still override any of them on `inst` after `clm_initialize!` returns.
+Module-global switches that callers set *before* `clm_initialize!` (the snow namelist
+`Ref`s, `rooting_profile_config`, `cnvegcstate_const`) take the namelist default as
+their initial value instead, so `clm_initialize!` never clobbers a caller's setting.
+
+`clm_run!` used to apply three of these itself (`light_inhibit`, the atm2lnd rain/snow
+repartitioning, the lapse rate) *after* `clm_initialize!`. Callers that drive
+`clm_initialize!` + `clm_drv!` directly (every Fortran-parity harness, the AD tests,
+the FATES harnesses) did not get them. They now live only in `clm_initialize!`.
+
+### Defaults changed
+
+| # | Setting | Old port default | New default | CTSM 5.3.012 source | Scope |
+|---|---|---|---|---|---|
+| 1 | `use_fun` | `false` | `true` when `use_cn` (`nothing` kwarg on `clm_initialize!`) | `:2020-2022` (`use_cn .and. use_nitrif_denitrif`); Bow BGC lnd_in `use_fun = .true.` | CN |
+| 2 | `use_flexibleCN` | `false` | `true` when `use_cn` (`nothing` kwarg) | `:573-575`; lnd_in `use_flexiblecn = .true.` | CN |
+| 3 | `lnc_opt` | `false` | `true` when `use_cn` | `:596-597`; lnd_in `lnc_opt = .true.` | CN |
+| 4 | `vcmax_opt` | `0` | `3` when `use_flexibleCN` | `:586`; lnd_in `vcmax_opt = 3` | CN |
+| 5 | `MM_Nuptake_opt` | `false` | `true` when `use_flexibleCN` | `:583` | CN (varctl only: the port's cold init already hard-codes the `.true.` branch of `CNVeg{Carbon,Nitrogen}StateType` InitCold) |
+| 6 | `CNratio_floating` | `false` | `true` when `use_flexibleCN` | `:584` | CN (live: `phenology.jl` litterfall C:N) |
+| 7 | `CN_evergreen_phenology_opt` | `0` | `1` when `use_flexibleCN` | `:587` | CN (varctl only: the port's phenology already runs the `=1` branch unconditionally) |
+| 8 | `carbon_resp_opt` | `0` | `0` with FUN, `1` for flexibleCN without FUN | `:588-589` | CN (unchanged in the default case) |
+| 9 | `use_nguardrail` | `false` | `true` when `use_cn` | `:642-643` | CN |
+| 10 | `leafresp_method` | `1` (Ryan 1991) | `2` (Atkin 2015) when `use_cn` | `:102-104`; lnd_in `leafresp_method = 2` | CN (SP never reads it) |
+| 11 | `br_root` | `SPVAL` → `br` = 2.525e-6 | `0.83e-6` when `use_cn` | `:2027`; lnd_in `&cnmresp_inparm br_root = 0.83d-06` | CN |
+| 12 | `constrain_stress_deciduous_onset` | `false` | `true` when `use_cn` | `:635-636` | CN |
+| 13 | `initial_vegC` | `20` | `100` | `:2033-2035` (100 for `use_cn .and. mm_nuptake_opt`; 20 = code fallback `CNVegCarbonStateType.F90:232`) | CN cold start |
+| 14 | CN `ncrit` / `nnegcrit` | `1e-8` / `-7` | `1e-9` / `-6` | `:646`, `:652` (code fallback `CNPrecisionControlMod.F90:27-28`); lnd_in `&cnprecision_inparm` | CN |
+| 15 | `modifyphoto_and_lmr_forcrop` | `false` | `true` | `:107-108`; both lnd_in | all (PHS canopy lmr bsun/bsha weighting) |
+| 16 | `light_inhibit` | `true` only via `clm_run!` | `true` from `clm_initialize!` | `:98-99` | all (unchanged for `clm_run!` callers) |
+| 17 | atm2lnd `repartition_rain_snow`, `lapse_rate`, `lapse_rate_longwave`, `precip_repartition_*` | set only by `clm_run!` | set by `clm_initialize!` | `:209-234` | all (unchanged for `clm_run!` callers) |
+| 18 | `melt_non_icesheet_ice_runoff` | `false` | `true` | `:237-238`; both lnd_in | all (ice runoff from non-ice-sheet columns) |
+| 19 | `rooting_profile_method_water` / `_carbon` | Zeng 2001 (0) | Jackson 1996 (1) | `:184`, `:188` (code fallback `RootBiophysMod.F90:64-65`) | all |
+| 20 | `snow_overburden_compaction_method` | Anderson1976 | Vionnet2012 | `:486-487` | all |
+| 21 | `wind_dependent_snow_density` | `false` | `true` | `:483-484` | all |
+| 22 | `convert_ocean_to_land` | `false` | `true` | `:2382` | all (inert on land-only surfdata) |
+| 23 | `glc_snow_persistence_max_days` | `7300` | `0` | `:540-541` (7300 is clm4_5) | glacier SMB diagnostic |
+| 24 | `varctl.co2_ppmv` | `355.0` | `367.0` | I2000 `CCSM_CO2_PPMV` (`-co2_ppmv 367.0` on every reference build line); unread — physics uses `forcing_reader.jl`'s `367e-6*pbot` | none (bookkeeping) |
+| 25 | History `c2l_scale_type` / `l2g_scale_type` | `unity` on every field | the Fortran `hist_addfld` value, 47 fields (36 `urbanf`, 1 `urbans`, 10 `veg`) | `EnergyFluxType.F90`, `SolarAbsorbedType.F90`, `WaterFluxType.F90`, `WaterDiagnostic*Type.F90`, `TemperatureType.F90`, `SoilHydrologyType.F90`, `SaturatedExcessRunoffMod.F90` | output only, multi-landunit gridcells |
+| 26 | History `BTRAN` | daily-min snapshot | hourly-averaged `btran_patch` (`l2g='veg'`); new `BTRANMN` = the daily-min field | `EnergyFluxType.F90:661-669` | output only |
+
+Also: `clm_initialize!` now warns once when `fsnowoptics`/`fsnowaging` are empty (the
+SNICAR tables stay zero; CTSM's defaults are the 5-band inputdata files, `:2039,2044`).
+
+### Deliberately left different
+
+| Setting | CTSM default | Port default | Why |
+|---|---|---|---|
+| `use_lch4` | `.true.` (`:2538`, any BGC) | `false` | Both BGC references override it to `.false.`, so nothing validates the CH4 default on the multi-year path; and the clm5_0 `finundation_method='TWS_inversion'` reads its inversion parameters from the `ch4finundated` stream file, which the port does not read. |
+| `fire_method` | `li2016crufrc` (`:242`) | `:nofire` | Needs the lightning and population-density streams (input data, not configuration). Both references run `nofire`. |
+| `glcmec_downscale_longwave` / `longwave_downscaling_limit` | `.true.` / `0.5` (`:212`, `:220`) | `false` / unset | CTSM downscales longwave only over TopoMod's downscale filter (glacier-MEC and hillslope columns, `needs_downscaling_col`), which the port never populates in the driver (`topo_update!` is not called; `clm_run!` sets `topo_col = forc_topo`), and `downscale_longwave!` applies to every column without CTSM's `build_normalization`. Turning it on would be less faithful, not more. |
+| `reseed_dead_plants` | `.false.` (`:60`; `.true.` only with `clm_accelerated_spinup=on`) | `false` | Matches the standard case. The BGC references were built with `-clm_accelerated_spinup on` and so carry `.true.`; that is a reference-case setting. |
+| `fsnowoptics` / `fsnowaging` | inputdata files | `""` (with a warning) | Input paths, like `fsurdat`; the port has no inputdata root. |
+| `glacier_region_ice_runoff_behavior` | `'melted'` for region 0 | ice-sheet columns never melted | Not wired (`ice_runoff_melted_grc` is never set); matters only for ISTICE columns. |
+| hist `set_urb` / `set_lake` / `set_nourb` | per field | not ported | Only the scale types were in scope; these spval masks are a separate history gap. |
+| `dtime` | 1800 | 1800 | Matches; the reference cases run 3600 by case setting. |
+
+### The FUN / flexibleCN set on the CN path
+
+The Bow Fortran-parity harnesses (`fortran_parity_common.jl` `build_bow_inst`) already
+set items 1-4, 10, 11, 15 and 16 by hand, which is why the single-step CN parity tests
+did not move. The two multi-year CN harnesses did **not**: `fortran_parity_cn_annual.jl`
+and the #362 cold-start harness inherited `use_fun=false`, flexibleCN off,
+`lnc_opt=false`, Ryan leaf respiration, `br_root=SPVAL`, the onset constraint off, the
+Anderson snow pair and (cold start) `initial_vegC=20`, against Fortran references that
+ran with the CTSM values. Both harnesses were run unmodified before and after, with
+`CESM_INPUTDATA` pointing at the local inputdata. (Without it they silently run with
+zeroed SNICAR tables — `fortran_parity_common.jl` falls back to `""` when the file is
+missing. That is how #362 ran them; the new `clm_initialize!` warning is what exposed
+it. The numbers below are with the real SNICAR files; the zeroed-SNICAR rerun moves
+in the same direction for every field.)
+
+**cn_annual** (§8 reference: Fortran 2202 BGC restart injected, 365 days, Bow).
+Annual mean of the monthly means; rel = |J−F| / (1+|F|).
+
+| field | Fortran | before | after | rel before | rel after |
+|---|---|---|---|---|---|
+| TOTVEGC (gC/m2) | 374.37 | 366.01 | 374.22 | 2.2e-2 | **4.0e-4** |
+| TOTECOSYSC | 41672 | 41666 | 41672 | 1.6e-4 | **<1e-5** |
+| SMINN (gN/m2) | 51.175 | 51.479 | 51.172 | 5.8e-3 | **6.4e-5** |
+| GPP (gC/m2/s) | 2.454e-6 | 2.278e-6 | 2.415e-6 | -7.2 % | **-1.6 %** |
+| NPP (gC/m2/s) | 1.690e-6 | 7.77e-7 | 1.676e-6 | **-54 %** | **-0.8 %** |
+| EFLX_LH_TOT (W/m2) | 8.317 | 8.248 | 8.265 | 7.4e-3 | 5.6e-3 |
+| TLAI | 0.06611 | 0.06387 | 0.06263 | 2.1e-3 | 3.3e-3 (away) |
+| LEAFC (gC/m2) | 9.891 | 9.559 | 9.374 | 3.1e-2 | 4.8e-2 (away) |
+| TG (K) | 273.62 | 273.63 | 273.64 | 3e-5 | 6e-5 (away, 0.01 K) |
+| FSH (W/m2) | 39.644 | 39.696 | 39.587 | 1.3e-3 | 1.4e-3 (away, 0.005 W/m2) |
+
+NPP was the big error: with FUN off and Ryan leaf respiration the port's Bow
+vegetation had **negative** NPP from August to December where Fortran's is positive.
+It is now within 1 % annually and within 0.3e-6 in every month.
+
+**The two that moved away were investigated before shipping.** Each default was
+reverted alone on top of the new configuration (`CN_TOGGLE` runs of the same
+harness, zeroed-SNICAR configuration):
+
+| reverted alone | TLAI rel | LEAFC rel | TOTVEGC rel | NPP rel |
+|---|---|---|---|---|
+| (none, new defaults) | 3.4e-3 | 4.9e-2 | 1.4e-3 | 4.7e-8 |
+| `constrain_stress_deciduous_onset` | 3.4e-3 | 4.9e-2 | 1.4e-3 | 4.7e-8 |
+| `CNratio_floating` | 3.4e-3 | 4.9e-2 | 1.5e-3 | 5.1e-8 |
+| `leafresp_method` (Ryan) | 3.4e-3 | 5.0e-2 | 0 | 9e-10 |
+| `lnc_opt` + `vcmax_opt` | 3.4e-3 | 4.9e-2 | 6.7e-3 | 1.6e-7 |
+| `use_fun` | 3.4e-3 | 4.9e-2 | 1.0e-3 | 3.8e-8 |
+| snow pair (Anderson, no wind) | 3.5e-3 | 5.0e-2 | 1.6e-3 | 5.0e-8 |
+| **`use_flexibleCN`** | **3.7e-4** | **5.4e-3** | 1.9e-3 | 5.6e-8 |
+
+The whole LEAFC/TLAI move comes from `use_flexibleCN`, and the leaf deficit opens in
+June and grows through December (LEAFC Dec: Fortran 4.45, before 3.68, after 3.37), so
+it is in the growing-season allocation, not in onset. Fortran runs `use_flexibleCN =
+.true.` (both BGC `lnd_in`), so the CTSM value is the right default, and the move
+exposes a residual in the port's flexible-CN leaf allocation that the FUN-off,
+flexible-off configuration had been offsetting. It is recorded as an open finding, not
+fixed here. (Ryan leaf respiration happens to give a better TOTVEGC/NPP here, but
+Fortran's lnd_in has `leafresp_method = 2`, so that would be compensation, not parity.)
+The TG/FSH moves are 0.01 K and 0.005 W/m2.
+
+**Cold-start 2-year CN** (#362's harness, Bow cold start 2002-01-01, against the
+`cn-alt-roll/fortran_cold2y` ctsm5.3.012 reference; annual means).
+
+| field | year | Fortran | before | after | rel before | rel after |
+|---|---|---|---|---|---|---|
+| TOTVEGC (gC/m2) | 1 | 175.04 | 40.29 (**0.23×**) | 177.20 (**1.01×**) | 0.77 | 1.2e-2 |
+| TOTVEGC | 2 | 136.25 | 44.69 (0.33×) | 139.84 (1.03×) | 0.67 | 2.6e-2 |
+| TOTECOSYSC | 2 | 1129.6 | 968.4 | 1132.6 | 0.14 | 2.7e-3 |
+| TLAI | 1 | 0.402 | 0.082 | 0.399 | 0.23 | 2.2e-3 |
+| FROOTC | 1 | 58.2 | 13.5 | 57.0 | 0.76 | 2.1e-2 |
+| SMINN (gN/m2) | 2 | 0.0180 | 0.498 | 0.0191 | 0.47 | 1.1e-3 |
+| GPP | 2 | 2.28e-6 | 1.24e-6 | 2.17e-6 | −46 % | −4.9 % |
+| NPP | 2 | 8.75e-7 | 6.34e-7 | 8.69e-7 | −28 % | −0.6 % |
+| NFIX (gN/m2/s) | 2 | 1.84e-9 | 0 | 1.55e-9 | — | — |
+| EFLX_LH_TOT | 2 | 8.57 | 7.55 | 8.51 | 0.11 | 6.3e-3 |
+| TG (K) | 1 / 2 | 273.10 / 273.78 | 273.27 / 274.03 | 273.31 / 274.27 | — | away (+0.04 / +0.24 K) |
+
+(The harness still passes its own `h2osfcflag = 0`, `baseflow_scalar = 0.0022`
+and `int_snow_max = 3113` where the reference lnd_in has 1 / 0.001 / 2000; those are
+harness choices, unchanged before and after.) Every carbon, nitrogen and water field moves toward Fortran; most by one to two
+orders of magnitude. The "TOTVEGC about 0.3×" of #362 was mostly `initial_vegC`
+(20 vs 100: the cold vegetation started with a fifth of Fortran's carbon) plus FUN
+being off (zero N fixation). TG is the one field that moves away. Reverting the snow
+pair alone on top of the new defaults changes TG by < 0.003 K (`CN_TOGGLE=snow`), so
+it is not the snow namelist; it comes with the 4× larger, now Fortran-sized canopy
+(TLAI 0.08 → 0.40), i.e. a residual in the canopy/ground energy partition that the
+undersized canopy was hiding. Recorded as a follow-up, not reverted.
+
+### Snow namelist and AD
+
+The `snow_hydrology.jl` comment said the wind term's `(·)^8.8` "breaks the strict
+FD-vs-AD derivative check at deep-winter (250 K) conditions (test_ad_robustness.jl)".
+Re-measured with the clm5_0 values as the defaults:
+
+| `test_ad_robustness.jl` "Winter cold (250 K)" | old pair (Anderson1976, no wind) | clm5_0 pair (Vionnet2012 + wind) |
+|---|---|---|
+| d(LH)/dT  AD vs FD | 0.0505 vs **NaN** | 0.0495 vs 0.0497 (0.28 %) |
+| d(SH)/dT  AD vs FD | -14.97 vs **NaN** | -15.08 vs -14.16 (6.5 %, tolerance 10 %) |
+| d(T_grnd)/dT AD vs FD | 0.382 vs **NaN** | 0.375 vs 0.376 (0.13 %) |
+| assertions run | 90 | 96 |
+
+So the claim was backwards. Under the old pair the deep-winter finite-difference
+perturbation runs return NaN, and the strict FD-vs-AD comparison was skipped without
+failing (`abs(NaN) > 1e-4` is false), a vacuous pass. Under the clm5_0 pair the FD is
+finite and agrees with AD, and the six extra assertions run and pass. The same result
+holds with every other new default in place and only the snow pair reverted
+(`snow_hydrology_ad_smooth_namelist!()` before the test: FD = NaN, 90 assertions), so
+the NaN belongs to the Anderson/no-wind path, not to another change. The NaN itself is
+not chased here; it is a finding for the AD campaign.
+
+With the new defaults: `test_ad_robustness.jl` 96/96, `test_ad_e2e.jl` 122/122,
+`test_ad_smoke.jl` 28/28, `test_phase_snow_smoothing.jl` 48/48.
+
+`docs/FORWARD_AD_SMOOTHNESS_BOUNDARY.md`'s snow analysis is about the discrete layer
+events (`snl`, `imelt`, combine/divide), not about the compaction law or the new-snow
+density. The old pair stays available as a documented opt-in,
+`CLM.snow_hydrology_ad_smooth_namelist!()`, for an AD application that wants the snow
+path that document characterised; nothing in the test suite needs it.
+
+### Validation
+
+**Multisite strict gate** (`parity_run_domain.jl`, 1 year each, scored with the
+`parity_config.py` gate: annual |Δ| ≤ 1 % / 0.05 K and daily nRMSE ≤ 0.10 / 0.20 K).
+"Before" is unmodified `origin/main` (42409bb); "after" is this branch, where
+`parity_run_domain.jl` no longer sets the rooting profile, the snow namelist,
+`use_hydrstress`, `use_luna` or `h2osfcflag` by hand (it inherits them).
+
+| site | before | after | failing cells (after) |
+|---|---|---|---|
+| Bow | 68/69 | 68/69 | BTRANMN |
+| Stillwater | 68/69 | 68/69 | SNOW_DEPTH |
+| Abisko | 69/69 | 69/69 | — |
+| Baltimore | 68/69 | 68/69 | SNOW_DEPTH (documented) |
+| Savanna | 69/69 | 69/69 | — |
+| Iceland (extra) | 69/69 | 69/69 | — |
+| Massa (extra) | 64/69 | 64/69 | FGEV, QOVER, QSOIL, QFLX_INFL, SNOWLIQ |
+
+Every one of the 102 history variables the two runs share is **bit-identical** at all
+seven sites, except Baltimore and Iceland `QRUNOFF` (max |Δ| 1.4e-20 and 7.9e-20
+mm/s, the order of a floating-point rounding) and `BTRAN`, which is now the hourly
+field (`BTRANMN` after is bit-identical to `BTRAN` before, so the gate cell is
+unchanged). That is the expected result: this harness already set the snow pair,
+the rooting profile and PHS/LUNA by hand, `modifyphoto_and_lmr_forcrop` only changes
+the canopy leaf-respiration diagnostic on the PHS SP path, and the CN changes do not
+run with `use_cn = false`. What it proves is that the inherited defaults are exactly
+the configuration the harness used to rebuild by hand.
+
+**The scale types are inert on every reference domain.** All seven SYMFLUENCE
+surface datasets are 100 % natural vegetation (`PCT_URBAN = PCT_GLACIER = PCT_LAKE
+= 0`, including the "urban" Baltimore and the "glacier" Iceland/Massa domains), so
+no reference gridcell has a second landunit for `urbanf`/`urbans`/`veg` to act on.
+The aggregation itself is pinned by a unit test in `test_driver_defaults_audit.jl`
+(one soil + one urban landunit with roof, sunwall and road columns; `unity`,
+`urbanf`, `urbans` and `veg` against hand-computed `c2g` values).
+
+**Fortran-parity and unit tests.** Full suite (Julia 1.12, `SYMFLUENCE_DATA` and
+`CESM_INPUTDATA` set): 33217 passed, 31 failed, 4 broken (the `@test_broken`
+markers). All 31 failures were assertions pinning the old defaults in three files:
+`test_constants.jl` (`co2_ppmv`), `test_cn_veg_carbon_state.jl` (cold-start seeds
+of `INITIAL_VEGC`), `test_cn_precision_control.jl` (truncation inputs between the
+new and old `ncrit`). Updated; re-run standalone: 70/70, 198/198, 162/162, and
+`test_driver_defaults_audit.jl` 157/157. No Fortran-parity test (`test_fortran_parity*`,
+the FATES parity tests, `test_fun_coldstart_finite.jl`, `test_cn_active_layer_roll.jl`)
+moved.
+
+### Open findings from this campaign
+1. **flexibleCN leaf allocation residual** (cn_annual LEAFC −5 % by December with
+   `use_flexibleCN`, −0.5 % without). Fortran runs flexibleCN; the port's flexible
+   allocation path needs a step-level comparison.
+2. **Cold-start TG +0.24 K in year 2** once the canopy is Fortran-sized.
+3. **The old snow pair NaNs the 250 K FD perturbation** in `test_ad_robustness.jl`;
+   that test silently skipped its strict check under the old defaults.
+4. `fortran_parity_common.jl` falls back to empty SNICAR paths when
+   `CESM_INPUTDATA` is unset, so CN harness runs without it use zeroed snow optics.
+
 ## Scorecard
 
 | Category | Count |
 |---|---|
 | Flags audited | **~110** (16 driver-entry keywords + 79 `varctl` fields + `CLMDriverConfig` switches + the `use_flexibleCN` cascade) |
 | MATCH | ~85 |
-| MISMATCH — live physics | **1 remaining** (`convert_ocean_to_land`) + `glc_snow_persistence_max_days` (live via kwarg). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3), `use_aquifer_layer` **fixed** (#259, re-confirmed here on the corrected tridiagonal solver), `baseflow_scalar` **fixed** (here, M2) |
+| MISMATCH — live physics | **0 remaining** after campaign #3 (`convert_ocean_to_land`, `glc_snow_persistence_max_days` closed there; see that section for the deliberate differences). Originally 6: `create_crop_landunit` **fixed** (M5), `use_luna` **fixed** (#267, M4), `use_hydrstress` **fixed** (PHS campaign, M3), `use_aquifer_layer` **fixed** (#259, re-confirmed here on the corrected tridiagonal solver), `baseflow_scalar` **fixed** (here, M2) |
 | MISMATCH — inert (0 reads / guarded) | 12 (`nsegspc`, `nyr_forcing`, `h2osno_max`, `n_dom_landunits`, `n_dom_pfts`, 6× `toosmall_*`, `downscale_hillslope_meteorology`, `z0param_method`) |
-| CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) |
+| CONDITIONAL-MISMATCH under `use_cn=true` | 8 (the `use_flexibleCN` cascade, M6) — **closed in campaign #3**, together with `use_fun`, `leafresp_method`, `br_root`, `constrain_stress_deciduous_onset`, `initial_vegC`, `ncrit`/`nnegcrit` |
 | Namelist-vs-code-fallback disagreements found | **14** — CLM.jl copied the code fallback in *every* case |
 
 ## Not fixed here, and why

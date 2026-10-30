@@ -75,7 +75,7 @@
         @test vc.use_cn == false
         @test vc.use_lch4 == true
         @test vc.use_nitrif_denitrif == true
-        @test vc.co2_ppmv ≈ 355.0
+        @test vc.co2_ppmv ≈ 367.0   # I2000 CCSM_CO2_PPMV (defaults audit campaign #3)
         @test vc.spinup_state == 0
         @test vc.irrigate == false
     end

@@ -6,14 +6,21 @@
 # --- Module-level constants ---
 const SPINUP_FACTOR_DEADWOOD_DEFAULT = 1.0   # spinup factor used for this simulation
 const SPINUP_FACTOR_AD = 10.0                # spinup factor when in Accelerated Decomposition mode
-const INITIAL_VEGC = 20.0                    # initial vegetation carbon for leafc/frootc and storage (gC/m2)
+const INITIAL_VEGC = 20.0                    # CODE fallback of initial_vegC (CNVegCarbonStateType.F90:232) (gC/m2)
+# NAMELIST default of initial_vegC for a clm5_0 BGC case (namelist_defaults_ctsm.xml:2033:
+# use_cn .and. mm_nuptake_opt -> 100; mm_nuptake_opt is .true. whenever use_flexibleCN,
+# the clm5_0 BGC default). (:2035 gives 1.0 for use_cn with mm_nuptake_opt=.false.;
+# :2034 gives 20 for clm4_5.)
+const INITIAL_VEGC_NAMELIST_DEFAULT = 100.0
 
 # Fortran `cnvegcstate_const` (CNVegCarbonStateType.F90:232, namelist &cnvegcarbonstate).
-# initial_vegC is a NAMELIST variable, not a hardcoded constant: its CTSM default is
-# 20 gC/m2, but a case can override it (Bow's lnd_in sets initial_vegc = 100). Keeping
-# it hardcoded meant a cold start could never reproduce such a case.
+# initial_vegC is a NAMELIST variable, not a hardcoded constant. The port used to default
+# it to the code fallback (20), which no CTSM clm5_0 BGC case runs with: build-namelist
+# writes 100 (the Bow lnd_in's `initial_vegc = 100` is that default, not a case setting).
+# A cold-start CN run therefore seeded 1/5 of Fortran's leaf/fine-root carbon. A caller
+# that turns use_flexibleCN off should set this to 1.0 to match CTSM (:2035).
 Base.@kwdef mutable struct CNVegCarbonStateParams
-    initial_vegC::Float64 = INITIAL_VEGC
+    initial_vegC::Float64 = INITIAL_VEGC_NAMELIST_DEFAULT
 end
 const cnvegcstate_const = CNVegCarbonStateParams()
 
@@ -832,10 +839,10 @@ function cnveg_carbon_state_init_cold!(cs::CNVegCarbonStateData,
 
         if use_matrixcn && length(cs.matrix_cap_leafc_patch) > 0
             cs.matrix_cap_leafc_patch[p]          = 0.0
-            cs.matrix_cap_leafc_storage_patch[p]  = INITIAL_VEGC * ratio
+            cs.matrix_cap_leafc_storage_patch[p]  = ivc * ratio
             cs.matrix_cap_leafc_xfer_patch[p]     = 0.0
             cs.matrix_cap_frootc_patch[p]         = 0.0
-            cs.matrix_cap_frootc_storage_patch[p] = INITIAL_VEGC * ratio
+            cs.matrix_cap_frootc_storage_patch[p] = ivc * ratio
             cs.matrix_cap_frootc_xfer_patch[p]    = 0.0
 
             cs.matrix_cap_livestemc_patch[p]          = 0.0
