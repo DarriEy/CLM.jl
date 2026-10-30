@@ -110,9 +110,13 @@ function reverse(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT}, tape,
     ann = _ka_launch_annotations(args)
     EnzymeRules.reverse(_ka_rev_config(config, Val(N)), Const(kobj), Const{Nothing},
                         tape, ann...; ndrange = ndrange.val)
-    return (nothing, nothing, nothing,
-            ntuple(i -> args[i] isa Active ? Enzyme.make_zero(args[i].val) : nothing, Val(N))...)
+    return (nothing, nothing, nothing, map(_launch_scalar_grad, args)...)
 end
+
+# Per-argument reverse return, by dispatch so the tuple type is concrete (Enzyme checks
+# the inferred return type of a reverse rule).
+_launch_scalar_grad(a::Active) = Enzyme.make_zero(a.val)
+_launch_scalar_grad(a) = nothing
 
 # --------------------------------------------------------------------------
 # hydrond_snow_persistence! — launch-level overwrite/add adjoint.
