@@ -97,6 +97,7 @@ const INPROCESS_TEST_FILES = [
     # here in the fresh-global unit block — see the note at test_driver_reverse.jl.
     "test_photosynthesis.jl",
     "test_photosynthesis_ad_pft_params.jl",
+    "test_photosynthesis_lnc_opt.jl",
     "test_phs_night_frozen.jl",
     "test_canopy_fluxes.jl",
     "test_canopy_reverse.jl",

@@ -240,7 +240,26 @@ const SRC_COL = [
     ("ZWT_CH4_UNSAT",       i -> i.ch4.zwt_ch4_unsat_col),
 ]
 
-function run_source(; nsteps::Int = NLASTS - N0S, mode::Symbol = :locked, report_every::Int = 0)
+# The reference clock is GREGORIAN (bow_ref_ch4o2/nuopc.runconfig CLOCK_attributes
+# `calendar = GREGORIAN`), so Fortran's get_average_days_per_year() is 365.2425 in every
+# decomposition rate constant (SoilBiogeochemDecompCascadeBGCMod.F90:606-624) and in
+# CNPhenology's avg_dayspyr. Julia's default is NO_LEAP (365.0); running against this
+# reference with it inflates every k by 365.2425/365 - 1 = 6.64e-4, which was the whole
+# "constant 6.6e-4 HR floor" of docs/CH4_FIRE_PARITY.md §16. The window (2003) has no
+# leap day, so only the average-days-per-year changes. Restored on exit.
+const CALENDAR_SRC = "GREGORIAN"
+
+function run_source(; kwargs...)
+    old = CLM.CLM_CALENDAR[]
+    try
+        CLM.CLM_CALENDAR[] = CALENDAR_SRC
+        return _run_source(; kwargs...)
+    finally
+        CLM.CLM_CALENDAR[] = old
+    end
+end
+
+function _run_source(; nsteps::Int = NLASTS - N0S, mode::Symbol = :locked, report_every::Int = 0)
     n1 = N0S + 1
     nsteps = min(nsteps, NLASTS - N0S)
     report_every = report_every > 0 ? report_every : (nsteps > 48 ? 12 : 1)
