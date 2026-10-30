@@ -2072,11 +2072,10 @@ end
                 # Rain trigger (CNPhenologyMod.F90:1638-1644). Was hardcoded
                 # `true` because prec10 did not exist as a field; it does now (a
                 # real 10-day running mean, accumulated in atm2lnd_update_acc_vars!).
-                # Gated on constrain_stress_deciduous_onset, whose CLM.jl default is
-                # false → this stays unconditionally true by default, exactly as
-                # before. (NOTE: Fortran's CLM5/CLM6 namelist default for that flag
-                # is .true.; only clm4_5 is .false. Flipping the CLM.jl default is a
-                # separate, parity-validated change — not made here.)
+                # Gated on constrain_stress_deciduous_onset: the CNSharedParamsData
+                # struct keeps the code fallback (.false.), and clm_initialize! sets
+                # the clm5_0 namelist default .true. for use_cn runs
+                # (namelist_defaults_ctsm.xml:635; only clm4_5 is .false.).
                 additional_onset_condition = true
                 if sc.constrain_onset
                     if inp.prec10_patch[p] * (T(3600) * T(10) * T(24)) < sc.rain_threshold

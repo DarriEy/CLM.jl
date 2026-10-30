@@ -2313,7 +2313,9 @@ function clm_drv_core!(config::CLMDriverConfig,
             wsb.snow_persistence_col,
             glc_dyn_runoff_routing_grc,
             col.landunit, col.gridcell, lun.itype,
-            filt.allc, filt.do_smb_c, bc_col)  # default glc_snow_persistence_max_days=7300
+            filt.allc, filt.do_smb_c, bc_col;
+            # clm5_0 namelist default 0 (namelist_defaults_ctsm.xml:540); 7300 is clm4_5.
+            glc_snow_persistence_max_days = varctl.glc_snow_persistence_max_days)
     end
 
     # AerosolMasses (non-lake) — WIRED

@@ -27,14 +27,21 @@ struct HistFieldDef
     # Fortran hist_addfld l2g_scale_type (subgridAveMod create_scale_l2g_lookup):
     # landunits whose scale is spval are left out of the gridcell average.
     l2g_scale_type::String
+    # Fortran hist_addfld c2l_scale_type (subgridAveMod set_c2l_scale): 'urbanf'
+    # converts urban wall/road fluxes from per-m2-of-surface to per-m2-of-ground
+    # (walls x 3*canyon_hwr, roads x 3), 'urbans' does the same for intensive
+    # states (temperature). Only urban columns are scaled; 'unity' everywhere else.
+    c2l_scale_type::String
 end
 
 # Convenience constructors: fields default to daily-mean reduction and the
-# 'unity' l2g scale (every landunit counts), the hist_addfld default.
-HistFieldDef(name, long_name, units, level, getter) =
-    HistFieldDef(name, long_name, units, level, getter, :avg, "unity")
-HistFieldDef(name, long_name, units, level, getter, reduce::Symbol) =
-    HistFieldDef(name, long_name, units, level, getter, reduce, "unity")
+# 'unity' l2g / c2l scales, the hist_addfld defaults. The keyword form takes the
+# Fortran hist_addfld names: `HistFieldDef(...; l2g = "veg", c2l = "urbanf")`.
+HistFieldDef(name, long_name, units, level, getter, reduce::Symbol = :avg;
+             l2g::String = "unity", c2l::String = "unity") =
+    HistFieldDef(name, long_name, units, level, getter, reduce, l2g, c2l)
+HistFieldDef(name, long_name, units, level, getter, reduce::Symbol, l2g::String) =
+    HistFieldDef(name, long_name, units, level, getter, reduce, l2g, "unity")
 
 """
     HistoryWriter
@@ -60,17 +67,17 @@ Return default set of history output fields.
 function default_hist_fields()
     return HistFieldDef[
         HistFieldDef("T_GRND", "ground temperature", "K", "column",
-            inst -> inst.temperature.t_grnd_col),
+            inst -> inst.temperature.t_grnd_col; c2l = "urbans"),
         HistFieldDef("QFLX_EVAP_TOT", "total evaporation", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_tot_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_tot_col; c2l = "urbanf"),
         HistFieldDef("EFLX_LH_TOT", "total latent heat flux", "W/m2", "patch",
-            inst -> inst.energyflux.eflx_lh_tot_patch),
+            inst -> inst.energyflux.eflx_lh_tot_patch; c2l = "urbanf"),
         HistFieldDef("EFLX_SH_TOT", "total sensible heat flux", "W/m2", "patch",
-            inst -> inst.energyflux.eflx_sh_tot_patch),
+            inst -> inst.energyflux.eflx_sh_tot_patch; c2l = "urbanf"),
         HistFieldDef("FSA", "absorbed solar radiation", "W/m2", "patch",
-            inst -> inst.solarabs.fsa_patch),
+            inst -> inst.solarabs.fsa_patch; c2l = "urbanf"),
         HistFieldDef("H2OSNO", "snow water equivalent", "mm", "column",
-            history_h2osno_total_col),
+            history_h2osno_total_col; c2l = "urbanf"),
         HistFieldDef("TSA", "2m air temperature", "K", "patch",
             inst -> inst.temperature.t_ref2m_patch),
         # Fortran h0 RAIN/SNOW are atmospheric gridcell forcing fields, before
@@ -85,9 +92,9 @@ function default_hist_fields()
                 inst.atm2lnd.forc_snow_not_downscaled_grc :
                 zeros(maximum(inst.column.gridcell))),
         HistFieldDef("QRUNOFF", "total runoff", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_runoff_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_runoff_col; c2l = "urbanf"),
         HistFieldDef("ZWT", "water table depth", "m", "column",
-            history_zwt_veg_col),
+            history_zwt_veg_col; l2g = "veg"),
         # Under FATES-SP, CTSM points TLAI/TSAI at the *_hist_patch copies (the FATES
         # totals); tlai/tsai_patch hold the prescribed per-PFT-slot inputs
         # (CanopyStateType.F90:232-241).
@@ -97,25 +104,33 @@ function default_hist_fields()
         HistFieldDef("ELAI", "exposed one-sided leaf area index", "m2/m2", "patch",
             inst -> inst.canopystate.elai_patch),
         HistFieldDef("QFLX_DRAIN", "sub-surface drainage", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_drain_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_drain_col; c2l = "urbanf"),
         HistFieldDef("QFLX_INFL", "infiltration", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_infl_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_infl_col; c2l = "urbanf"),
         HistFieldDef("QFLX_TRAN_VEG", "vegetation transpiration", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col; c2l = "urbanf"),
         HistFieldDef("SNOW_DEPTH", "snow depth", "m", "column",
-            inst -> inst.water.waterdiagnosticbulk_inst.snow_depth_col),
+            inst -> inst.water.waterdiagnosticbulk_inst.snow_depth_col; c2l = "urbanf"),
         HistFieldDef("SNOWDP", "area-averaged snow depth", "m", "column",
-            inst -> inst.water.waterdiagnosticbulk_inst.snowdp_col),
+            inst -> inst.water.waterdiagnosticbulk_inst.snowdp_col; c2l = "urbanf"),
         HistFieldDef("FRAC_SNO", "fraction of ground covered by snow", "unitless", "column",
-            inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col),
-        # BTRANMN is a daily-MIN, not a daily-mean: snapshot the completed daily-min
-        # (btran_min_patch) at the end-of-day flush. energyflux_update_acc_vars! runs
-        # before the history flush, so at that moment btran_min_patch holds THIS day's
-        # min — writing it as a snapshot puts today's min in today's record (matching
-        # the averaged fields), instead of the day-average of a field that holds
-        # yesterday's completed min for most of the day (which lagged BTRANMN by 1 day).
+            inst -> inst.water.waterdiagnosticbulk_inst.frac_sno_col; c2l = "urbanf"),
+        # BTRAN: the per-timestep transpiration beta factor, history-averaged
+        # (EnergyFluxType.F90:661-663, avgflag='A', l2g_scale_type='veg'). CTSM only
+        # registers BTRAN when .not. use_hydrstress; under PHS (the clm5_0 default) its
+        # h0 has BTRANMN only. The port writes both on every run.
         HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
-            history_btran_daily_min_patch, :snapshot),
+            history_btran_patch; l2g = "veg"),
+        # BTRANMN (EnergyFluxType.F90:667-669, l2g_scale_type='veg') is a daily-MIN,
+        # not a daily-mean: snapshot the completed daily-min (btran_min_patch) at the
+        # end-of-day flush. energyflux_update_acc_vars! runs before the history flush,
+        # so at that moment btran_min_patch holds THIS day's min — writing it as a
+        # snapshot puts today's min in today's record (matching the averaged fields),
+        # instead of the day-average of a field that holds yesterday's completed min
+        # for most of the day (which lagged BTRANMN by 1 day). Until this field was
+        # split out, the port wrote this daily minimum under the name BTRAN.
+        HistFieldDef("BTRANMN", "daily minimum of transpiration beta factor", "unitless", "patch",
+            history_btran_daily_min_patch, :snapshot; l2g = "veg"),
         # PHS diagnostics (late-season over-transpiration investigation)
         HistFieldDef("VEGWPSUN", "sunlit leaf water potential", "mm", "patch",
             history_vegwpsun_patch),
@@ -124,14 +139,14 @@ function default_hist_fields()
         HistFieldDef("KSOILROOT", "soil-to-root conductance (layer sum)", "mm/s", "patch",
             history_ksoilroot_patch),
         HistFieldDef("SMPLMEAN", "soil matric potential (soil-layer mean)", "mm", "column",
-            history_smplmean_col),
+            history_smplmean_col; l2g = "veg"),
         HistFieldDef("SOILICE", "soil column ice", "mm", "column",
-            history_soilice_col),
+            history_soilice_col; l2g = "veg"),
         HistFieldDef("BSUNDIAG", "sunlit PHS water-stress factor", "unitless", "patch",
             inst -> isempty(inst.energyflux.bsun_patch) ? Float64[] :
                     Float64.(inst.energyflux.bsun_patch)),
         HistFieldDef("SOILWATER_10CM", "soil water+ice in top 0.1 m", "mm", "column",
-            history_soilwater_10cm_col),
+            history_soilwater_10cm_col; l2g = "veg"),
         HistFieldDef("SOILRESIS", "soil evaporative resistance (S&L14)", "s/m", "column",
             inst -> isempty(inst.soilstate.soilresis_col) ? Float64[] :
                     Float64.(inst.soilstate.soilresis_col)),
@@ -140,12 +155,12 @@ function default_hist_fields()
                     Float64.(inst.soilstate.dsl_col)),
         HistFieldDef("FSR", "reflected solar radiation", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_patch) ? Float64[] :
-                    Float64.(inst.solarabs.fsr_patch)),
+                    Float64.(inst.solarabs.fsr_patch); c2l = "urbanf"),
         HistFieldDef("DHSDTCANOPY", "canopy heat storage rate", "W/m2", "patch",
             inst -> isempty(inst.energyflux.dhsdt_canopy_patch) ? Float64[] :
-                    Float64.(inst.energyflux.dhsdt_canopy_patch)),
+                    Float64.(inst.energyflux.dhsdt_canopy_patch); c2l = "urbanf"),
         HistFieldDef("SABG", "solar absorbed by ground", "W/m2", "patch",
-            inst -> isempty(inst.solarabs.sabg_patch) ? Float64[] : Float64.(inst.solarabs.sabg_patch)),
+            inst -> isempty(inst.solarabs.sabg_patch) ? Float64[] : Float64.(inst.solarabs.sabg_patch); c2l = "urbanf"),
         HistFieldDef("SABGCHK", "fsno-weighted sabg check", "W/m2", "patch",
             inst -> isempty(inst.solarabs.sabg_chk_patch) ? Float64[] : Float64.(inst.solarabs.sabg_chk_patch)),
         HistFieldDef("SABGSOIL", "solar absorbed by soil", "W/m2", "patch",
@@ -153,19 +168,19 @@ function default_hist_fields()
         HistFieldDef("SABGSNOW", "solar absorbed by snow", "W/m2", "patch",
             inst -> isempty(inst.solarabs.sabg_snow_patch) ? Float64[] : Float64.(inst.solarabs.sabg_snow_patch)),
         HistFieldDef("SABV", "solar absorbed by vegetation", "W/m2", "patch",
-            inst -> isempty(inst.solarabs.sabv_patch) ? Float64[] : Float64.(inst.solarabs.sabv_patch)),
+            inst -> isempty(inst.solarabs.sabv_patch) ? Float64[] : Float64.(inst.solarabs.sabv_patch); c2l = "urbanf"),
         HistFieldDef("FSRVD", "reflected direct beam vis solar", "W/m2", "patch",
             inst -> isempty(inst.surfrad.fsr_vis_d_patch) ? Float64[] :
-                    Float64.(inst.surfrad.fsr_vis_d_patch)),
+                    Float64.(inst.surfrad.fsr_vis_d_patch); c2l = "urbanf"),
         HistFieldDef("FSRND", "reflected direct beam NIR solar", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_nir_d_patch) ? Float64[] :
-                    Float64.(inst.solarabs.fsr_nir_d_patch)),
+                    Float64.(inst.solarabs.fsr_nir_d_patch); c2l = "urbanf"),
         HistFieldDef("FSRVI", "reflected diffuse vis solar", "W/m2", "patch",
             inst -> isempty(inst.surfrad.fsr_vis_i_patch) ? Float64[] :
-                    Float64.(inst.surfrad.fsr_vis_i_patch)),
+                    Float64.(inst.surfrad.fsr_vis_i_patch); c2l = "urbanf"),
         HistFieldDef("FSRNI", "reflected diffuse NIR solar", "W/m2", "patch",
             inst -> isempty(inst.solarabs.fsr_nir_i_patch) ? Float64[] :
-                    Float64.(inst.solarabs.fsr_nir_i_patch)),
+                    Float64.(inst.solarabs.fsr_nir_i_patch); c2l = "urbanf"),
         HistFieldDef("FSDSVD", "incident direct beam vis solar", "W/m2", "patch",
             inst -> isempty(inst.surfrad.fsds_vis_d_patch) ? Float64[] :
                     Float64.(inst.surfrad.fsds_vis_d_patch)),
@@ -180,10 +195,10 @@ function default_hist_fields()
                     Float64.(inst.solarabs.fsds_nir_i_patch)),
         HistFieldDef("FIRA", "net infrared (longwave) radiation", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_lwrad_net_patch) ? Float64[] :
-                    Float64.(inst.energyflux.eflx_lwrad_net_patch)),
+                    Float64.(inst.energyflux.eflx_lwrad_net_patch); c2l = "urbanf"),
         HistFieldDef("FGR", "soil heat flux into ground", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_soil_grnd_patch) ? Float64[] :
-                    Float64.(inst.energyflux.eflx_soil_grnd_patch)),
+                    Float64.(inst.energyflux.eflx_soil_grnd_patch); c2l = "urbanf"),
         HistFieldDef("TV", "vegetation temperature", "K", "patch",
             inst -> isempty(inst.temperature.t_veg_patch) ? Float64[] :
                     Float64.(inst.temperature.t_veg_patch)),
@@ -248,27 +263,27 @@ function default_hist_fields()
         HistFieldDef("TLAIGRASS", "grass total LAI", "m2/m2", "patch",
             history_tlaigrass),
         HistFieldDef("QOVER", "surface runoff", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_surf_col; c2l = "urbanf"),
         HistFieldDef("FSAT", "saturated fraction", "unitless", "column",
-            inst -> inst.sat_excess_runoff.fsat_col),
+            inst -> inst.sat_excess_runoff.fsat_col; l2g = "veg"),
         HistFieldDef("QFLX_RAIN_PLUS_SNOMELT", "rain plus snowmelt", "mm/s", "column",
             inst -> inst.water.waterfluxbulk_inst.wf.qflx_rain_plus_snomelt_col),
         HistFieldDef("QFLX_SNOMELT", "snowmelt", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_snomelt_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_snomelt_col; c2l = "urbanf"),
         HistFieldDef("FCTR", "transpiration heat flux", "W/m2", "patch",
-            inst -> inst.energyflux.eflx_lh_vegt_patch),
+            inst -> inst.energyflux.eflx_lh_vegt_patch; c2l = "urbanf"),
         HistFieldDef("FCEV", "canopy evaporation heat flux", "W/m2", "patch",
-            inst -> inst.energyflux.eflx_lh_vege_patch),
+            inst -> inst.energyflux.eflx_lh_vege_patch; c2l = "urbanf"),
         HistFieldDef("FGEV", "ground evaporation heat flux", "W/m2", "patch",
-            inst -> inst.energyflux.eflx_lh_grnd_patch),
+            inst -> inst.energyflux.eflx_lh_grnd_patch; c2l = "urbanf"),
         HistFieldDef("FSH", "sensible heat flux", "W/m2", "patch",
-            inst -> inst.energyflux.eflx_sh_tot_patch),
+            inst -> inst.energyflux.eflx_sh_tot_patch; c2l = "urbanf"),
         HistFieldDef("QVEGT", "canopy transpiration", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_tran_veg_col; c2l = "urbanf"),
         HistFieldDef("QVEGE", "canopy evaporation", "mm/s", "column",
-            history_qvege_col),
+            history_qvege_col; c2l = "urbanf"),
         HistFieldDef("QSOIL", "ground evaporation", "mm/s", "column",
-            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_soi_col),
+            inst -> inst.water.waterfluxbulk_inst.wf.qflx_evap_soi_col; c2l = "urbanf"),
         # --- Extended parity set: surface water / perched water table ---
         HistFieldDef("H2OSFC", "surface water depth", "mm", "column",
             inst -> isempty(inst.water.waterstatebulk_inst.ws.h2osfc_col) ? Float64[] :
@@ -281,7 +296,7 @@ function default_hist_fields()
                     Float64.(inst.water.waterfluxbulk_inst.qflx_h2osfc_surf_col)),
         HistFieldDef("ZWT_PERCH", "perched water table depth", "m", "column",
             inst -> isempty(inst.soilhydrology.zwt_perched_col) ? Float64[] :
-                    Float64.(inst.soilhydrology.zwt_perched_col)),
+                    Float64.(inst.soilhydrology.zwt_perched_col); l2g = "veg"),
         # --- Extended parity set: near-surface turbulence / momentum ---
         # Fortran history 'U10' maps to u10_clm_patch (the clm_map2gcell 10-m wind);
         # u10_patch is the dust-model wind, exported as 'U10_DUST' in CTSM.
@@ -308,12 +323,12 @@ function default_hist_fields()
                     Float64.(inst.canopystate.tsai_patch)),
         HistFieldDef("FIRE", "emitted infrared (longwave) radiation", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_lwrad_out_patch) ? Float64[] :
-                    Float64.(inst.energyflux.eflx_lwrad_out_patch)),
+                    Float64.(inst.energyflux.eflx_lwrad_out_patch); c2l = "urbanf"),
         # --- Core vars previously only tracked by the plot harness ---
         HistFieldDef("TSOI", "soil temperature (column mean)", "K", "column",
-            history_tsoi_colmean),
+            history_tsoi_colmean; l2g = "veg"),
         HistFieldDef("TOTSOILLIQ", "vertically summed soil liquid water", "kg/m2", "column",
-            history_totsoilliq_col),
+            history_totsoilliq_col; l2g = "veg"),
         # Column water mass at end of step. Fortran's history TWS is this
         # landunit-area-weighted to the gridcell (c2g 'urbanf'/'unity') plus river
         # storage; that landunit weighting is not reproduced by this lumped
@@ -331,10 +346,10 @@ function default_hist_fields()
         # (whole gridcell), so contribute finite values including bare.
         HistFieldDef("FSH_V", "sensible heat from vegetation", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_sh_veg_patch) ? Float64[] :
-                    Float64.(inst.energyflux.eflx_sh_veg_patch)),
+                    Float64.(inst.energyflux.eflx_sh_veg_patch); c2l = "urbanf"),
         HistFieldDef("FSH_G", "sensible heat from ground", "W/m2", "patch",
             inst -> isempty(inst.energyflux.eflx_sh_grnd_patch) ? Float64[] :
-                    Float64.(inst.energyflux.eflx_sh_grnd_patch)),
+                    Float64.(inst.energyflux.eflx_sh_grnd_patch); c2l = "urbanf"),
         # Exposed stem area index (complements ELAI; bare = real 0).
         HistFieldDef("ESAI", "exposed one-sided stem area index", "m2/m2", "patch",
             inst -> isempty(inst.canopystate.esai_patch) ? Float64[] :
@@ -353,9 +368,9 @@ function default_hist_fields()
                     Float64.(inst.solarabs.sabg_pen_patch)),
         # Snow-pack liquid and ice content (summed over active snow layers).
         HistFieldDef("SNOWLIQ", "snow liquid water", "kg/m2", "column",
-            history_snowliq_col),
+            history_snowliq_col; c2l = "urbanf"),
         HistFieldDef("SNOWICE", "snow ice content", "kg/m2", "column",
-            history_snowice_col),
+            history_snowice_col; c2l = "urbanf"),
     ]
 end
 
@@ -372,6 +387,27 @@ function history_h2osno_total_col(inst::CLMInstances)
     h2osno_total = zeros(nc)
     waterstate_calculate_total_h2osno!(ws, trues(nc), 1:nc, col.snl, h2osno_total)
     return h2osno_total
+end
+
+"""
+    history_btran_patch(inst) -> Vector{Float64}
+
+Per-timestep `btran_patch` for the history BTRAN field (Fortran `BTRAN`,
+EnergyFluxType.F90:661, averaged over the history interval with
+`l2g_scale_type='veg'`). The bare-ground patch contributes 0: CTSM's
+BareGroundFluxes sets `btran(p) = 0` there, and the 'veg' p2g keeps it in the
+gridcell average with its full area weight (see `history_btran_daily_min_patch`).
+"""
+function history_btran_patch(inst::CLMInstances)
+    ef = inst.energyflux
+    pch = inst.patch
+    np = length(ef.btran_patch)
+    out = fill(NaN, np)
+    for p in 1:np
+        p <= length(pch.itype) || continue
+        out[p] = pch.itype[p] == noveg ? 0.0 : Float64(ef.btran_patch[p])
+    end
+    return out
 end
 
 """
@@ -854,6 +890,25 @@ Follows Fortran `p2g_1d` / `c2g_1d` (subgridAveMod.F90:530-549 / c2g): a patch
 not spval, and its landunit's `l2g_scale_type` scale is not spval. The port also
 skips non-finite values (its "no value" marker, the role spval plays in Fortran).
 """
+# Per-column c2l scale factor, as subgridAveMod set_c2l_scale (subgrid_ave.jl's
+# set_c2l_scale! fills a whole bounds range; history needs it one column at a time).
+function _hist_c2l_scale(c2l::String, col, lun, c::Int)
+    l = col.landunit[c]
+    (1 <= l <= length(lun.urbpoi) && lun.urbpoi[l]) || return 1.0
+    ct = col.itype[c]
+    hwr = lun.canyon_hwr[l]
+    if c2l == "urbanf"
+        (ct == ICOL_SUNWALL || ct == ICOL_SHADEWALL) && return 3.0 * hwr
+        (ct == ICOL_ROAD_PERV || ct == ICOL_ROAD_IMPERV) && return 3.0
+        return 1.0                                     # roof
+    elseif c2l == "urbans"
+        (ct == ICOL_SUNWALL || ct == ICOL_SHADEWALL) && return (3.0 * hwr) / (2.0 * hwr + 1.0)
+        (ct == ICOL_ROAD_PERV || ct == ICOL_ROAD_IMPERV) && return 3.0 / (2.0 * hwr + 1.0)
+        return 1.0
+    end
+    error("history: c2l_scale_type '$c2l' not supported")
+end
+
 function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
     data = try
         f.getter(inst)
@@ -875,6 +930,10 @@ function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
                    create_scale_l2g_lookup(f.l2g_scale_type)
     _l2g_ok(l) = scale_lookup === nothing || !(1 <= l <= length(lun.itype)) ||
                  scale_lookup[lun.itype[l]] != SPVAL
+    # c2l scale (subgridAveMod set_c2l_scale). It multiplies the VALUE, not the
+    # weight: c2g/p2g accumulate carr*scale_c2l*wtgcell but sum only wtgcell.
+    c2l = f.c2l_scale_type
+    _c2l(c) = c2l == "unity" ? 1.0 : _hist_c2l_scale(c2l, col, lun, c)
 
     if f.level == "patch"
         np = length(data)
@@ -887,7 +946,8 @@ function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
                 (p <= length(pch.landunit) && !_l2g_ok(pch.landunit[p])) && continue
                 g = pch.gridcell[p]
                 if g >= 1 && g <= ng
-                    gcell_val[g] += val * pch.wtgcell[p]
+                    sc = p <= length(pch.column) ? _c2l(pch.column[p]) : 1.0
+                    gcell_val[g] += val * sc * pch.wtgcell[p]
                     gcell_wt[g]  += pch.wtgcell[p]
                 end
             end
@@ -903,7 +963,7 @@ function _aggregate_to_gridcell(f::HistFieldDef, inst::CLMInstances, ng::Int)
                 (c <= length(col.landunit) && !_l2g_ok(col.landunit[c])) && continue
                 g = col.gridcell[c]
                 if g >= 1 && g <= ng
-                    gcell_val[g] += val * col.wtgcell[c]
+                    gcell_val[g] += val * _c2l(c) * col.wtgcell[c]
                     gcell_wt[g]  += col.wtgcell[c]
                 end
             end

@@ -191,10 +191,10 @@ function clm_run!(;
         inst.overrides = overrides
     end
 
-    # Light inhibition of leaf respiration is on by default in CLM5 (namelist
-    # light_inhibit=.true. for the clm5 physics; the reference lnd_in sets it too).
-    # The Julia PhotosynsData field defaults to false, so enable it here to match.
-    inst.photosyns.light_inhibit = true
+    # The clm5_0 namelist defaults (light_inhibit, modifyphoto_and_lmr_forcrop, the
+    # atm2lnd rain/snow repartitioning + lapse rates, the CN cascade, ...) are applied
+    # by clm_initialize!'s _clm5_namelist_defaults!, so a caller that drives
+    # clm_initialize! + clm_drv! directly gets the same configuration as clm_run!.
 
     # Fortran-exact threshold; caller may degrade the hard stop to a warning so an
     # annual free-run completes past a marginal (Fortran-matched 1e-5 mm) dry-regime
@@ -205,15 +205,7 @@ function clm_run!(;
                              use_hillslope_routing=use_hillslope_routing,
                              use_luna=use_luna, use_hydrstress=use_hydrstress)
 
-    # Configure atm2lnd downscaling to match Fortran lnd_in defaults
-    atm2lnd_read_namelist!(inst.atm2lnd;
-        repartition_rain_snow=true,
-        lapse_rate=0.006,
-        lapse_rate_longwave=0.032,
-        precip_repartition_nonglc_all_snow_t=0.0,
-        precip_repartition_nonglc_all_rain_t=2.0,
-        precip_repartition_glc_all_snow_t=-2.0,
-        precip_repartition_glc_all_rain_t=0.0)
+    # atm2lnd downscaling namelist (&atm2lnd_inparm) is set in clm_initialize!.
 
     # Set baseflow scalar (namelist-adjustable parameter)
     bf = (overrides !== nothing && !isnan(overrides.baseflow_scalar)) ?

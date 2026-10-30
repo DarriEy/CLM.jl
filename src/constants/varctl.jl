@@ -53,7 +53,11 @@ Base.@kwdef mutable struct VarCtl
     # --- Atmospheric forcing ---
     ndep_from_cpl::Bool = false
     co2_type::String = "constant"
-    co2_ppmv::Float64 = 355.0
+    # I2000 compsets pass CCSM_CO2_PPMV = 367.0 to build-namelist (`-co2_ppmv 367.0` in
+    # every reference lnd_in); 379.0 is the namelist_defaults_ctsm.xml:25 value used only
+    # when the case supplies none, 355.0 the clm_varctl.F90 code fallback. The physics
+    # value is forcing_reader.jl's forc_pco2 = 367e-6*pbot; this copy is unread.
+    co2_ppmv::Float64 = 367.0
 
     # --- Hydrology control ---
     bound_h2osoi::Bool = true
@@ -67,7 +71,7 @@ Base.@kwdef mutable struct VarCtl
 
     # --- Subgrid control ---
     all_active::Bool = false
-    convert_ocean_to_land::Bool = false
+    convert_ocean_to_land::Bool = true    # namelist_defaults_ctsm.xml:2382 (code fallback .false.)
     collapse_urban::Bool = false
     run_zero_weight_urban::Bool = false
     # CTSM namelist defaults:2387,2390 (structure="standard"); the Fortran code
@@ -230,7 +234,7 @@ Base.@kwdef mutable struct VarCtl
 
     # --- Glacier dynamics ---
     glc_do_dynglacier::Bool = false
-    glc_snow_persistence_max_days::Int = 7300
+    glc_snow_persistence_max_days::Int = 0   # namelist_defaults_ctsm.xml:540 (7300 is clm4_5 / the code fallback)
 
     # --- Single column mode ---
     single_column::Bool = false

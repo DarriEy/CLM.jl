@@ -93,9 +93,10 @@ fates_cnp_*, fates_bgc_1pt_v2, canopy_gpp_sp_1pt, fates_recruit_multiyear):
     wind_dependent_snow_density       = .true.
     lotmp_snowdensity_method          = 'Slater2017'
 
-The port defaults to Anderson1976 overburden compaction and no wind term (the smoother
-AD path; see snow_hydrology.jl), and the non-FATES parity harnesses already set the
-Fortran values (parity_run_domain.jl). Without this the FATES harnesses compacted the
+These are also the port's defaults since the CTSM-defaults audit (they used to be
+Anderson1976 / no wind; see snow_hydrology.jl), so this call is now a guard against a
+caller having switched to `snow_hydrology_ad_smooth_namelist!()`. Before the defaults
+changed, without this call the FATES harnesses compacted the
 Bow snowpack too fast: same SWE, 6-15 % shallower snow from December to May, so FATES
 buried less of the canopy (`elai` +60-80 % on the tree patch in March-May), the
 canopy absorbed more SW and the melt-season leaf ran warm. Module-global state:
