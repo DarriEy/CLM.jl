@@ -1521,7 +1521,7 @@ function set_rhs_vec!(col::ColumnData, lun::LandunitData,
     frac_sno_eff = waterdiagbulk.frac_sno_eff_col
 
     FT = eltype(t_soisno)
-    rvector .= FT(NaN)
+    fill!(rvector, FT(NaN))   # fill!, not a scalar broadcast: CUDA reverse AD (CLMCUDAExt rule)
     nc = size(rvector, 1)
     fn_h2osfc = fill!(similar(t_soisno, FT, nc), zero(FT))  # scratch on the state's backend
     dt = convert(FT, dtime)
@@ -1728,7 +1728,7 @@ function set_matrix!(col::ColumnData, lun::LandunitData,
     frac_sno_eff = waterdiagbulk.frac_sno_eff_col
 
     FT = eltype(bmatrix)
-    bmatrix .= zero(FT)
+    fill!(bmatrix, zero(FT))  # fill!, not a scalar broadcast: CUDA reverse AD (CLMCUDAExt rule)
     nc = size(bmatrix, 1)
     dt = convert(FT, dtime)
 
