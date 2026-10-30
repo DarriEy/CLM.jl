@@ -16,7 +16,7 @@
 # CLM_GPU_BACKEND=AMDGPU so scripts/gpu_backends.jl cannot pick another GPU):
 #   1. AMDGPU functional check + device report.
 #   2. Backend registry round-trip — clm_set_backend(:amdgpu) + clm_device_array.
-#   3. test/test_amdgpu_backend.jl — single-column clm_drv! device vs CPU.
+#   3. test/test_amdgpu_backend.jl — one-step clm_drv! device vs CPU.
 #   4. scripts/gpu_validate.jl — core kernel-parity suite.
 #   5. scripts/gpu_ad_validate.jl — forward-mode AD parity on the device.
 #   6. scripts/gpu_validate_clmdrv_e2e.jl — full biogeophysics/hydrology timestep.

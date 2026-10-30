@@ -13,8 +13,13 @@
 #           registry hooks resolve to ROCArray / ROCBackend; the device run is
 #           @test_skip.
 #   3. A functional AMD GPU
-#        -> a short single-column whole-timestep `clm_drv!` on the device
-#           (Float64 ROCArray state) compared against the same step on the CPU.
+#        -> one short whole-timestep `clm_drv!` on the device (Float64 ROCArray
+#           state) compared against the same step on the CPU. It uses the
+#           small driver fixture from the GPU harnesses
+#           (ng=2, nl=3, nc=4, np=6), not ng=nl=nc=np=1: on CPU the 1x1x1x1
+#           fixture leaves t_grnd / t_veg / eflx_sh_tot all NaN, so a
+#           single-column comparison would only check the soil-water fields.
+#           The CUDA whole-driver gate uses this same 4-column fixture.
 #
 # Tier 3 has NOT been executed on AMD hardware as of this writing (no ROCm
 # device was reachable); see docs/GPU_AMDGPU.md for what is and is not verified.
@@ -33,7 +38,7 @@ _AMDGPU_INSTALLED && @eval import AMDGPU
 
 const _AMDGPU_FUNCTIONAL = _AMDGPU_INSTALLED && Base.invokelatest(() -> AMDGPU.functional())
 
-# Single-column driver fixture (ng = nl = nc = 1) shared with the GPU harnesses.
+# Small driver fixture shared with the GPU harnesses (scripts/clmdrv_make_data.jl).
 # Only included when a device run will actually happen.
 if _AMDGPU_FUNCTIONAL
     include(joinpath(@__DIR__, "..", "scripts", "clmdrv_make_data.jl"))
@@ -88,7 +93,7 @@ _amd_run_drv!(inst, filt, filt_ia, bounds, config, ps) =
     end
 end
 
-@testset "AMDGPU single-column clm_drv! vs CPU (skips without a ROCm device)" begin
+@testset "AMDGPU one-step clm_drv! vs CPU (skips without a ROCm device)" begin
     if !_AMDGPU_FUNCTIONAL
         @test_skip "no functional AMD GPU (AMDGPU.functional() == false or AMDGPU.jl absent)"
     else
@@ -96,13 +101,13 @@ end
         try
             # CPU reference (Float64).
             instH, bounds, filtH, filt_iaH, configH, psH =
-                make_driver_data_physical(; ng = 1, nl = 1, nc = 1, np = 1)
+                make_driver_data_physical()
             instH.canopystate.frac_veg_nosno_alb_patch .= 1
             _amd_run_drv!(instH, filtH, filt_iaH, bounds, configH, psH)
 
             # Identical fresh state on the device (Float64 ROCArray, no demotion).
             instB, boundsB, filtB, filt_iaB, configB, psB =
-                make_driver_data_physical(; ng = 1, nl = 1, nc = 1, np = 1)
+                make_driver_data_physical()
             instB.canopystate.frac_veg_nosno_alb_patch .= 1
             inst_d = _to_amd(instB)
             @test inst_d.temperature.t_soisno_col isa AMDGPU.ROCArray
