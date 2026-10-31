@@ -1408,6 +1408,19 @@ is not traced yet.
   nstep 0 with no snow it has no effect.
 - The native Julia restart writer saves no LUNA state, so a Julia-to-Julia restart has
   the same reversion to the seed that the Fortran-restart reader had.
+- `test_ad_robustness.jl` "Near-freezing (272K)" fails 2 of its 14 checks on this
+  branch: d(LH)/dT is −0.0133 by AD against −0.0051 by FD, and d(SH)/dT is −8.94
+  against −3.56. The cause was isolated to the `infilt_excess_params.e_ice` fix: with
+  only that assignment disabled, the scenario passes exactly as on the base commit.
+  With Bow's e_ice the 3-step warm-up no longer produces infiltration-excess runoff,
+  so the scenario starts from a different soil state. That state sits on the 273.15 K
+  melt plateau (top snow layer and top soil layer both at 273.15 K). There, the
+  T − 0.01 K run returns values bit-identical to the unperturbed run, while the
+  T + 0.01 K run moves and the AD partial is nonzero. The central difference
+  therefore straddles a one-sided kink. The infiltration fix is Fortran-literal
+  (`InfiltrationExcessRunoffMod.F90:96,299`). The open question is the AD path: why a
+  −0.01 K forcing change leaves every output unchanged on that plateau while the
+  Dual partial does not vanish.
 
 ## Scorecard
 
