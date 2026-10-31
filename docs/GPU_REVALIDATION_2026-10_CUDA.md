@@ -114,6 +114,15 @@ right on CPU: reversing only soil temperature with the same seed gives
 dL/d(t_grnd[1]) = -3.5023150483 for the production `soil_temperature!` and
 -3.5023150483 for the 13-phase decomposition on the CPU (shadow maxima of t_soisno,
 t_h2osfc, frac_h2osfc, h2osfc identical to 7 digits). The open defect is CUDA-specific.
+The same soil-temperature-only reverse on CUDA (with the band-solve rule, 8e4ddcd+)
+reproduces max|dL/dt_soisno| = 5.540013e+02 and max|dL/dt_h2osfc| = 7.618765 exactly but
+returns dL/d(t_grnd[1]) = -1.3e-14 and different frac_h2osfc/h2osfc shadows
+(2.95e3 / 1.63e4 vs 1.15e3 / 25.6). t_grnd reaches the soil solve only through the
+emitted longwave → ground heat flux → `set_rhs_vec!`/`set_matrix!`; the lwrad and
+ground-heat-flux phases match per phase, so the remaining defect is in the reverse of
+the solve phase's RHS/matrix assembly kernels on CUDA (the h2osfc row and the hs_*
+inputs). Next step: split `soiltemp_solve_rev_phase!` into rhs / matrix / init / band
+solve / extract sub-phases and run the per-phase diff on each.
 
 ### Blockers found, in the order they surfaced
 
