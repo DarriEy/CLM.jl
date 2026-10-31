@@ -637,6 +637,45 @@ function soiltemp_solve_rev_phase!(b, aux)
     nothing
 end
 
+# The solve split at its launch boundaries (device list): RHS assembly, matrix
+# assembly, tvector init, band solve, extraction. Same calls, same order.
+function soiltemp_rhs_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    set_rhs_vec!(i.column, i.landunit, i.temperature, i.water.waterdiagnosticbulk_inst,
+        aux.nolakec, aux.bc_col, aux.dtime, s.hs_h2osfc, s.hs_top_snow, s.hs_soil,
+        s.hs_top, s.dhsdT, s.sabg_lyr_col, s.tk, s.tk_h2osfc,
+        i.temperature.fact_col, s.fn, i.temperature.c_h2osfc_col, s.dz_h2osfc, s.rvector)
+    nothing
+end
+function soiltemp_matrix_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    set_matrix!(i.column, i.landunit, i.water.waterdiagnosticbulk_inst, aux.nolakec,
+        aux.bc_col, aux.dtime, 5, s.dhsdT, s.tk, s.tk_h2osfc,
+        i.temperature.fact_col, i.temperature.c_h2osfc_col, s.dz_h2osfc, s.bmatrix)
+    nothing
+end
+function soiltemp_tvinit_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    _launch!(_tvector_init_kernel!, s.tvector, aux.nolakec, i.column.snl,
+        i.temperature.t_soisno_col, i.temperature.t_h2osfc_col, varpar.nlevsno,
+        varpar.nlevmaxurbgrnd; ndrange=size(s.tvector,1))
+    nothing
+end
+function soiltemp_bandsolve_rev_phase!(b, aux)
+    s=b.soiltemp
+    batched_band_solve!(s.tvector, s.bmatrix, s.rvector, s.jtop, s.jbot,
+        aux.nolakec, 2, 2, varpar.nlevsno)
+    nothing
+end
+function soiltemp_tvextract_rev_phase!(b, aux)
+    i=b.inst; s=b.soiltemp
+    _launch!(_tvector_extract_kernel!, i.temperature.t_soisno_col,
+        i.temperature.t_h2osfc_col, aux.nolakec, i.column.snl, s.tvector,
+        i.water.waterdiagnosticbulk_inst.frac_h2osfc_col, varpar.nlevsno,
+        varpar.nlevmaxurbgrnd; ndrange=size(i.temperature.t_soisno_col,1))
+    nothing
+end
+
 function soiltemp_post_rev_phase!(b, aux)
     i=b.inst; s=b.soiltemp; ns=varpar.nlevsno
     _launch!(_fn1_kernel!, s.fn1, s.fn, aux.nolakec, i.column.itype, i.column.snl,
@@ -760,7 +799,11 @@ function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
         (soiltemp_gnet_patch_reduce_array_phase!, (a,), soiltemp_gnet_patch_view),
         (soiltemp_gnet_snicar_rev_phase!, (a,), soiltemp_gnet_snicar_view),
         (soiltemp_heatdiff_rev_phase!, (a,), soiltemp_heatdiff_view),
-        (soiltemp_solve_rev_phase!, (a,), soiltemp_solve_view),
+        (soiltemp_rhs_rev_phase!, (a,), soiltemp_solve_view),
+        (soiltemp_matrix_rev_phase!, (a,), soiltemp_solve_view),
+        (soiltemp_tvinit_rev_phase!, (a,), soiltemp_solve_view),
+        (soiltemp_bandsolve_rev_phase!, (a,), soiltemp_solve_view),
+        (soiltemp_tvextract_rev_phase!, (a,), soiltemp_solve_view),
         (soiltemp_post_rev_phase!, (a,), soiltemp_post_view)]
 end
 

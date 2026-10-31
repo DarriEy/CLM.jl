@@ -51,15 +51,16 @@ include(joinpath(@__DIR__, "testdata.jl"))
     @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 15
     @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 4
 
-    # The device (CUDA) assembly: 13 allocation-free soil-temperature phases (setup +
-    # 12 physics) + 10 surface-hydrology + soil_water + water_table +
-    # hydrology_no_drainage = 26; the canopy is flattened too (init + friction +
-    # resistance + energy = 4 for one energy-only iteration). Without surface: 16.
-    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true)) == 26
+    # The device (CUDA) assembly: 17 allocation-free soil-temperature phases (setup +
+    # 16 physics, the solve split into rhs/matrix/init/band/extract) + 10 surface-
+    # hydrology + soil_water + water_table + hydrology_no_drainage = 30; the canopy is
+    # flattened too (init + friction + resistance + energy = 4 for one energy-only
+    # iteration). Without surface: 20.
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true)) == 30
     @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
-        canopy_aux=(; use_psn=false), n_canopy=1)) == 30
+        canopy_aux=(; use_psn=false), n_canopy=1)) == 34
     @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
-        include_surface=false)) == 16
+        include_surface=false)) == 20
 
     # The decomposed soil-temperature phases reproduce production soil_temperature!
     # exactly (the CUDA reverse runs the decomposition, the CPU driver the monolith).
@@ -135,7 +136,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # forward state: the CUDA reverse differentiates the former, the CPU the latter.
     fulld = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4,
                                   inst=inst, device=true)
-    @test length(fulld) == 39
+    @test length(fulld) == 43
     bd = CLM.driver_rev_bundle(deepcopy(inst))
     for entry in fulld
         entry[1](entry[3](bd), entry[2]...)
