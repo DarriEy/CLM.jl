@@ -22,6 +22,27 @@
 # ---------------------------------------------------------------------------
 const NDAYPM = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
+"""
+    sp_interp_date(mon, day, secs, dtime) -> (kmo, kda)
+
+Month and day of `(mon, day, secs) + dtime` on the no-leap calendar: the date
+`get_curr_date(..., offset=int(dtime))` that CTSM's interpMonthlyVeg uses
+(SatellitePhenologyMod.F90:234).
+"""
+function sp_interp_date(mon::Int, day::Int, secs::Int, dtime::Real)
+    s = secs + round(Int, dtime)
+    nd = s ÷ 86400                       # whole days crossed (0 or 1 for dtime <= 1 day)
+    for _ in 1:nd
+        if day < NDAYPM[mon]
+            day += 1
+        else
+            day = 1
+            mon = mon == 12 ? 1 : mon + 1
+        end
+    end
+    return (mon, day)
+end
+
 # ---------------------------------------------------------------------------
 # SatellitePhenologyData — Module-level interpolation state
 # Ported from module variables in SatellitePhenologyMod.F90
