@@ -533,4 +533,13 @@
         @test cs.frac_veg_nosno_alb_patch[2] == 1
     end
 
+
+    @testset "sp_interp_date: interpMonthlyVeg date is one step ahead" begin
+        # get_curr_date(..., offset=dtime) (SatellitePhenologyMod.F90:234)
+        @test CLM.sp_interp_date(3, 15, 22 * 3600, 3600) == (3, 15)   # 23:00 step -> still the 15th
+        @test CLM.sp_interp_date(3, 15, 23 * 3600, 3600) == (3, 16)   # 23:00 + 1 h = 16th 00:00
+        @test CLM.sp_interp_date(3, 16, 0, 3600) == (3, 16)
+        @test CLM.sp_interp_date(2, 28, 23 * 3600, 3600) == (3, 1)    # no-leap calendar
+        @test CLM.sp_interp_date(12, 31, 23 * 3600 + 1800, 1800) == (1, 1)
+    end
 end

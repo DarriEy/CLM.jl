@@ -926,9 +926,15 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Specified phenology
     # ========================================================================
+    # interpMonthlyVeg takes the date one step AHEAD: get_curr_date(..., offset=dtime)
+    # (SatellitePhenologyMod.F90:234). The LAI it sets up is used by SatellitePhenology
+    # at the end of this step for the NEXT step's albedo and fluxes. mon/day here are
+    # the current (end-of-step) date, so the daily interpolation weight used to change
+    # one step late, at 24:00 instead of 23:00, every day of the year.
+    (sp_kmo, sp_kda) = sp_interp_date(mon, day, secs, dtime)
     if config.use_cn
         if config.n_drydep > 0
-            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=sp_kmo, kda=sp_kda)
             if needs_read && inst.surfdata !== nothing
                 read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
                     monthly_lai=inst.surfdata.monthly_lai,
@@ -940,7 +946,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         end
     elseif config.use_fates
         if config.use_fates_sp
-            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=sp_kmo, kda=sp_kda)
             if needs_read && inst.surfdata !== nothing
                 read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
                     monthly_lai=inst.surfdata.monthly_lai,
@@ -952,7 +958,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         end
     else
         if doalb || config.n_drydep > 0
-            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=sp_kmo, kda=sp_kda)
             if needs_read && inst.surfdata !== nothing
                 read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
                     monthly_lai=inst.surfdata.monthly_lai,
@@ -2129,12 +2135,12 @@ function clm_drv_core!(config::CLMDriverConfig,
               "This pair yields unbounded drainage that no balance check detects.")
     end
 
-    swm_cfg = if config.use_aquifer_layer
-        SoilWaterMovementConfig()  # ZD09 + BC_AQUIFER
-    else
-        SoilWaterMovementConfig(soilwater_movement_method=MOISTURE_FORM,
-                                lower_boundary_condition=BC_ZERO_FLUX)
-    end
+    # e_ice comes from the params file, as in CTSM (SoilWaterMovementMod.F90:104 reads
+    # its own params_inst%e_ice; IceImpedance at :2144). The struct default (6.0, the
+    # stock clm5 value) used to stand in for it, so a calibrated e_ice never reached
+    # the Richards solve or hk_l (Bow: 3.417 -> frozen-soil hk_l ~35 % low, which the
+    # PHS soil-root conductance and the winter BTRANMN followed).
+    swm_cfg = soilwater_movement_config(config.use_aquifer_layer)
     soil_water!(col,
                 filt.hydrologyc, filt.urbanc,
                 sh, ss, wfb, wsb,

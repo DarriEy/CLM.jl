@@ -430,6 +430,18 @@ function read_fortran_restart!(filepath::String, inst::CLMInstances, bounds::Bou
        !isempty(inst.photosyns.vcmx25_z_patch)
         set_patch_2d!("vcmx25_z", inst.photosyns.vcmx25_z_patch)
         set_patch_2d!("jmx25_z",  inst.photosyns.jmx25_z_patch)
+        # The rest of the use_luna restart set (PhotosynthesisMod.F90:1078-1101).
+        # The last-valid pair is what LUNA falls back to whenever it skips a day (no
+        # leaf area or leaf N, e.g. a dormant grass; LunaMod.F90:491-495). Left at the InitAllocate
+        # seed (30/60), a winter of skipped days dragged the Bow grass vcmax25 from the
+        # restart's 125 to 30 and its spring photosynthesis to a third of Fortran's.
+        for (nm, arr) in (("vcmx25_z_last_valid_patch", :vcmx25_z_last_valid_patch),
+                          ("jmx25_z_last_valid_patch",  :jmx25_z_last_valid_patch),
+                          ("pnlc_z", :pnlc_z_patch), ("enzs_z", :enzs_z_patch))
+            a = getfield(inst.photosyns, arr)
+            isempty(a) || set_patch_2d!(nm, a)
+        end
+        isempty(inst.photosyns.fpsn24_patch) || set_patch_1d!("gpp24", inst.photosyns.fpsn24_patch)
     end
 
     # Canopy water

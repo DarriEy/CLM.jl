@@ -162,6 +162,17 @@ const CN_H0   = joinpath(CN_DIR, "Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.n
 const CN_FFORC = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2003.nc")  # 2003 forcing
 const FORCE_YEAR = 2003
 const _read_fortran_restart! = getfield(CLM, Symbol("read_fortran_restart!"))
+# The cn_annual reference is a `-bgc bgc -use_case 2000_control` case: its lnd_in has the
+# CTSM namelist defaults int_snow_max = 2000 and baseflow_scalar = 0.001 (and no
+# h2osfcflag, i.e. the default 1), NOT the Bow SP calibration (3113.2227 / 0.0022119554)
+# that this harness used to copy from the SP gate. int_snow_max caps int_snow in
+# FracSnowDuringMelt (SnowCoverFractionSwensonLawrence2012Mod.F90:263), which sets the
+# melt-compaction term ddz3 (SnowHydrologyMod.F90:2003-2035); Bow's int_snow is ~9000 mm,
+# so the cap binds. With the SP value the late-September snowpack did not melt out on
+# day 280 as Fortran's does, ~5 mm SWE carried into the October snow, and the October
+# grass GPP came out 14 % low (docs/DRIVER_DEFAULTS_AUDIT.md).
+const CN_INT_SNOW_MAX     = 2000.0
+const CN_BASEFLOW_SCALAR  = 0.001
 
 # model timestamp → forcing-file timestamp (year replaced; both 2202 & 2003 are 365-day)
 _force_date(d) = DateTime(FORCE_YEAR, Dates.month(d), Dates.day(d), Dates.hour(d),
@@ -184,15 +195,15 @@ function run_cn_annual(; ndays::Int = 365)
     snowage = FSNOWAGE
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat = FSURDAT, paramfile = FPARAM,
         start_date = start_date, dtime = 3600, use_cn = true, use_luna = true,
-        use_bedrock = true, use_aquifer_layer = false, h2osfcflag = 0,
+        use_bedrock = true, use_aquifer_layer = false,
         fsnowoptics = isfile(snowopt) ? snowopt : "", fsnowaging = isfile(snowage) ? snowage : "",
-        int_snow_max = 3113.2227)
+        int_snow_max = CN_INT_SNOW_MAX)
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
     CLM.atm2lnd_read_namelist!(inst.atm2lnd; repartition_rain_snow = true, lapse_rate = 0.006,
         lapse_rate_longwave = 0.032, precip_repartition_nonglc_all_snow_t = 0.0,
         precip_repartition_nonglc_all_rain_t = 2.0, precip_repartition_glc_all_snow_t = -2.0,
         precip_repartition_glc_all_rain_t = 0.0)
-    CLM.init_soil_hydrology_config(baseflow_scalar = 0.0022119554)
+    CLM.init_soil_hydrology_config(baseflow_scalar = CN_BASEFLOW_SCALAR)
     let ds_p = NCDataset(FPARAM, "r")
         scf = inst.scf_method
         haskey(ds_p, "n_melt_coef") && (nmc = Float64(ds_p["n_melt_coef"][1]);
