@@ -189,8 +189,11 @@ function batched_band_solve!(tvector::AbstractMatrix{T}, bmatrix, rvector,
 end
 
 # --------------------------------------------------------------------------
-# Adjoint helpers for batched_band_solve! (used by its GPU reverse rule in
-# enzyme_rules.jl). For each active column system A x = r:
+# Exact adjoint of batched_band_solve! — the reference that
+# scripts/cuda_band_solve_reverse_check.jl compares Enzyme's CUDA reverse of the
+# batched kernel against (FD-checked in test/test_band_solve_adjoint.jl). Not used
+# by AD itself: Enzyme's own reverse of the kernel matches it on CPU and CUDA.
+# For each active column system A x = r:
 #   λ = A⁻ᵀ x̄ ;  r̄ += λ ;  Ā[i,j] -= λ[i] x[j]  (band entries) ;  x̄ consumed.
 # The transpose is formed in the same band storage (kl == ku), so λ comes from the
 # primal batched solver itself.

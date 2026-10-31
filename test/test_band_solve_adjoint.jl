@@ -1,6 +1,7 @@
-# The batched_band_solve! adjoint used by its GPU reverse rule
-# (_batched_band_solve_pullback!, src/infrastructure/band_diagonal.jl), checked on
-# host arrays against central finite differences of L = w ⋅ x(bmatrix, rvector).
+# The exact batched_band_solve! adjoint (_batched_band_solve_pullback!,
+# src/infrastructure/band_diagonal.jl) — the reference for the CUDA check in
+# scripts/cuda_band_solve_reverse_check.jl — against central finite differences of
+# L = w ⋅ x(bmatrix, rvector), on host arrays.
 using Test, Random
 import CLM
 
