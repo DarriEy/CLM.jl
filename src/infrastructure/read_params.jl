@@ -34,7 +34,15 @@ function readParameters!(paramfile::String)
 
         # Read soil hydrology parameters (SoilHydrologyMod)
         haskey(ds, "n_baseflow") && (soilhydrology_params.n_baseflow = Float64(ds["n_baseflow"][1]))
-        haskey(ds, "e_ice") && (soilhydrology_params.e_ice = Float64(ds["e_ice"][1]))
+        # e_ice is read by three CTSM modules, each into its own params_inst
+        # (SoilHydrologyMod.F90:196, SoilWaterMovementMod.F90:104,
+        # InfiltrationExcessRunoffMod.F90:96). SoilWaterMovement takes it from
+        # soilhydrology_params at the clm_drv! call site; the infiltration-excess
+        # qinmax has its own struct and must be set here too.
+        if haskey(ds, "e_ice")
+            soilhydrology_params.e_ice = Float64(ds["e_ice"][1])
+            infilt_excess_params.e_ice = Float64(ds["e_ice"][1])
+        end
         haskey(ds, "perched_baseflow_scalar") && (soilhydrology_params.perched_baseflow_scalar = Float64(ds["perched_baseflow_scalar"][1]))
         haskey(ds, "aq_sp_yield_min") && (soilhydrology_params.aq_sp_yield_min = Float64(ds["aq_sp_yield_min"][1]))
 

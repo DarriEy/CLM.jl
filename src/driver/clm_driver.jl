@@ -2129,12 +2129,12 @@ function clm_drv_core!(config::CLMDriverConfig,
               "This pair yields unbounded drainage that no balance check detects.")
     end
 
-    swm_cfg = if config.use_aquifer_layer
-        SoilWaterMovementConfig()  # ZD09 + BC_AQUIFER
-    else
-        SoilWaterMovementConfig(soilwater_movement_method=MOISTURE_FORM,
-                                lower_boundary_condition=BC_ZERO_FLUX)
-    end
+    # e_ice comes from the params file, as in CTSM (SoilWaterMovementMod.F90:104 reads
+    # its own params_inst%e_ice; IceImpedance at :2144). The struct default (6.0, the
+    # stock clm5 value) used to stand in for it, so a calibrated e_ice never reached
+    # the Richards solve or hk_l (Bow: 3.417 -> frozen-soil hk_l ~35 % low, which the
+    # PHS soil-root conductance and the winter BTRANMN followed).
+    swm_cfg = soilwater_movement_config(config.use_aquifer_layer)
     soil_water!(col,
                 filt.hydrologyc, filt.urbanc,
                 sh, ss, wfb, wsb,

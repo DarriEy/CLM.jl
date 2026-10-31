@@ -599,9 +599,7 @@ end
 # and the movement config a small mutable struct — both pass cleanly as Const).
 # --------------------------------------------------------------------------
 function soilwater_rev_aux(filt, config; dtime = 1800.0)
-    cfg = config.use_aquifer_layer ? SoilWaterMovementConfig() :
-        SoilWaterMovementConfig(soilwater_movement_method = MOISTURE_FORM,
-                                lower_boundary_condition = BC_ZERO_FLUX)
+    cfg = soilwater_movement_config(config.use_aquifer_layer)  # same as the forward driver
     return (; hydrologyc = filt.hydrologyc, urbanc = filt.urbanc,
               swrc = SoilWaterRetentionCurveClappHornberg1978(), cfg = cfg, dtime = dtime)
 end

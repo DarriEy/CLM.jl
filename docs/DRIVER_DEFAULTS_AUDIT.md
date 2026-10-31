@@ -1187,7 +1187,7 @@ touches the CN canopy seed, and their root zones never sit at the floor. Bow's c
 move by hundredths of a percent (FPSN annual −2.73 % → −2.87 %, BTRANMN +3.92 % →
 +4.11 %, still its one failing cell; FCEV and SOILICE move toward Fortran).
 
-**Still open.** The October grass and gridcell GPP in cn_annual (−14 % / −9.7 %)
+**Still open** (both items are closed in the next follow-up). The October grass and gridcell GPP in cn_annual (−14 % / −9.7 %)
 follows a soil-water BTRAN difference after a rain/snow event on days 279-294
 (Fortran's daily-min BTRAN rises to 0.18-0.73 there, Julia's lags). That is
 hydrology, not CN, and it is the same cell that fails Bow's SP gate (BTRANMN). Year-2
@@ -1198,6 +1198,216 @@ month (it was +64 % to +96000 % in Jan-Apr). The cold harness passes `doalb = tr
 on every step, while a Fortran cold start skips the albedo (and so CNVegStructUpdate)
 on its first steps. So Julia's step-1 TLAI is 0.71 where Fortran's is 0, a one-step
 difference.
+
+### Follow-up: the October BTRAN lag, Bow's BTRANMN cell and the year-2 spring GPP
+
+The two residuals left open above were four separate problems: one in the
+cn_annual harness and three in the model. None was in the soil-water physics itself,
+although the October residual looked like it.
+
+**Method.** A second history tape on the pristine ctsm5.3.012 exe, with one record per
+step for a full year (`hist_nhtfrq = 1`, `hist_dov2xy = .false.`). It holds per-layer
+H2OSOI, SOILLIQ, SOILICE, SMP, HK and TSOI, the infiltration and runoff chain, the
+snow layers (SNO_Z, SNO_ICE, SNO_LIQH2O), INT_SNOW, VEGWP, KROOT, Vcmx25Z/Jmx25Z and
+more. It was written for three runs:
+- cn_annual, from the 2202 restart.
+- The SP Bow gate year, a startup from the 2003-01-01 restart. Its h0 matches the
+  gate reference to 0.3 % in BTRANMN.
+- The 2-year cold start.
+
+The same fields were dumped per step from the Julia harnesses and aligned by step:
+Julia step k is Fortran record k+1, because record 1 is the nstep-0 snapshot.
+
+**1. The cn_annual harness used the SP namelist calibration on a CN reference.**
+`fortran_parity_cn_annual.jl` passed `int_snow_max = 3113.2227` and
+`baseflow_scalar = 0.0022119554`, which are the Bow SP calibration. The cn_annual
+reference is a `-bgc bgc -use_case 2000_control` case. Its `lnd_in` has the CTSM
+defaults: `int_snow_max = 2000`, `baseflow_scalar = 0.001`, and no `h2osfcflag`, so the
+default 1 (the harness passed 0).
+
+`int_snow_max` caps `int_snow` in `FracSnowDuringMelt`
+(`SnowCoverFractionSwensonLawrence2012Mod.F90:263`). That function sets the melt term
+of the snow compaction (`SnowHydrologyMod.F90:2003-2035`). Bow's `int_snow` is about
+9000 mm, so the cap binds. The chain of effects:
+- The first quantity to diverge was snow-layer thickness on day 262 (step 6283), at a
+  melt step, while SWE was still equal.
+- The late-September snowpack then did not melt out on day 280 as Fortran's does.
+  About 5 mm SWE survived into the October snowfalls.
+- The top soil stayed about 0.03 m³/m³ drier through the rain on days 290-296.
+- The grass daily-minimum BTRAN and GPP followed. This was the "lag".
+
+The harness now uses the reference's values. This was not a model bug, but it was the
+whole October residual.
+
+**2. `e_ice` never reached the soil-water solve.** CTSM reads the ice-impedance factor
+`e_ice` from the params file into three modules:
+- `SoilHydrologyMod.F90:196`.
+- `SoilWaterMovementMod.F90:104`, used by `IceImpedance` (`:2144`) for `hk_l` and the
+  Richards solve.
+- `InfiltrationExcessRunoffMod.F90:96`, used for `qinmax` (`:299`).
+
+The port read it only into `soilhydrology_params`. `SoilWaterMovementConfig` had its
+own `e_ice = 6.0` (`soil_water_movement.jl`), and `clm_drv!` built the config without
+passing the params value. `infilt_excess_params.e_ice` was never set either. The stock
+clm5 params file has `e_ice = 6`, so the bug was invisible everywhere except Bow, whose
+calibrated file has `e_ice = 3.417`.
+
+How it showed on Bow's frozen soil:
+- Liquid, ice and temperature were identical step by step, but Julia's `hk_l` was
+  30-37 % low in every layer.
+- The PHS soil conductance, `min(hksat, hk_l)/(1e3·r_soil)`, followed it down.
+- The leaf water potential fell further each afternoon (−5.94e5 mm against
+  −5.73e5 mm).
+- Transpiration, photosynthesis and the daily-minimum BTRAN fell 10-20 % in Jan-Mar.
+
+That is the winter half of Bow's BTRANMN cell and of the cn_annual winter GPP deficit.
+`clm_drv!` and the reverse driver now pass `e_ice = soilhydrology_params.e_ice`, and
+`read_params!` now sets `infilt_excess_params.e_ice`. After the fix, winter `hk_l`,
+`vegwp`, transpiration and FPSN agree hour by hour to 4 digits.
+
+**3. The LUNA restart was incomplete.** With the winter fixed, Bow's BTRANMN got
+*worse*: +7.3 % for the year, with April, May and June at +13 %, +52 % and +14 %. The
+winter bias had been cancelling a spring one. The cause was the grass vcmax25.
+Fortran's held at the restart's 125.5. Julia's dropped to the 30.0 seed within two
+weeks.
+
+LUNA skips a day when a patch has no leaf area or no leaf N, and falls back to
+`vcmx25_z_last_valid_patch` (`LunaMod.F90:491-495`). CTSM restarts that pair
+(`PhotosynthesisMod.F90:1078-1087`), but `read_fortran_restart!` read only `vcmx25_z`
+and `jmx25_z`. So the dormant grass reverted to the `InitAllocate` seed (30/60). As a
+result:
+- Its spring photosynthesis was a third of Fortran's.
+- Its transpiration was low, so its leaf water potential and BTRAN were high.
+
+The reader now also loads `vcmx25_z_last_valid_patch`, `jmx25_z_last_valid_patch`,
+`pnlc_z`, `enzs_z` and `gpp24`, the rest of the `use_luna` restart set. This affects
+every restart-driven run with a patch that is leafless for part of the year.
+
+**4. `tempavg_t2m` was a one-day relaxation, not the annual mean.** In Fortran,
+`CNPhenologyClimate` accumulates `tempavg_t2m += t_ref2m · fracday/dayspyr`
+(`CNPhenologyMod.F90:579`). That running sum reaches the annual mean of the 2-m
+temperature after one year. `CNAnnualUpdate` copies it to `annavg_t2m` and resets it
+(`CNAnnualUpdateMod.F90:86-87`). `annavg_t2m` sets the seasonal-deciduous onset
+threshold, `crit_onset_gdd = exp(4.8 + 0.13·(annavg_t2m − tfrz))` (`:1019`).
+
+The port had `tempavg += fracday·(t_ref2m − tempavg)`, an exponential relaxation with
+a one-day time constant. On the cold start:
+- Julia's year-2 `annavg_t2m` was the late-December temperature, 258.7 K, where
+  Fortran's was about 270 K.
+- The grass onset threshold fell from about 80 GDD to about 18 GDD.
+- The grass leafed out on day 468 instead of day 485.
+
+That was the whole year-2 April (+36 %) and May (+8 %) GPP excess. Restart runs were
+unaffected in their first year, because `annavg_t2m` comes from the restart.
+`phen_climate!` now accumulates the Fortran sum.
+
+The cold harness passes `doalb = true` on step 1. That does not matter at this level of
+agreement: with the four fixes, year-1 and year-2 monthly GPP are within 0.4 % in every
+month except year-1 January (−3.9 %, a winter flux of 2e-8).
+
+**cn_annual** (2202 restart, time-aligned monthly means, J/F − 1; "before" is
+`origin/cn/grass-phenology-timing`, "after" is this branch with the corrected harness):
+
+| field | | Jan | Feb | Mar | Apr | May | Jun | Jul | Aug | Sep | Oct | Nov | Dec | annual |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| grass GPP | before | −22.9 % | −36.0 % | −24.3 % | −0.65 % | −0.32 % | −0.27 % | −1.01 % | −0.37 % | +0.05 % | **−14.1 %** | +0.14 % | −0.27 % | −0.88 % |
+| | after | +0.21 % | +0.15 % | −0.02 % | −0.09 % | −0.35 % | −0.28 % | −1.28 % | −0.38 % | −0.20 % | **−0.08 %** | −0.02 % | +0.01 % | −0.54 % |
+| tree GPP | before | −9.25 % | −13.9 % | −10.6 % | −1.01 % | +0.02 % | −2.02 % | −1.31 % | −0.60 % | −0.80 % | −1.25 % | −0.90 % | −1.58 % | −1.34 % |
+| | after | +0.08 % | +0.08 % | +0.02 % | −0.01 % | +0.04 % | −2.01 % | −1.28 % | −0.46 % | −0.79 % | −0.14 % | −0.15 % | −0.18 % | −0.83 % |
+| gridcell GPP | before | −9.64 % | −14.3 % | −10.8 % | −1.00 % | −0.25 % | −0.51 % | −1.05 % | −0.46 % | −0.21 % | **−9.65 %** | −0.86 % | −1.55 % | −0.98 % |
+| | after | +0.08 % | +0.08 % | +0.02 % | −0.02 % | −0.27 % | −0.52 % | −1.28 % | −0.41 % | −0.38 % | **−0.10 %** | −0.15 % | −0.17 % | −0.60 % |
+| gridcell NPP | before | +5.6 % | +10.3 % | +29.7 % | −1.29 % | −0.27 % | −0.63 % | −1.37 % | −2.18 % | −0.58 % | −17.6 % | +0.40 % | +0.21 % | −1.27 % |
+| | after | −0.29 % | −0.08 % | −0.05 % | −0.02 % | −0.31 % | −0.64 % | −1.68 % | −1.80 % | −0.87 % | −0.16 % | −0.20 % | −0.20 % | −0.82 % |
+
+Annual means, before → after:
+- TG: +0.014 K → +0.008 K.
+- EFLX_LH_TOT: −0.12 % → +0.02 %.
+- TOTVEGC: −0.07 % → −0.06 %.
+- LEAFC: −0.05 % → −0.03 %.
+
+**Cold-start 2-year** (#362 harness vs `fortran_cold2y`, annual means; "before" is
+`origin/cn/grass-phenology-timing`, "after" is this branch with the cn_annual namelist
+values in the harness):
+
+| field | year | Fortran | before | after |
+|---|---|---|---|---|
+| GPP (gC/m2/s) | 1 | 1.7916e-6 | +0.94 % | **−0.02 %** |
+| GPP | 2 | 2.2825e-6 | +2.84 % | **−0.10 %** |
+| NPP | 1 | 3.1971e-7 | +4.58 % | +1.33 % |
+| NPP | 2 | 8.7454e-7 | +1.10 % | +2.33 % |
+| TLAI | 2 | 0.29817 | +0.89 % | +0.03 % |
+| TOTVEGC | 2 | 136.25 | +0.61 % | +0.37 % |
+| TG | 1 / 2 | 273.10 / 273.78 K | −0.01 / −0.01 K | −0.01 / −0.01 K |
+
+Year-2 monthly GPP, before → after:
+
+| | Jan | Feb | Mar | Apr | May | Jun |
+|---|---|---|---|---|---|---|
+| before | −13.1 % | −19.3 % | −14.4 % | +36.2 % | +8.1 % | −4.2 % |
+| after | +0.01 % | −0.02 % | +0.01 % | +0.09 % | −0.23 % | −0.17 % |
+
+The harness namelist change alone moved year-2 GPP only from +2.84 % to +2.97 %. The
+e_ice fix closed Jan-Mar, and the `tempavg_t2m` fix closed April-May.
+
+**Strict gate** (5 sites, scored with `scripts/parity_gate_diff.py`, the strict-gate
+scorer without the old BTRAN → BTRANMN alias; "before" is
+`origin/cn/grass-phenology-timing`):
+
+| site | before | after | cells that changed status |
+|---|---|---|---|
+| Bow | 68/69 | 66/69 | BTRANMN FAIL → PASS (+4.11 % → +0.37 %, nRMSE 0.21 → 0.015); QRUNOFF, QOVER, QFLX_INFL PASS → FAIL (nRMSE 0.0045 → 0.13) |
+| Stillwater | 68/69 | 68/69 | none (SNOW_DEPTH is still the one failure) |
+| Abisko | 69/69 | 69/69 | none |
+| Baltimore | 68/69 | 68/69 | none (SNOW_DEPTH, documented) |
+| Savanna | 69/69 | 69/69 | none |
+
+Bow's water and carbon cells move toward Fortran across the board (annual, before →
+after):
+
+| cell | before | after |
+|---|---|---|
+| FPSN | −2.87 % | −0.09 % |
+| QVEGT / FCTR | −0.57 % | +0.01 % |
+| EFLX_LH_TOT | −0.13 % | +0.00 % |
+| SOILWATER_10CM | +0.16 % | −0.00 % |
+| TOTSOILLIQ | +0.08 % | +0.00 % |
+| SOILICE | +0.19 % | −0.03 % |
+
+Stillwater moves the same way through the LUNA restart fix (FPSN −0.24 % → −0.00 %,
+QVEGT −0.21 % → −0.03 %). Abisko, Baltimore and Savanna move by at most hundredths of
+a percent.
+
+**The three new Bow failures are one event.** The last snow layer melts out on 12-13
+June, which are gate records 2003-06-13/14.
+- In Fortran, the two-layer pack combines at 24:00 on the 12th, and the meltwater pulse
+  runs off at 01:00 on the 13th (step 3913).
+- In Julia, the top layer reaches the 0.01 kg/m² removal threshold
+  (`SnowHydrologyMod.F90:2201`) one step earlier. Its ice at 22:00 is 0.29 kg/m²,
+  against Fortran's 0.32. So the pulse runs off at 24:00 on the 12th, the other side of
+  midnight.
+
+Both days are wrong by the same pulse. Excluding those two days, QOVER's daily nRMSE is
+0.011, and the two-day runoff totals agree to 2.4 %.
+
+The SWE difference behind the timing shift is pre-existing. At the end of May it is
++0.2 mm (0.5 %). Before this change the same quantity was −0.3 mm, and the pulse
+happened to land on Fortran's side of midnight. The largest single contributor found so
+far is one step, 26 May 18:00 (step 3498). Fortran's ground evaporation under the grass
+patch spikes to 9.8e-6 mm/s for that hour, against about 0.7e-6 mm/s in Julia, with the
+canopy state identical. The spike is present both before and after these fixes, and it
+is not traced yet.
+
+**Still open.**
+- The Bow 26 May 18:00 grass-patch ground-evaporation spike, together with the 0.5 %
+  spring SWE drift and the melt-out timing that now costs the three runoff cells.
+- cn_annual June-August GPP is −0.5 to −1.3 % and NPP is down to −1.8 %, for tree and
+  grass alike.
+- Cold-start NPP is +1.3 % (year 1) and +2.3 % (year 2) while GPP matches to 0.1 %, so
+  the difference is in autotrophic respiration. The year-2 May NPP excess is +4.2 %.
+- `fortran_parity_cn_coldstart.jl` (single step) still uses the SP `INT_SNOW_MAX`. At
+  nstep 0 with no snow it has no effect.
+- The native Julia restart writer saves no LUNA state, so a Julia-to-Julia restart has
+  the same reversion to the seed that the Fortran-restart reader had.
 
 ## Scorecard
 

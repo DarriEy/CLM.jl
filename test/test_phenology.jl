@@ -1136,17 +1136,25 @@
         old_tempavg = d.cnveg_state.tempavg_t2m_patch[1]
 
         CLM.cn_phenology_climate!(d.pstate, d.mask_soilp, d.temperature,
-            d.cnveg_state, d.crop, d.patch_data, d.pftcon)
+            d.cnveg_state, d.crop, d.patch_data, d.pftcon; dayspyr = 365.0)
 
-        # tempavg should move towards t_ref2m
-        @test d.cnveg_state.tempavg_t2m_patch[1] != old_tempavg
-        # Should move in direction of t_ref2m
+        # Fortran CNPhenologyClimate (CNPhenologyMod.F90:579): a running SUM,
+        # tempavg += t_ref2m * fracday/dayspyr — not a relaxation toward t_ref2m.
         t_ref = d.temperature.t_ref2m_patch[1]
-        if t_ref > old_tempavg
-            @test d.cnveg_state.tempavg_t2m_patch[1] > old_tempavg
-        else
-            @test d.cnveg_state.tempavg_t2m_patch[1] < old_tempavg
+        fd = d.pstate.fracday
+        @test d.cnveg_state.tempavg_t2m_patch[1] ≈ old_tempavg + t_ref * fd / 365.0
+
+        # One year of steps from the annual-update reset (0) yields the annual mean of
+        # t_ref2m, which CNAnnualUpdate copies to annavg_t2m (crit_onset_gdd input).
+        d.cnveg_state.tempavg_t2m_patch[1] = 0.0
+        nsteps = round(Int, 365 / fd)
+        temps = [t_ref + 10.0 * sin(2π * k / nsteps) for k in 1:nsteps]
+        for k in 1:nsteps
+            d.temperature.t_ref2m_patch[1] = temps[k]
+            CLM.cn_phenology_climate!(d.pstate, d.mask_soilp, d.temperature,
+                d.cnveg_state, d.crop, d.patch_data, d.pftcon; dayspyr = 365.0)
         end
+        @test d.cnveg_state.tempavg_t2m_patch[1] ≈ sum(temps) / nsteps rtol = 1e-10
     end
 
     # =====================================================================
