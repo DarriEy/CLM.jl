@@ -55,12 +55,14 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # 16 physics, the solve split into rhs/matrix/init/band/extract) + 10 surface-
     # hydrology + soil_water + water_table + hydrology_no_drainage = 30; the canopy is
     # flattened too (init + friction + resistance + energy = 4 for one energy-only
-    # iteration). Without surface: 20.
-    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true)) == 30
+    # iteration). Without surface: 20. The urban ground-heat-flux phase is left out of
+    # the list when the domain has no urban column (nu = 1 fewer).
+    nu = CLM.soiltemp_rev_aux(bounds, filt).has_urban ? 0 : 1
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true)) == 30 - nu
     @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
-        canopy_aux=(; use_psn=false), n_canopy=1)) == 34
+        canopy_aux=(; use_psn=false), n_canopy=1)) == 34 - nu
     @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
-        include_surface=false)) == 20
+        include_surface=false)) == 20 - nu
 
     # The decomposed soil-temperature phases reproduce production soil_temperature!
     # exactly (the CUDA reverse runs the decomposition, the CPU driver the monolith).
@@ -136,7 +138,7 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # forward state: the CUDA reverse differentiates the former, the CPU the latter.
     fulld = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4,
                                   inst=inst, device=true)
-    @test length(fulld) == 43
+    @test length(fulld) == 43 - nu
     bd = CLM.driver_rev_bundle(deepcopy(inst))
     for entry in fulld
         entry[1](entry[3](bd), entry[2]...)

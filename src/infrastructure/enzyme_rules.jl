@@ -72,7 +72,8 @@ end
 # nested `Enzyme.autodiff` call does not work: the nested call re-derives Active for
 # the same scalars (see the repro).
 #
-# Cost: no derivative is returned for scalar kernel arguments on GPU (they get zero),
+# Cost: one device copy of the launch's arguments per launch (the snapshot below), and
+# no derivative is returned for scalar kernel arguments on GPU (they get zero),
 # so a quantity to be differentiated on device must reach kernels as an array. All
 # scalar kernel arguments in the driver reverse are dtime, physical constants or
 # configuration values, never differentiated quantities. On CPU this rule is never
@@ -83,6 +84,8 @@ end
 _ka_rev_config(config, ::Val{N}) where {N} =
     EnzymeRules.RevConfig{false, false, 1, ntuple(_ -> true, Val(N + 1)),
                           EnzymeRules.runtime_activity(config), EnzymeRules.strong_zero(config)}()
+
+_launch_isdup(a) = a isa Union{Duplicated, Enzyme.DuplicatedNoNeed}
 
 function _ka_launch_annotations(args)
     return map(args) do a
@@ -96,20 +99,33 @@ function augmented_primal(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT},
         kernel::Const, backend::Const, ndrange::Const,
         args::Vararg{Enzyme.Annotation, N}) where {RT, N}
     kobj = kernel.val(backend.val)
+    # Snapshot the pre-launch primal arguments (one deepcopy keeps aliasing between
+    # them). KernelAbstractions' GPU reverse kernel re-reads its primal inputs from the
+    # arrays it is handed; if a later launch in the same differentiated call overwrites
+    # one of them (e.g. the soil-temperature extraction overwriting the t_soisno that
+    # the RHS kernels read), the live arrays no longer hold the values the forward
+    # launch saw and the adjoints of the coefficients come out wrong. Reversing against
+    # the snapshot restores the launch-time state.
+    snap = deepcopy(map(a -> a.val, args))
     ann = _ka_launch_annotations(args)
     ar = EnzymeRules.augmented_primal(_ka_rev_config(config, Val(N)), Const(kobj),
                                       Const{Nothing}, ann...; ndrange = ndrange.val)
     KA.synchronize(backend.val)
-    return AugmentedReturn(nothing, nothing, ar.tape)
+    return AugmentedReturn(nothing, nothing, (ar.tape, snap))
 end
 
 function reverse(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT}, tape,
         kernel::Const, backend::Const, ndrange::Const,
         args::Vararg{Enzyme.Annotation, N}) where {RT, N}
     kobj = kernel.val(backend.val)
-    ann = _ka_launch_annotations(args)
+    katape, snap = tape
+    ann = ntuple(Val(N)) do i
+        a = args[i]
+        _launch_isdup(a) ? Duplicated(snap[i], a.dval) : Const(snap[i])
+    end
     EnzymeRules.reverse(_ka_rev_config(config, Val(N)), Const(kobj), Const{Nothing},
-                        tape, ann...; ndrange = ndrange.val)
+                        katape, ann...; ndrange = ndrange.val)
+    KA.synchronize(backend.val)
     return (nothing, nothing, nothing, map(_launch_scalar_grad, args)...)
 end
 

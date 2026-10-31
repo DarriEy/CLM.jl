@@ -787,7 +787,7 @@ end
 
 function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
     a = soiltemp_rev_aux(bounds, filt; dtime)
-    return Any[
+    ph = Any[
         (soiltemp_setup_rev_phase!, (a,), soiltemp_setup_view),
         (soiltemp_tk_layers_array_phase!, (a,), soiltemp_tk_layers_view),
         (soiltemp_tk_interface_array_phase!, (a,), soiltemp_tk_interface_view),
@@ -795,7 +795,6 @@ function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
         (soiltemp_lwrad_array_phase!, (a,), soiltemp_lwrad_view),
         (soiltemp_gnet_patch_rural_array_phase!, (a,), soiltemp_gnet_patch_rural_view),
         (soiltemp_gnet_patch_rural_contrib_array_phase!, (a,), soiltemp_gnet_patch_rural_contrib_view),
-        (soiltemp_gnet_patch_urban_array_phase!, (a,), soiltemp_gnet_patch_view),
         (soiltemp_gnet_patch_reduce_array_phase!, (a,), soiltemp_gnet_patch_view),
         (soiltemp_gnet_snicar_rev_phase!, (a,), soiltemp_gnet_snicar_view),
         (soiltemp_heatdiff_rev_phase!, (a,), soiltemp_heatdiff_view),
@@ -805,6 +804,13 @@ function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
         (soiltemp_bandsolve_rev_phase!, (a,), soiltemp_solve_view),
         (soiltemp_tvextract_rev_phase!, (a,), soiltemp_solve_view),
         (soiltemp_post_rev_phase!, (a,), soiltemp_post_view)]
+    # The urban ground-heat-flux kernel writes only patches on urban landunits: with no
+    # urban column it is an exact no-op, and leaving it out avoids a ~90 min CUDA
+    # reverse compile (a skip inside the phase body does not avoid the compile).
+    a.has_urban && insert!(ph,
+        findfirst(e -> e[1] === soiltemp_gnet_patch_reduce_array_phase!, ph),
+        (soiltemp_gnet_patch_urban_array_phase!, (a,), soiltemp_gnet_patch_view))
+    return ph
 end
 
 function soilwater_rev_aux(filt, config; dtime = 1800.0)
