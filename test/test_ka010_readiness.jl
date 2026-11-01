@@ -12,7 +12,7 @@ using Test
 using CLM
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index, @Const
-import Adapt
+const Adapt = CLM.Adapt
 
 @kernel function _ka010_copy_mask!(out, @Const(m))
     i = @index(Global)
