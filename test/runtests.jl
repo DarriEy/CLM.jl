@@ -171,6 +171,7 @@ const INPROCESS_TEST_FILES = [
     "test_flexiblecn_matrixcn_agsys.jl",
     "test_vegetation_facade.jl",
     "test_kernels_scatter.jl",
+    "test_ka010_readiness.jl",    # KA 0.10 prep: launch-rule trait, DeviceBitArray masks
     "test_kconst_alias.jl",       # @Const contract: static audit + opt-in _launch! alias checker
     "test_atm2lnd.jl",
     "test_multigridcell_forcing.jl",

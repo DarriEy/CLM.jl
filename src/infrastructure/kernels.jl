@@ -27,6 +27,50 @@ _kernel_backend(out) = KA.get_backend(out)
 _kernel_backend(::BitArray) = KA.CPU()
 
 # --------------------------------------------------------------------------
+# BitArray masks as kernel arguments on a compiling CPU backend
+# --------------------------------------------------------------------------
+# KernelAbstractions 0.9's CPU backend runs kernels as Julia code, so the host filter
+# masks (BitVector) are passed to kernels as they are. KA 0.10's CPU backend is
+# OpenCL/PoCL: every argument goes through Adapt (`POCL.KernelAdaptor`) and must be a
+# bitstype on the device, and a BitVector is not ("passing non-bitstype argument").
+# `DeviceBitArray` is the device form: the BitArray's own `chunks` (adapted to a device
+# array) plus its dims, with BitArray's bit layout, so a kernel reading or writing it sees
+# exactly the host BitArray. Writes are atomic per 64-bit chunk (work-items sharing a
+# chunk may run in parallel). The Adapt rule below is only defined when the loaded KA has
+# a PoCL backend (0.10); on KA 0.9 nothing is converted and CPU launches are unchanged.
+struct DeviceBitArray{N, A <: AbstractVector{UInt64}} <: AbstractArray{Bool, N}
+    chunks::A
+    dims::NTuple{N, Int}
+end
+DeviceBitArray(x::BitArray{N}) where {N} = DeviceBitArray{N, Vector{UInt64}}(x.chunks, size(x))
+Base.size(m::DeviceBitArray) = m.dims
+Base.IndexStyle(::Type{<:DeviceBitArray}) = IndexLinear()
+@inline function Base.getindex(m::DeviceBitArray, i::Int)
+    @boundscheck checkbounds(m, i)
+    @inbounds c = m.chunks[((i - 1) >> 6) + 1]
+    return (c >> ((i - 1) & 63)) & 0x1 == 0x1
+end
+@inline function Base.setindex!(m::DeviceBitArray, v, i::Int)
+    @boundscheck checkbounds(m, i)
+    k = ((i - 1) >> 6) + 1
+    bit = UInt64(1) << ((i - 1) & 63)
+    if convert(Bool, v)
+        Atomix.@atomic m.chunks[k] |= bit
+    else
+        Atomix.@atomic m.chunks[k] &= ~bit
+    end
+    return m
+end
+KA.get_backend(m::DeviceBitArray) = KA.get_backend(m.chunks)
+Adapt.adapt_structure(to, m::DeviceBitArray{N}) where {N} =
+    (c = Adapt.adapt(to, m.chunks); DeviceBitArray{N, typeof(c)}(c, m.dims))
+
+if isdefined(KA, :POCL) && isdefined(KA.POCL, :KernelAdaptor)   # KA >= 0.10 CPU backend
+    Adapt.adapt_structure(to::KA.POCL.KernelAdaptor, x::BitArray) =
+        Adapt.adapt(to, DeviceBitArray(x))
+end
+
+# --------------------------------------------------------------------------
 # Atomic integer width for scatter counters
 # --------------------------------------------------------------------------
 # Some GPU backends — notably Apple Metal — have NO 64-bit atomics, so an atomic
