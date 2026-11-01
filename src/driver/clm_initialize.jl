@@ -809,6 +809,23 @@ function clm_initialize!(;
                 rf_cwdl3=0.0, cwd_fcel=0.76,   # = 1 - cwd_flig (0.24)
                 bgc_initial_Cstocks=cstocks,
                 bgc_initial_Cstocks_depth=cstocks_depth)
+
+            # SoilBiogeochemLittVertTransp readParams (SoilBiogeochemLittVertTranspMod.F90:
+            # 66-79): CTSM reads the three mixing parameters from the params file and
+            # endruns when one is missing. The port never read them, so
+            # inst.litter_params kept its 0.0 struct defaults and litter_vert_transp!
+            # ran with zero bioturbation/cryoturbation: no litter or SOM ever moved
+            # below the top decomposition layer. A restart run hides this (its pools
+            # arrive vertically distributed), but on a cold start all litter stays in
+            # layer 1, decomposes at the top-layer rate and immobilizes more N, so the
+            # spring mineral-N pool, FUN's N cost and NPP all drift (Bow cold start).
+            # Missing variables fall back to the stock clm5_params.nc values.
+            _lvt(nm, dflt) = haskey(ds, nm) ? Float64(ds[nm][1]) :
+                (@warn("paramfile has no $(nm); using the clm5_params.nc value $(dflt)"); dflt)
+            litter_vert_transp_readparams!(inst.litter_params;
+                som_diffus = _lvt("som_diffus", 3.17097919837646e-12),
+                cryoturb_diffusion_k = _lvt("cryoturb_diffusion_k", 1.58548959918823e-11),
+                max_altdepth_cryoturbation = _lvt("max_altdepth_cryoturbation", 2.0))
         end
 
         # Build cellsand matrix from soil state (sand fraction)

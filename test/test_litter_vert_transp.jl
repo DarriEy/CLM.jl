@@ -760,3 +760,29 @@
     end
 
 end
+
+# clm_initialize! must read the three mixing parameters from the params file
+# (SoilBiogeochemLittVertTranspMod.F90 readParams:66-79). It used to leave
+# inst.litter_params at the 0.0 struct defaults, so a CN run never moved litter or
+# SOM below the top decomposition layer; on the Bow cold start all new litter stayed
+# in layer 1 and spring N immobilization ran ~8 % high
+# (docs/DRIVER_DEFAULTS_AUDIT.md, "cold-start NPP and Stillwater SNOW_DEPTH").
+include(joinpath(@__DIR__, "testdata.jl"))
+@testset "LitterVertTransp params read from the params file (CN init)" begin
+    fsurdat, paramfile = bow_params()
+    if !isfile(fsurdat) || !isfile(paramfile)
+        testdata_missing("litter_vert_transp params", fsurdat, paramfile)
+    else
+        want = CLM.NCDatasets.Dataset(paramfile) do ds
+            (Float64(ds["som_diffus"][1]), Float64(ds["cryoturb_diffusion_k"][1]),
+             Float64(ds["max_altdepth_cryoturbation"][1]))
+        end
+        (inst, _, _, _) = CLM.clm_initialize!(; fsurdat = fsurdat, paramfile = paramfile,
+            start_date = CLM.Dates.DateTime(2003, 7, 1), dtime = 3600, use_cn = true)
+        lp = inst.litter_params
+        @test want[1] > 0 && want[2] > 0 && want[3] > 0
+        @test lp.som_diffus == want[1]
+        @test lp.cryoturb_diffusion_k == want[2]
+        @test lp.max_altdepth_cryoturbation == want[3]
+    end
+end

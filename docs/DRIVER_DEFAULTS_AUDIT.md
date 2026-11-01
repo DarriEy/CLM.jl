@@ -1441,12 +1441,177 @@ Stillwater: FPSN −0.24 % → −0.01 % (nRMSE 0.033 → 0.002), QVEGT −0.21 
 Abisko FPSN/QVEGT move toward Fortran by 0.04 percentage points.
 
 **Still open.**
-- Cold-start NPP is +1.5 % (year 1) / +2.6 % (year 2) while GPP matches to 0.02 %, so the
-  difference is in autotrophic respiration. cn_annual (restart) NPP matches to 0.00 %, so
-  it is cold-start specific.
-- Stillwater's SNOW_DEPTH cell.
+- ~~Cold-start NPP is +1.5 % (year 1) / +2.6 % (year 2) while GPP matches to 0.02 %.~~
+  Closed below: the litter/SOM vertical-mixing parameters were never read.
+- ~~Stillwater's SNOW_DEPTH cell.~~ Explained below: roundoff-level trace snow, not a
+  physics bug.
 - `fortran_parity_cn_coldstart.jl` (single step) still uses the SP `INT_SNOW_MAX`. It
   has no effect at nstep 0 with no snow.
+
+### Follow-up: cold-start NPP and Stillwater SNOW_DEPTH
+
+Both items left open above were traced against new Fortran tapes from the pristine
+ctsm5.3.012 exe. One was a port bug, fixed here. The other is not a bug: the gate cell
+scores a quantity that is chaotic in floating-point roundoff.
+
+#### 1. The litter/SOM mixing parameters were never read (cold-start NPP)
+
+**Method.** The 2-year Bow cold start (`fortran_cold2y` configuration) was rerun in
+Fortran three times with extra daily tapes:
+- per-patch respiration: MR and its four parts, GR and its parts, `SOILC_CHANGE`, `NPP_BURNEDOFF`, the FUN N-cost partition;
+- the column N budget: `SMIN_NH4/NO3`, `GROSS_NMIN`, `POTENTIAL_IMMOB`, `ACTUAL_IMMOB`, `F_NIT`, leaching;
+- the decomposing pools (column and per layer), `K_*`, `T/W/O_SCALAR` and `LITTERC_HR/SOILC_HR`.
+
+The h0 of these reruns is identical to `fortran_cold2y`. The same quantities were dumped daily from the Julia harness.
+
+**Chain, from the symptom down.**
+- NPP was high because AR was low. MR and GR matched to 0.1-0.3 %. The term that differed was
+  FUN's `SOILC_CHANGE`: tree −6 % (yr 1) / −10 % (yr 2), grass −6 % (yr 2). Most of it was
+  `NPP_BURNEDOFF`, in May and June.
+- FUN burned off less carbon because N was cheaper: spring soil mineral N was high
+  (`SMINN` May yr 2 +52 %).
+- `SMINN` was high because `ACTUAL_IMMOB` was low. The first field to diverge, on day 104
+  (the first day the top layer thaws), was `POTENTIAL_IMMOB`, +8.5 %. `GROSS_NMIN` was
+  +0.7 % and the decomposition rates `K_*` were +0.7 %.
+- Column litter pools matched to 4 digits, but their vertical distribution did not. By
+  day 104, Fortran's layer 2 held 5.3 gC/m³ of metabolic litter (layer 1: 140). Julia's
+  layer 2 held 6e-19, with 151 in layer 1. In Fortran the transfer starts on day 62, the
+  day `ALTMAX` first goes above 0. That is cryoturbation in
+  `SoilBiogeochemLittVertTransp`.
+- With all litter in the one thawed layer, Julia decomposed litter 8.5 % faster (litter HR
+  +8.5 %, soil HR +0.8 %). Litter decomposition immobilizes N.
+
+**Root cause.** `SoilBiogeochemLittVertTranspMod.F90` `readParams` (:66-79) reads
+`som_diffus`, `cryoturb_diffusion_k` and `max_altdepth_cryoturbation` from the params
+file, and endruns if any is missing. The port has the reader
+(`litter_vert_transp_readparams!`), but no init path called it. So
+`inst.litter_params` kept its 0.0 struct defaults (`litter_vert_transp.jl:22-24`), and
+`litter_vert_transp!` ran every step with zero bioturbation and cryoturbation. No litter or
+SOM ever moved between layers.
+
+A restart run hides this, because its pools arrive already distributed by the spun-up
+Fortran and one year of mixing changes little. That is why cn_annual matched and only the
+cold start drifted. The Bow params file has 3.17e-12 m²/s, 1.585e-11 m²/s and 2 m.
+
+**Fix.** `clm_initialize!` reads the three values from the params file next to the other
+BGC decomposition parameters (`clm_initialize.jl`, Step 15f). If one is missing it warns
+and falls back to the stock clm5_params values. New test:
+`test_litter_vert_transp.jl` "LitterVertTransp params read from the params file".
+
+**Cold-start 2-year** (vs `fortran_cold2y`, annual means, J/F − 1):
+
+| field | year | Fortran | before | after |
+|---|---|---|---|---|
+| NPP | 1 | 3.1971e-7 | +1.53 % | **−0.15 %** |
+| NPP | 2 | 8.7454e-7 | +2.57 % | **+0.07 %** |
+| GPP | 1 / 2 | 1.7916e-6 / 2.2825e-6 | −0.02 % / +0.02 % | −0.05 % / −0.00 % |
+| SMINN | 1 / 2 | 0.00479 / 0.01800 | −1.13 % / +9.25 % | −0.07 % / −0.06 % |
+| TOTVEGC | 1 / 2 | 175.04 / 136.25 | +0.05 % / +0.41 % | −0.01 % / −0.03 % |
+| TOTECOSYSC | 2 | 1129.6 | +0.10 % | −0.00 % |
+| TOTSOMC | 2 | 911.46 | −0.05 % | +0.00 % |
+| TLAI | 2 | 0.29817 | +0.04 % | −0.03 % |
+| TG, EFLX_LH_TOT | 1 / 2 | | ≤ 0.01 % | ≤ 0.01 % |
+
+Year-2 monthly NPP, May: +4.28 % → −0.01 %. April and June are now within 0.02 %.
+
+Respiration components, J − F in gC/m²/s, annual mean:
+
+| patch | term | year | Fortran | before | after |
+|---|---|---|---|---|---|
+| tree (NET, 60 %) | AR | 2 | 1.794e-6 | −1.87e-8 | −1.0e-9 |
+| | MR | 2 | 1.466e-6 | +3.4e-9 | −1.1e-9 |
+| | GR | 2 | 8.83e-8 | +2.4e-9 | +5e-11 |
+| | SOILC_CHANGE | 1 / 2 | 1.757e-7 / 2.401e-7 | −1.04e-8 / −2.44e-8 | −3e-10 / +4e-12 |
+| | NPP_BURNEDOFF | 2 | 1.243e-7 | −1.56e-8 | −2e-11 |
+| grass (35 %) | AR | 2 | 9.468e-7 | −3.07e-8 | −7e-11 |
+| | GR | 2 | 1.094e-7 | +3.2e-9 | +3e-11 |
+| | SOILC_CHANGE | 2 | 5.618e-7 | −3.37e-8 | −5e-11 |
+| | NPP_BURNEDOFF | 2 | 2.326e-7 | −2.51e-8 | −1.1e-10 |
+
+The soil N budget now matches as well: `POTENTIAL_IMMOB`, `ACTUAL_IMMOB`, `NET_NMIN` and
+`HR` are within 0.1 % in every spring month of both years.
+
+**cn_annual** (2202 restart) is unchanged, as expected: GPP +0.003 %, NPP +0.004 %,
+TOTVEGC/TOTECOSYSC/TOTSOMC +0.000 %, SMINN −0.03 %.
+
+#### 2. Stillwater SNOW_DEPTH: roundoff-level trace snow, not a snow-physics bug
+
+**Method.** A Fortran `branch` run from the Stillwater 2003-01-01 restart, with an hourly
+column/patch tape (SNOW_DEPTH, SNOWDP, H2OSNO, per-layer SNO_Z/SNO_ICE/SNO_LIQH2O/SNO_T,
+FSNO, INT_SNOW, QSNOMELT, QSNOFRZ, unloading, solid dew/evaporation, FGR, TG, TSOI,
+canopy water, ...). Its h0 is bit-identical to the gate reference on all 364 common days.
+The Julia side was the gate harness with an hourly probe. The two were compared step by step, and the Julia
+canopy iteration was compared with a per-iteration trace from an instrumented copy of the
+same exe.
+
+**What the gate cell measures.** On the ten days with real snow (daily mean H2OSNO
+> 0.1 mm, days 54-60 and 347-349), Julia's SNOW_DEPTH agrees to −0.0075 % summed and
+0.78 % at worst hour by hour. So the Vionnet2012 overburden, wind-drift compaction,
+new-snow density, melt compaction, layer combine/divide and SnowCapping all match Fortran.
+
+The other 82 % of the annual SNOW_DEPTH sum comes from "trace snow": SWE between 1e-21 and
+1e-10 mm. Its source is canopy frost and unloading of canopy water at roundoff level. CTSM
+computes `snow_depth = newsnow / (bifall · frac_sno_eff)` with `frac_sno = tanh(0.1·newsnow)`
+(`SnowCoverFractionSwensonLawrence2012Mod.F90:166-180`). For a vanishing deposit that
+tends to about 10/bifall, so 1e-20 mm of frost reads as 6-13 cm of "snow depth" until it
+sublimates. Days 19 and 25 account for −0.085 of the −0.086 m·day annual deficit
+(−2.49 %). On those days SWE was 1e-13 to 1e-11 mm in both models.
+
+Grid-mean quantities do not show this. SNOWDP (= snow_depth · frac_sno_eff) matches to
+−0.007 %, H2OSNO to −0.005 % and FSNO to −0.004 %, all with nRMSE 0.0000.
+
+**First divergence and why it is roundoff.**
+- Steps 1-5 agree to 6 digits.
+- Step 6: `LIQCAN` on the tree and grass patches is 1.4871e-17 mm in Fortran and
+  1.4846e-17 mm in Julia. These are leftovers from cancellation of `qflx_tran_veg −
+  qflx_evap_veg` (~1e-9 mm/s). The grass patch has ELAI = 0 but ESAI = 0.5, and gets a
+  1e-21 mm/s PHS `soilflux`. Its value differs in the last bits between the two codes.
+- Step 7: the junk leaves Julia's grass with `snocan` 1.6e-18 mm, where Fortran has 0.
+- Step 8: that `snocan` unloads, so `frac_sno` goes > 0 for one step. `z0mg` switches from
+  `zlnd` to `zsno` (`FrictionVelocityMod.F90` SetRoughnessLengths, `frac_sno > 0`). The
+  tree's `z0mv` drops from 0.621 to 0.537 m and its ustar from 0.299 to 0.288. Its
+  night-time leaf temperature ends 0.43 K warmer.
+
+Every input to that step agrees to 6+ digits apart from the 1e-18 mm junk. Over the year,
+the junk statistics are the same in both models:
+
+| | Fortran | Julia |
+|---|---|---|
+| hours with 0 < LIQCAN < 1e-12 mm (tree / grass) | 2451 / 1936 | 2356 / 2130 |
+| hours with 0 < SNOCAN < 1e-12 mm (tree / grass) | 201 / 382 | 133 / 437 |
+| hours with 0 < H2OSNO < 1e-6 mm | 281 | 279 |
+| hours with FSNO > 0 | 723 | 723 |
+
+The canopy-water update (`canopy_water_evap_update`, `CanopyFluxesMod.F90:1603-1630`),
+`getvegwp` and the snow-cover/snow-depth kernels were checked against Fortran and match.
+
+**#376 is not the cause.** Reverting #376's active-patch photosynthesis filter alone gives
+Stillwater SNOW_DEPTH −1.72 % (the gate shows −2.49 % with it). The run moves to a
+different roundoff trajectory, with different trace-snow days dominating. Before #376 the
+cell's annual −0.04 % was a lucky cancellation: its nRMSE was worse, 0.161.
+
+**Not fixed, and why.** Matching this cell would mean reproducing gfortran's last-bit
+roundoff in a 1e-21 mm/s flux. The reference model cannot reproduce that across compilers
+either. This is recorded as a finding about the gate metric, not tuned away. A gate that
+scored SNOWDP, or SNOW_DEPTH only on days with H2OSNO above a threshold, would measure the
+snow physics. Changing the gate definition is the project owner's call.
+
+Stillwater snow cells (strict gate, unchanged by this PR): SNOW_DEPTH FAIL (−2.49 %,
+nRMSE 0.131); H2OSNO −0.005 %, SNOWICE −0.004 %, SNOWLIQ −0.001 %, SNOW −0.000 %, all
+nRMSE ≤ 0.0001.
+
+#### Validation
+
+The 5-site strict gate (`scripts/parity_gate_diff.py`, against the #376 outputs) is
+unchanged: Bow 69/69, Stillwater 68/69, Abisko 69/69, Baltimore 69/69, Savanna 69/69,
+344/345, with no cell moving. That is expected, because the fix only touches CN
+initialization and the gate runs SP.
+
+Targeted tests (Julia 1.12, `SYMFLUENCE_DATA` and `CESM_INPUTDATA` set): 6071/6071 pass,
+with none skipped. The set was `test_litter_vert_transp` (with the new params test),
+`test_phenology`, `test_driver_defaults_audit`, `test_fun`, `test_fun_coldstart_finite`,
+all 27 `test_cn_*`, `test_photosynthesis`, `test_phs_night_frozen`, the five
+`test_snow_*`, `test_ad_smoke`, `test_ad_e2e` and `test_ad_robustness`.
 
 ## Scorecard
 
