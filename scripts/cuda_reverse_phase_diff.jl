@@ -69,13 +69,16 @@ function main_diff()
                                inst = inst_gpu, kw...)
     Enzyme.API.strictAliasing!(false)
     CLM._GPU_LAUNCH_PROFILE[] = true
+    Base.cumulative_compile_timing(true)
     revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
     for k in eachindex(pc)
         name = string(pc[k][1])
         if sel == ["all"] || any(s -> occursin(s, name), sel)
             t0 = time()
             dc = run_phase(pc[k], bc, revmode, k); t1 = time()
+            jc0 = Base.cumulative_compile_time_ns()[1]
             dg = run_phase(pg[k], bg, revmode, k); CUDA.synchronize(); t2 = time()
+            jc = (Base.cumulative_compile_time_ns()[1] - jc0) / 1e9  # Julia inference+codegen
             # second CUDA call: compiled, so t2 - t1 minus this is the compile time
             run_phase(pg[k], bg, revmode, k); CUDA.synchronize(); t3 = time()
             lc = leaves(e3(pc[k])(dc)); lg = leaves(e3(pg[k])(dg))
@@ -95,8 +98,8 @@ function main_diff()
                 push!(rows, (d, p, ad, maximum(abs, ah[m]; init = 0.0), maximum(abs, gh[m]; init = 0.0)))
             end
             sort!(rows; rev = true)
-            @printf("PHASE %2d %-44s nnz cpu=%d gpu=%d maxabs=%.3e maxrel(leaf)=%.3e maxscaled=%.3e  cpu %.0f s, cuda %.0f s (run %.1f s)\n",
-                    k, name, nnz_c, nnz_g, amax, rmax, rows[1][1], t1 - t0, t2 - t1, t3 - t2)
+            @printf("PHASE %2d %-44s nnz cpu=%d gpu=%d maxabs=%.3e maxrel(leaf)=%.3e maxscaled=%.3e  cpu %.0f s, cuda %.0f s (julia-compile %.0f s, run %.1f s)\n",
+                    k, name, nnz_c, nnz_g, amax, rmax, rows[1][1], t1 - t0, t2 - t1, jc, t3 - t2)
             for r in first(rows, 8)
                 r[1] > 1e-12 && @printf("    scaled=%.3e  %-60s abs=%.3e max|cpu|=%.3e max|gpu|=%.3e\n", r...)
             end
