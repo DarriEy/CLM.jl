@@ -68,6 +68,9 @@ function main_diff()
     pg = CLM.driver_rev_phases(bounds, filt_gpu, config; canopy_aux = CLM.canopy_rev_aux(inst_gpu, bounds, filt_gpu),
                                inst = inst_gpu, kw...)
     Enzyme.API.strictAliasing!(false)
+    # compile-time experiments: Enzyme type-analysis lattice size (defaults 6 / 512)
+    haskey(ENV, "ENZYME_MAXTYPEDEPTH") && Enzyme.API.maxtypedepth!(parse(Int, ENV["ENZYME_MAXTYPEDEPTH"]))
+    haskey(ENV, "ENZYME_MAXTYPEOFFSET") && Enzyme.API.maxtypeoffset!(parse(Int, ENV["ENZYME_MAXTYPEOFFSET"]))
     CLM._GPU_LAUNCH_PROFILE[] = true
     Base.cumulative_compile_timing(true)
     revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
