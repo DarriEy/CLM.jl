@@ -32,7 +32,7 @@ function leaves!(out, x, path, seen)
 end
 leaves(x) = leaves!(Pair{String,Any}[], x, "", Set{UInt}())
 
-using Random
+using Random, Profile   # Profile: stdlib, used only with PROFILE=1
 function seed_leaves!(db, k)
     seen = Set{UInt}()
     for (p, a) in leaves(db)
@@ -77,7 +77,23 @@ function main_diff()
             t0 = time()
             dc = run_phase(pc[k], bc, revmode, k); t1 = time()
             jc0 = Base.cumulative_compile_time_ns()[1]
-            dg = run_phase(pg[k], bg, revmode, k); CUDA.synchronize(); t2 = time()
+            dg = if get(ENV, "PROFILE", "0") == "1"
+                # sampling profile of the first (compiling) CUDA call, C frames included
+                Profile.init(; n = 10^7, delay = 0.05)
+                r = Profile.@profile run_phase(pg[k], bg, revmode, k)
+                open("profile_phase$(k).txt", "w") do io
+                    Profile.print(IOContext(io, :displaysize => (100000, 400)); format = :flat,
+                               sortedby = :count, C = true, mincount = 20)
+                end
+                open("profile_phase$(k)_tree.txt", "w") do io
+                    Profile.print(IOContext(io, :displaysize => (100000, 400)); format = :tree,
+                               C = true, mincount = 200, maxdepth = 60, noisefloor = 2.0)
+                end
+                Profile.clear(); r
+            else
+                run_phase(pg[k], bg, revmode, k)
+            end
+            CUDA.synchronize(); t2 = time()
             jc = (Base.cumulative_compile_time_ns()[1] - jc0) / 1e9  # Julia inference+codegen
             # second CUDA call: compiled, so t2 - t1 minus this is the compile time
             run_phase(pg[k], bg, revmode, k); CUDA.synchronize(); t3 = time()
