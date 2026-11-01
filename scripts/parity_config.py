@@ -126,6 +126,40 @@ DOCUMENTED_EXCEPTIONS = {
         "remaining gap is the thin-snow / melt-out depth relaxation over trace snow."),
 }
 
+# Presence masks: (julia_var) -> (julia_mask_var, fortran_mask_var, threshold).
+# A diagnostic that is only defined where some state is present is scored only on
+# days where that state is present in at least one model (daily mean > threshold).
+# SNOW_DEPTH: CTSM's snow-covered-area depth, snow_depth = newsnow/(bifall*frac_sno_eff)
+# (SnowCoverFractionSwensonLawrence2012Mod.F90:166-180), reports cm-scale "depth"
+# for frost films of 1e-21..1e-10 mm SWE. Those films come from last-bit rounding
+# of near-cancelling canopy-water fluxes, so they appear on different hours in the
+# two models; at Stillwater they were 82% of the annual depth sum and the whole
+# -2.49% residual while the 10 real-snow days agreed to -0.0075% (PR #378). Days
+# with daily-mean H2OSNO <= 1e-6 mm in BOTH models are physically snow-free and
+# are not scored. A day with snow in either model is still scored.
+PRESENCE_MASKS = {
+    "SNOW_DEPTH": ("H2OSNO", "H2OSNO", 1e-6),
+}
+
+def apply_presence_mask(jn, dj, df, ji, fi, j, f):
+    """Return (j, f) with days where the PRESENCE_MASKS state is absent in both
+    models set to NaN (gate_cell skips non-finite pairs). No-op for other vars,
+    when the mask field is missing from either file, or when fewer than three
+    days have the state present (then the unmasked series is scored)."""
+    m = PRESENCE_MASKS.get(jn)
+    if m is None or j is None or f is None:
+        return j, f
+    mj, mf = series(dj, m[0], ji), series(df, m[1], fi)
+    if mj is None or mf is None:
+        return j, f
+    absent = (np.nan_to_num(mj, nan=0.0) <= m[2]) & (np.nan_to_num(mf, nan=0.0) <= m[2])
+    if (~absent & np.isfinite(j) & np.isfinite(f)).sum() < 3:
+        # State (essentially) never present, e.g. a snow-free site: score the
+        # whole series unmasked, exactly as before, so the cell is still counted.
+        return j, f
+    j = np.where(absent, np.nan, j); f = np.where(absent, np.nan, f)
+    return j, f
+
 def date_ord(ds):
     t = ds["time"]; dts = cftime.num2date(t[:], t.units, getattr(t, "calendar", "noleap"))
     return np.array([d.year*10000 + d.month*100 + d.day for d in dts])
