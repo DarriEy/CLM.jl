@@ -102,6 +102,7 @@ def main():
             is_temp = jv in pc.TEMP_VARS
             j, f = scaled((dj, df), jv, fv, ij, iff, is_temp)
             if j is None: continue
+            j, f = pc.apply_presence_mask(jv, dj, df, ij, iff, j, f)
             g = pc.gate_cell(j, f, floor, is_temp)
             if g is None or g[0]:  # None=unscoreable, g[0]=passed -> skip
                 continue
