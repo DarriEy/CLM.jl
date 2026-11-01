@@ -98,6 +98,14 @@ const _DEFER_GPU_SYNC = Ref(false)
     return out
 end
 
+# Whether launches on `backend` go through `_gpu_launch!` (and so its launch-level Enzyme
+# rule) rather than the plain KernelAbstractions call. A CLM trait instead of
+# `backend isa KA.GPU`: KernelAbstractions 0.10 deprecates `GPU` and makes it an alias of
+# `Backend`, which would silently send the CPU backend down the GPU path too. On KA 0.9
+# this is exactly the old test (`KA.CPU` is the only `Backend` that is not a `GPU`).
+_uses_launch_rule(::KA.CPU) = false
+_uses_launch_rule(::KA.Backend) = true
+
 # Launch `kernel(backend)(args...; ndrange)`. On a GPU backend the launch goes through
 # `_gpu_launch!`, which carries a launch-level Enzyme reverse rule
 # (src/infrastructure/enzyme_rules.jl): KernelAbstractions' own Enzyme extension
@@ -106,7 +114,7 @@ end
 # even a literal or a value read from a Const argument. Primal behaviour is identical
 # on every backend; the CPU path is the plain launch.
 @inline function _kcall!(kernel, backend, args...; ndrange)
-    if backend isa KA.GPU
+    if _uses_launch_rule(backend)
         _gpu_launch!(kernel, backend, ndrange, args...)
     else
         kernel(backend)(args...; ndrange = ndrange)
