@@ -119,20 +119,65 @@ ERROR: Unsatisfiable requirements detected for package LLVM [929cbde3]:
   forwards to KA's own kernel reverse rule, and Enzyme on CPU differentiates KA
   kernel launches through the same extension. Even once LLVM.jl resolves, CLM
   cannot move until #826 lands.
-- Other KA 0.10 breaking changes that CLM would have to review then (from the
-  v0.10.0 release notes): the `CPU` backend is now an OpenCL backend running on
-  PoCL, so every CPU kernel and the CPU Enzyme path go through a new compiler.
-  `CPU(; static=true)`, `isgpu`, `@ka_code_llvm` and `@ka_code_typed` are removed.
-  `GPU` is deprecated (CLM's `_kcall!` dispatches on `backend isa KA.GPU`).
-  `@private` arrays become a `PrivateArray`. `@Const` arguments are constified at
-  launch. Backends must implement KernelInterface 0.4.
 - KA 0.10 also means moving every GPU package at once, because each pins one KA
   minor. KA 0.10 needs CUDA.jl 6.5+ (CUDACore 6.5, so compat `CUDA = "5, 6"`),
   Metal.jl 1.12+, and AMDGPU.jl 2.9+.
 
-Not tested, because the environment cannot be built: the CPU kernel tests and
-CPU/CUDA/Metal reverse AD under KA 0.10. Re-check when Enzyme.jl releases with
-LLVM.jl 10 support and KA has merged #826.
+### Readiness work already done on KA 0.9.45 (branch `gpu/ka010-readiness`)
+
+The 0.10 breaking list (v0.10.0 release notes, and the #824 diff), item by item:
+
+| 0.10 change | CLM before | Now |
+|---|---|---|
+| `GPU` deprecated, aliased to `Backend` | `_kcall!` tested `backend isa KA.GPU`, which on 0.10 is true for the CPU too | `_uses_launch_rule(backend)`: `false` for `KA.CPU`, `true` for any other `Backend`. Same result on 0.9 |
+| `CPU` is PoCL: kernel arguments must be bitstypes | host filter masks are `BitVector` and are passed to CPU kernels as is ("passing non-bitstype argument") | `DeviceBitArray` (the BitArray's own `chunks` plus its dims, with atomic per-chunk writes). An `Adapt` rule for `KA.POCL.KernelAdaptor` is defined only when KA has a PoCL backend, so 0.9 launches are unchanged |
+| PoCL compiles kernels with its own libm | `init_daylength!` used a host loop while `update_daylength!` used a kernel; on 0.10 the two differ in the last bit, which breaks the `prev_dayl == dayl` re-seed guard | `init_daylength!` goes through a kernel too (bit-identical on 0.9) |
+| same | `test_mimics_wiring` (a) compares a kernel against a host oracle with `== 0.0` | still `== 0` on 0.9; a 1e-14 relative tolerance when KA has a PoCL backend |
+| `@Const` arguments constified on the host at launch | static audit only looked at `A[i] = …`, `fill!`, `_scatter_add!` … | the audit also treats any `f!(A, …)` call as a write. `src/` is clean |
+| fixed workgroup sizes discouraged on CPU | only `scripts/enzyme_metal_reverse_probe.jl` passed `64` | dropped |
+| `isgpu`, `CPU(; static=true)`, `@ka_code_*`, `@private` → `PrivateArray` | not used anywhere in `src/`, `ext/`, `test/` or `scripts/` | nothing to do |
+
+`test/test_ka010_readiness.jl` covers the trait and `DeviceBitArray` on 0.9. On a PoCL
+CPU backend it also checks the `Adapt` rule and plain-BitVector reads and writes.
+
+### Local trial against the upstream branches (2026-11-01, macOS arm64, Julia 1.12.6)
+
+Environment: Enzyme.jl #3741 head (`a5989aa1`, LLVM.jl 10.4.2, GPUCompiler 2.19.0),
+KernelAbstractions #826, and this branch with `KernelAbstractions = "0.9.45, 0.10"`.
+
+- **#826 at its head (`93a65b75`) cannot launch any CPU kernel.** It fails with
+  `could not load symbol "POclSetCPUMaxComputeUnitsPOCL"`. The branch predates #841, and
+  pocl_standalone_jll 7.2.3 no longer has that symbol. #826's commits cherry-picked onto
+  v0.10.4 work (`ext/` is then identical to the PR head). The rest of the trial uses that
+  rebased branch.
+- **CPU forward path: ✅.** With the readiness changes above, the full default suite
+  (subprocess block off) has no KA-0.10-specific failure outside reverse AD. Before them,
+  every kernel taking a BitVector mask failed, and the daylength and MIMICS checks failed
+  by 1 ulp. Data-gated files are skipped on the laptop, as they are on 0.9.
+- **CPU reverse AD: ❌, upstream.** Every reverse call first fails in Enzyme #3741 with
+  `KeyError: key :PreserveNVVMPass not found`. Enzyme's `LLVM.@module_pass` registrations
+  are made at precompile time and are lost. With that patched locally, reverse mode over a
+  KA kernel fails with `no method matching lookup_world(…, ::CompilerCaching.StackedMethodTable)`
+  (GPUCompiler ≥ 2.18). Next, the #826 wrappers don't answer 0.10's `ConstArgs` query
+  (`no method matching __dynamic_checkbounds(::ConstArgs)`). Last, Enzyme cannot
+  differentiate SPIRVIntrinsics' work-item builtins (`EnzymeNoDerivativeError` in
+  `get_group_id`), so no KA kernel can be reversed on the PoCL CPU yet. With all the local
+  patches, `test_enzyme_smoke.jl` (non-KA reverse) passes, and `test_photosynthesis_reverse.jl`
+  crashes in the GC inside Enzyme's `julia_allocator`.
+- **#826 also drops the CPU support for `Active` scalar kernel arguments that 0.9 had**
+  ("Active kernel arguments not supported" now on `CPU()` as well). Once the rest works,
+  CPU reverse through `_launch!` needs the same launch-level rule as the GPU path
+  (`_uses_launch_rule(::KA.CPU)` → `true`). Under that rule, scalar kernel arguments get a
+  zero derivative on CPU too.
+
+Repro scripts and draft upstream comments are kept outside the repo (not posted).
+
+Before the real upgrade: Enzyme.jl releases LLVM.jl 10 support, with the pass-registry
+and `StackedMethodTable` problems fixed, and KA merges #826 rebased on 0.10.x, handling
+`ConstArgs` and SPIR-V builtins (and ideally `Active` scalars on PoCL). Then bump
+`KernelAbstractions = "0.10"`, `CUDA = "5, 6"` (6.5+), Metal 1.12+ and AMDGPU 2.9+.
+Decide `_uses_launch_rule(::KA.CPU)`. Re-run the CPU AD tests, the Metal backend test,
+`scripts/gpu_validate_cuda.jl` and the soil-temperature reverse check.
 
 ## Untested (needs a ROCm device)
 
