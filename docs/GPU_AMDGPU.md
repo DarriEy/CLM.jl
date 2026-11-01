@@ -26,11 +26,16 @@ CLM.clm_set_backend(:cpu)
   same as CPU and CUDA. No Float32 down-adaptor is needed (that is Metal-only).
 - BitVector masks must become `Vector{Bool}` before moving to the device, as on
   CUDA (see the `_HostPrep` adaptor in `scripts/gpu_adapt.jl`).
-- Multi-GPU: `clm_bind_local_gpu!` calls `AMDGPU.device!(AMDGPU.devices()[idx + 1])`
-  with CLM's 0-based rank index.
-- **Compat:** `AMDGPU = "1"`. AMDGPU.jl 2.x requires KernelAbstractions 0.10,
-  and CLM is on KernelAbstractions 0.9, so the resolver installs AMDGPU.jl 1.x
-  next to CLM. Moving to AMDGPU 2.x means moving CLM to KA 0.10 first.
+- Multi-GPU: `clm_bind_local_gpu!` passes CLM's 0-based rank index to the bind
+  hook, which calls `AMDGPU.device!(AMDGPU.devices()[CLM._device_list_slot(idx, n)])`
+  (slot = `idx + 1`; an out-of-range index raises `ArgumentError`, like
+  `CUDA.device!`). The Metal extension uses the same helper.
+- **Compat:** `AMDGPU = "1, 2"`. Only AMDGPU.jl **2.9 and later** need
+  KernelAbstractions 0.10. AMDGPU.jl 2.0–2.8 still use KA `0.9.2 - 0.9`, so they
+  install next to CLM's KA 0.9.45. With CUDA.jl 5 and Metal.jl in the same
+  environment, the resolver picks **AMDGPU.jl 2.7.0** (2.8 needs GPUCompiler 2,
+  which CUDA.jl 5 does not allow). AMDGPU.jl 2.9+ waits on the KA 0.10 move;
+  see "KernelAbstractions 0.10" below.
 
 ## What the extension does
 
@@ -78,6 +83,56 @@ branch. The resolver installed **AMDGPU.jl 1.3.6** with KernelAbstractions 0.9.4
 
 Without AMDGPU.jl installed (the default), the test file shows two `@test_skip`
 and nothing else changes.
+
+Re-checked on 2026-11-01 on an Apple Silicon Mac (no ROCm, Julia 1.12.6) with
+`AMDGPU = "1, 2"`. The scratch environment held CLM (dev), AMDGPU, CUDA and Metal.
+The resolver installed AMDGPU.jl 2.7.0, CUDA.jl 5.11.3, Metal.jl 1.9.3,
+KernelAbstractions 0.9.45, Enzyme 0.13.216, GPUCompiler 1.15.2 and LLVM.jl 9.13.2.
+`CLM → CLMAMDGPUExt` precompiles and the registration tier passes 9/9. The device
+tier is skipped. `AMDGPU.devices`, `AMDGPU.device!(::HIPDevice)`, `ROCBackend`
+and `AMDGPU.Device.@device_override` all still exist in 2.7.
+
+## KernelAbstractions 0.10 — not installable with Enzyme yet (checked 2026-11-01)
+
+Widening the compat to `KernelAbstractions = "0.9.45, 0.10"` and asking Pkg for
+0.10 fails to resolve:
+
+```
+ERROR: Unsatisfiable requirements detected for package LLVM [929cbde3]:
+ ├─restricted by compatibility requirements with KernelAbstractions [63c18a36] to versions: 10.0.0 - 10.4.2
+ │   └─restricted to versions 0.10 by an explicit requirement, leaving only versions: 0.10.0 - 0.10.4
+ └─restricted by compatibility requirements with Enzyme [7da242da] to versions: 9.8.1 - 9.13.2 — no versions left
+   └─restricted to versions 0.13.152 - 0.13 by CLM [4245f2e0], leaving only versions: 0.13.152 - 0.13.216
+```
+
+- Every KA 0.10.x requires LLVM.jl 10. Every released Enzyme.jl, up to 0.13.216
+  (and Enzyme.jl `main`, `LLVM = "9.10"`), requires LLVM.jl 9. Enzyme is a hard
+  dependency of CLM, so no environment can hold both. The Enzyme upgrade is open as
+  [EnzymeAD/Enzyme.jl#3741](https://github.com/EnzymeAD/Enzyme.jl/pull/3741)
+  ("Upgrade to LLVM.jl 10").
+- KA 0.10 also **removed its Enzyme extension**
+  ([JuliaGPU/KernelAbstractions.jl#824](https://github.com/JuliaGPU/KernelAbstractions.jl/pull/824),
+  "Temporarily remove Enzyme support"). Restoring it is
+  [#826](https://github.com/JuliaGPU/KernelAbstractions.jl/issues/826), which is still
+  open (milestone 0.10.1, but 0.10.4 shipped without it). CLM's reverse AD depends on
+  that extension. The `_gpu_launch!` rule in `src/infrastructure/enzyme_rules.jl`
+  forwards to KA's own kernel reverse rule, and Enzyme on CPU differentiates KA
+  kernel launches through the same extension. Even once LLVM.jl resolves, CLM
+  cannot move until #826 lands.
+- Other KA 0.10 breaking changes that CLM would have to review then (from the
+  v0.10.0 release notes): the `CPU` backend is now an OpenCL backend running on
+  PoCL, so every CPU kernel and the CPU Enzyme path go through a new compiler.
+  `CPU(; static=true)`, `isgpu`, `@ka_code_llvm` and `@ka_code_typed` are removed.
+  `GPU` is deprecated (CLM's `_kcall!` dispatches on `backend isa KA.GPU`).
+  `@private` arrays become a `PrivateArray`. `@Const` arguments are constified at
+  launch. Backends must implement KernelInterface 0.4.
+- KA 0.10 also means moving every GPU package at once, because each pins one KA
+  minor. KA 0.10 needs CUDA.jl 6.5+ (CUDACore 6.5, so compat `CUDA = "5, 6"`),
+  Metal.jl 1.12+, and AMDGPU.jl 2.9+.
+
+Not tested, because the environment cannot be built: the CPU kernel tests and
+CPU/CUDA/Metal reverse AD under KA 0.10. Re-check when Enzyme.jl releases with
+LLVM.jl 10 support and KA has merged #826.
 
 ## Untested (needs a ROCm device)
 
