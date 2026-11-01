@@ -29,7 +29,7 @@ CLMCUDAExt = "CUDA"
 CLMMetalExt = "Metal"
 
 [compat]
-AMDGPU = "1"
+AMDGPU = "1, 2"
 Adapt = "4.6.0"
 Atomix = "1"
 CUDA = "5"

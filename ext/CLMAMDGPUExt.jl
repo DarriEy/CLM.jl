@@ -58,7 +58,8 @@ function __init__()
         () -> AMDGPU.ROCBackend(),              # ka_backend
         () -> AMDGPU.functional();              # functional
         device_count = () -> length(AMDGPU.devices()),
-        bind_device  = idx -> AMDGPU.device!(AMDGPU.devices()[idx + 1]),
+        bind_device  = idx -> (devs = AMDGPU.devices();
+                               AMDGPU.device!(devs[CLM._device_list_slot(idx, length(devs))])),
     )
     return nothing
 end
