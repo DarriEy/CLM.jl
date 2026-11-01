@@ -82,6 +82,32 @@ function _restart_registry_biogeophys()
             i -> i.temperature.t_ref2m_patch,
             (i, d) -> i.temperature.t_ref2m_patch .= d),
 
+        # --- LUNA acclimation state (PhotosynthesisMod.F90:1066-1101, use_luna) ---
+        # The last-valid pair is what LUNA falls back to on days it skips
+        # (LunaMod.F90:491-495); without it a restarted leafless patch reverts to
+        # the InitAllocate seed (30/60). Empty when use_luna is off -> skipped.
+        _rv2("vcmx25_z", "patch", "levcan",
+            i -> i.photosyns.vcmx25_z_patch,
+            (i, d) -> i.photosyns.vcmx25_z_patch .= d),
+        _rv2("jmx25_z", "patch", "levcan",
+            i -> i.photosyns.jmx25_z_patch,
+            (i, d) -> i.photosyns.jmx25_z_patch .= d),
+        _rv2("vcmx25_z_last_valid_patch", "patch", "levcan",
+            i -> i.photosyns.vcmx25_z_last_valid_patch,
+            (i, d) -> i.photosyns.vcmx25_z_last_valid_patch .= d),
+        _rv2("jmx25_z_last_valid_patch", "patch", "levcan",
+            i -> i.photosyns.jmx25_z_last_valid_patch,
+            (i, d) -> i.photosyns.jmx25_z_last_valid_patch .= d),
+        _rv2("pnlc_z", "patch", "levcan",
+            i -> i.photosyns.pnlc_z_patch,
+            (i, d) -> i.photosyns.pnlc_z_patch .= d),
+        _rv2("enzs_z", "patch", "levcan",
+            i -> i.photosyns.enzs_z_patch,
+            (i, d) -> i.photosyns.enzs_z_patch .= d),
+        _rv1("gpp24", "patch",
+            i -> i.photosyns.fpsn24_patch,
+            (i, d) -> i.photosyns.fpsn24_patch .= d),
+
         # --- Ozone (prognostic uptake dose; accumulates across the run) ---
         _rv1("O3UPTAKESUN", "patch",
             i -> i.ozone.o3uptakesun_patch,

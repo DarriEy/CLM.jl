@@ -112,6 +112,32 @@
         @test dst.canopystate.htop_patch == src.canopystate.htop_patch
     end
 
+    # --- LUNA acclimation state round-trips (incl. the last-valid fallback pair) ---
+    mktempdir() do dir
+        file = joinpath(dir, "clm_restart_luna.nc")
+        luna!(inst) = begin
+            ps = inst.photosyns; nlc = CLM.NLEVCAN
+            for f in (:vcmx25_z_patch, :jmx25_z_patch, :vcmx25_z_last_valid_patch,
+                      :jmx25_z_last_valid_patch, :pnlc_z_patch, :enzs_z_patch)
+                size(getfield(ps, f)) == (np, nlc) || setfield!(ps, f, fill(NaN, np, nlc))
+            end
+            length(ps.fpsn24_patch) == np || (ps.fpsn24_patch = fill(NaN, np))
+            inst
+        end
+        src = luna!(build_inst()); ps = src.photosyns
+        fill_seq!(ps.vcmx25_z_patch, 40.0);  fill_seq!(ps.jmx25_z_patch, 80.0)
+        fill_seq!(ps.vcmx25_z_last_valid_patch, 120.0)
+        fill_seq!(ps.jmx25_z_last_valid_patch, 260.0)
+        fill_seq!(ps.pnlc_z_patch, 0.0); fill_seq!(ps.enzs_z_patch, 1.0)
+        fill_seq!(ps.fpsn24_patch, 3.0)
+        CLM.write_restart(src, file; bounds=bounds)
+        dst = luna!(build_inst()); CLM.read_restart!(dst, file; bounds=bounds)
+        for f in (:vcmx25_z_patch, :jmx25_z_patch, :vcmx25_z_last_valid_patch,
+                  :jmx25_z_last_valid_patch, :pnlc_z_patch, :enzs_z_patch, :fpsn24_patch)
+            @test getfield(dst.photosyns, f) == getfield(src.photosyns, f)
+        end
+    end
+
     # --- NaN <-> fill-value round-trips as NaN (not the sentinel) ---
     mktempdir() do dir
         file = joinpath(dir, "clm_restart_nan.nc")

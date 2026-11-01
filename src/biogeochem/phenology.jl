@@ -177,22 +177,30 @@ const _min_critical_daylength_onset = 39300.0 / 2.0
 # mask is a BitVector (CPU backend); read-only args are @Const.
 # ==========================================================================
 
-# --- cn_phenology_climate!: 10-day running-mean t2m accumulator ----------
+# --- cn_phenology_climate!: annual-mean t2m accumulator ----------------
+# Fortran CNPhenologyClimate (CNPhenologyMod.F90:577-580):
+#   tempavg_t2m(p) = tempavg_t2m(p) + t_ref2m(p) * (fracday/dayspyr)
+# i.e. a running SUM that reaches the annual mean of t_ref2m after one year;
+# CNAnnualUpdate (CNAnnualUpdateMod.F90:86-87) copies it to annavg_t2m and resets it to
+# 0. annavg_t2m sets crit_onset_gdd (CNPhenologyMod.F90:1019-1020). The port used an
+# exponential relaxation with a one-day time constant, so annavg_t2m became the
+# late-December temperature: on Bow's cold start the year-2 grass onset threshold
+# fell from ~80 to ~18 GDD and the grass leafed out 17 days early.
 @kernel function _phen_climate_kernel!(tempavg_t2m, @Const(mask),
-                                       @Const(t_ref2m), fracday,
+                                       @Const(t_ref2m), fracday_over_dayspyr,
                                        spval)
     T = eltype(tempavg_t2m)
     p = @index(Global)
     @inbounds if mask[p]
         if t_ref2m[p] != spval
-            tempavg_t2m[p] = tempavg_t2m[p] + fracday * (t_ref2m[p] - tempavg_t2m[p])
+            tempavg_t2m[p] = tempavg_t2m[p] + t_ref2m[p] * fracday_over_dayspyr
         end
     end
 end
 
-phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, spval) =
+phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, dayspyr, spval) =
     _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m,
-             eltype(tempavg_t2m)(fracday), eltype(tempavg_t2m)(spval))
+             eltype(tempavg_t2m)(fracday / dayspyr), eltype(tempavg_t2m)(spval))
 
 # --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
 # --- device-view structs for _phen_evergreen_kernel! ---------------------
@@ -1131,7 +1139,7 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
 
     if phase == 1
         cn_phenology_climate!(pstate, mask_soilp, temperature, cnveg_state, crop,
-                              patch_data, pftcon)
+                              patch_data, pftcon; dayspyr = dayspyr)
 
         cn_evergreen_phenology!(pstate, mask_soilp, pftcon, cnveg_state,
                                 cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
@@ -1221,12 +1229,14 @@ function cn_phenology_climate!(pstate::PhenologyState,
                                cnveg_state::CNVegStateData,
                                crop::CropData,
                                patch_data::PatchData,
-                               pftcon::PftConPhenology)
+                               pftcon::PftConPhenology;
+                               dayspyr::Real = 365.0)
     fracday = pstate.fracday
 
-    # Update tempavg_t2m accumulator (10-day running mean) — per-patch independent.
+    # Update the tempavg_t2m annual-mean accumulator (get_curr_days_per_year in
+    # Fortran) — per-patch independent.
     phen_climate!(cnveg_state.tempavg_t2m_patch, mask_soilp,
-                  temperature.t_ref2m_patch, fracday, SPVAL)
+                  temperature.t_ref2m_patch, fracday, dayspyr, SPVAL)
 
     return nothing
 end

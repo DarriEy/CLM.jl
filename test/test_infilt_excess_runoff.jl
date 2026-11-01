@@ -36,7 +36,11 @@
     @testset "Params defaults" begin
         p = CLM.InfiltrationExcessRunoffParams()
         @test p.e_ice == 6.0
-        @test CLM.infilt_excess_params.e_ice == 6.0
+        # The module instance holds whatever the last params file set (readParameters!
+        # writes e_ice into both it and soilhydrology_params, as CTSM's
+        # InfiltrationExcessRunoffMod and SoilHydrologyMod each read it); with no file
+        # read yet both are the 6.0 default. Either way they must agree.
+        @test CLM.infilt_excess_params.e_ice == CLM.soilhydrology_params.e_ice
     end
 
     # ------------------------------------------------------------------
