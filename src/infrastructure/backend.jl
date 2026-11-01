@@ -84,6 +84,23 @@ function _register_backend!(sym::Symbol, adapt_to::Function, ka_backend::Functio
 end
 
 """
+    _device_list_slot(idx::Integer, ndev::Integer) -> Int
+
+Map CLM's 0-based device index `idx` (the rank convention used by
+`clm_bind_local_gpu!` / `bind_device`) to the 1-based position in a backend's
+device list (`Metal.devices()`, `AMDGPU.devices()`). Out-of-range indices throw
+an `ArgumentError`, matching CUDA.jl, whose 0-based `CUDA.device!(idx)` errors
+for `idx ∉ 0:ndevices()-1`; `clm_bind_local_gpu!` already wraps with
+`rank % ndev`, so only a direct out-of-range call reaches the error.
+"""
+function _device_list_slot(idx::Integer, ndev::Integer)
+    0 <= idx < ndev || throw(ArgumentError(
+        "device index $idx out of range: CLM device indices are 0-based and " *
+        "$ndev device(s) are visible (valid: 0:$(ndev - 1))"))
+    return Int(idx) + 1
+end
+
+"""
     clm_backend() -> Symbol
 
 The currently selected compute backend (`:cpu` by default).

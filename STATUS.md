@@ -131,7 +131,16 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   previously been skipped silently because the guard looked for `@device_override` in the wrong module.
   `test/test_amdgpu_backend.jl` gates a one-step `clm_drv!` device-vs-CPU run on
   `AMDGPU.functional()`, and `scripts/gpu_validate_amdgpu.jl` is the one-command ROCm validator.
-  AMDGPU.jl 2.x needs KernelAbstractions 0.10, so compat is `AMDGPU = "1"`. See `docs/GPU_AMDGPU.md`.
+  Compat is `AMDGPU = "1, 2"`. AMDGPU.jl 2.0–2.8 use KA 0.9, and 2.7.0 resolves and registers next to
+  CUDA 5 and Metal. AMDGPU.jl 2.9+ needs KernelAbstractions 0.10, which cannot be installed yet:
+  KA 0.10 needs LLVM.jl 10, every released Enzyme needs LLVM.jl 9
+  ([Enzyme.jl#3741](https://github.com/EnzymeAD/Enzyme.jl/pull/3741)), and KA 0.10 dropped its Enzyme
+  extension ([KA#824](https://github.com/JuliaGPU/KernelAbstractions.jl/pull/824); restoring it is
+  [KA#826](https://github.com/JuliaGPU/KernelAbstractions.jl/issues/826), still open). See `docs/GPU_AMDGPU.md`.
+- **Metal multi-GPU bind** — fixed 2026-11-01. `CLMMetalExt` had indexed `Metal.devices()` with
+  CLM's 0-based index. Device 0 therefore raised a BoundsError that was only logged, and rank 0 on a
+  Mac never selected its GPU. It now uses `CLM._device_list_slot` (`idx + 1`; out of range raises
+  `ArgumentError`, like `CUDA.device!`). Checked on Apple Silicon by `test/test_metal_backend.jl`.
 - **Reverse-AD on GPU** — ✅ the CUDA kernel-shape suite passes **4/4**. Atomic scatter is
   differentiated at the host launch boundary: `scatter_add_1d!` keeps the portable Atomix
   primal, while its reverse rule launches a race-free gather kernel instead of asking Enzyme
@@ -190,7 +199,9 @@ Re-run the README recipe once the CTSM case is restored.
    reverse are both FD-validated on 1.12 (done). Only the PHS-coupled path (`use_hydrstress`, its
    own `_psn_phs_*` KA kernels) remains — the same AD-mode host-loop transform extends to it.
 2. ~~Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware~~ — **done** (§4). Remaining
-   GPU breadth is real AMD hardware and multi-GPU/MPI execution. The one-step whole-driver
+   GPU breadth is real AMD hardware and multi-GPU/MPI execution. KernelAbstractions 0.10 (and with
+   it CUDA.jl 6.5+, Metal.jl 1.12+, AMDGPU.jl 2.9+) waits on Enzyme LLVM.jl 10 support and KA#826
+   (`docs/GPU_AMDGPU.md`). The one-step whole-driver
    CUDA reverse gradient now matches CPU and FD (§4).
 3. **Restore the CTSM case + run the pdump verify** → broaden T1 parity beyond the Bow anchor.
 4. ~~Multi-year T4 streamflow at depth~~ — **done** (§2.5: all 7 gauges, full multi-year
