@@ -9,8 +9,9 @@
 #   SEED=rand|ones   rand (default): independent uniform(0.5,1.5) seed per entry, the
 #                    same on both backends, so cancelling adjoints cannot hide behind
 #                    a uniform seed; ones: the original all-ones seed
-let src = read(joinpath(pwd(), "scripts", "gpu_ad_reverse_driver_validate.jl"), String)
-    include_string(Main, replace(src, "exit(main())" => ""))
+let path = joinpath(@__DIR__, "gpu_ad_reverse_driver_validate.jl"), src = read(path, String)
+    # pass the path so the gate's @__DIR__ (input defaults) resolves to scripts/
+    include_string(Main, replace(src, "exit(main())" => ""), path)
 end
 
 function leaves!(out, x, path, seen)
