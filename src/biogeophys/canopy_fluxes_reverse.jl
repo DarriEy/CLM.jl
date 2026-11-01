@@ -68,10 +68,11 @@ function cf_rev_init!(b, aux)
     _launch!(_cf_init_zero_kernel!, sc.del_arr, sc.efeb, sc.wtlq0, sc.wtalq, sc.wtgq,
         sc.wtaq0, sc.obuold, b.energyflux.dhsdt_canopy_patch, b.energyflux.eflx_sh_stem_patch,
         fp; ndrange = fn)
+    cp_stem = fill!(similar(sc.rstem), zero(FT))
     _launch!(_cf_no_biomass_kernel!, sc.frac_rad_abs_by_stem, sc.sa_leaf, sc.sa_stem,
-        sc.sa_internal, sc.cp_leaf, zeros(FT, length(sc.rstem)), sc.rstem, fp, cs.elai_patch,
+        sc.sa_internal, sc.cp_leaf, cp_stem, sc.rstem, fp, cs.elai_patch,
         cs.esai_patch; ndrange = fn)
-    fv.rb1_patch[1:length(sc.air)] .= zero(FT)
+    _zero_all!(view(fv.rb1_patch, 1:length(sc.air)))
     if aux.use_psn
         _launch!(_cf_daylength_kernel!, sc.dayl_factor, fp, pd.gridcell, fc.dayl, fc.max_dayl;
             ndrange = fn)
@@ -90,7 +91,7 @@ function cf_rev_init!(b, aux)
         t_grnd=tp.t_grnd_col, forc_q=fc.q, qg=b.waterdiagbulk.qg_col, forc_th=fc.th)
     lwq_g = CfLwqG(; forc_pco2=fc.pco2, forc_po2=fc.po2, forc_u=fc.u_grc, forc_v=fc.v_grc)
     let be = _kernel_backend(sc.air)
-        _cf_longwave_qsat_kernel!(be)(lwq_out, lwq_p, lwq_c, lwq_g, sc.nmozsgn,
+        _kcall!(_cf_longwave_qsat_kernel!, be, lwq_out, lwq_p, lwq_c, lwq_g, sc.nmozsgn,
             fp, pd.column, pd.gridcell, convert(FT, canopy_fluxes_params.wind_min); ndrange = fn)
         KA.synchronize(be)
     end
@@ -422,13 +423,17 @@ function compositional_reverse!(phases, b, seed_bang!)
         end
         db = Enzyme.make_zero(b)
         seed_bang!(db, b)
+        verbose = get(ENV, "CLM_REVERSE_VERBOSE", "0") == "1"
         for k in length(phases):-1:1
             entry = phases[k]; f, cargs = entry[1], entry[2]
             viewfn = length(entry) == 3 ? entry[3] : identity
             bk = deepcopy(checkpoints[k])
+            t0 = time()
             Enzyme.autodiff(revmode, f, Enzyme.Const,
                             Enzyme.Duplicated(viewfn(bk), viewfn(db)),
                             map(Enzyme.Const, cargs)...)
+            verbose && (println("  reverse phase ", k, "/", length(phases), " ", f,
+                                " ", round(time() - t0; digits = 1), " s"); flush(stdout))
         end
         return db
     finally
@@ -511,8 +516,10 @@ end
 
 # Advance a bundle forward through steps[lo+1 .. hi] (0-indexed steps lo..hi-1), in place.
 function _advance_steps!(steps, b, lo::Int, hi::Int)
-    for s in (lo + 1):hi, (f, cargs) in steps[s]
-        f(b, cargs...)
+    for s in (lo + 1):hi, entry in steps[s]
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(b), cargs...)
     end
     return b
 end

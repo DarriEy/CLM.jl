@@ -544,7 +544,7 @@ function building_temperature!(col::ColumnData, lun::LandunitData,
                    mk(), mk(), mk(), mk(), mk(), mk(), mk())
 
     be = _kernel_backend(t_soisno)
-    _bt_gather_kernel!(be)(gath, col.zi, col.z, t_soisno, tssbef, tk,
+    _kcall!(_bt_gather_kernel!, be, gath, col.zi, col.z, t_soisno, tssbef, tk,
         col.landunit, col.itype, lun.urbpoi, mask_nolakec, nlevurb_jj;
         ndrange = length(mask_nolakec))
     KA.synchronize(be)
@@ -562,7 +562,7 @@ function building_temperature!(col::ColumnData, lun::LandunitData,
         energyflux.eflx_building_lun, energyflux.eflx_urban_ac_lun,
         energyflux.eflx_urban_heat_lun, energyflux.eflx_ventilation_lun)
 
-    _bt_solve_kernel!(be)(out, lin, gath, a_scr, res_scr, mask_urbanl, scal,
+    _kcall!(_bt_solve_kernel!, be, out, lin, gath, a_scr, res_scr, mask_urbanl, scal,
         hac_active, urban_explicit_ac; ndrange = nl)
     KA.synchronize(be)
 

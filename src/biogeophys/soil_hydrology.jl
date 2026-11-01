@@ -278,12 +278,12 @@ soilhyd_surf_runoff!(qflx_surf, mask, qflx_sat_excess_surf, qflx_infl_excess_sur
                                                     @Const(qflx_floodc),
                                                     icol_roof::Int, icol_road_imperv::Int,
                                                     icol_sunwall::Int, icol_shadewall::Int,
-                                                    joff::Int, pondmx_urban, dtime)
+                                                    joff::Int, @Const(realpar))
     c = @index(Global)
     @inbounds if mask_urban[c]
         T = eltype(qflx_surf)
-        dt = T(dtime)
-        pmx = T(pondmx_urban)
+        dt = realpar[2]
+        pmx = realpar[1]
         if col_itype[c] == icol_roof || col_itype[c] == icol_road_imperv
             if col_snl[c] < 0
                 qflx_surf[c] = max(zero(T), qflx_rain_plus_snomelt[c])
@@ -304,13 +304,14 @@ soilhyd_surf_runoff_urban!(qflx_surf, xs_urban, mask_urban, col_itype, col_snl,
                            qflx_rain_plus_snomelt, h2osoi_liq, qflx_liqevap_from_top_layer,
                            qflx_floodc, icol_roof::Int, icol_road_imperv::Int,
                            icol_sunwall::Int, icol_shadewall::Int, pondmx_urban, dtime;
-                           joff::Int = varpar.nlevsno) =
+                           joff::Int = varpar.nlevsno) = begin
+    realpar = _to_backend_like(qflx_surf, eltype(qflx_surf),
+        eltype(qflx_surf)[pondmx_urban, dtime])
     _launch!(_soilhyd_surf_runoff_urban_kernel!, qflx_surf, xs_urban, mask_urban,
              col_itype, col_snl, qflx_rain_plus_snomelt, h2osoi_liq,
              qflx_liqevap_from_top_layer, qflx_floodc, icol_roof, icol_road_imperv,
-             icol_sunwall, icol_shadewall, joff,
-             convert(eltype(qflx_surf), pondmx_urban),
-             convert(eltype(qflx_surf), dtime))
+             icol_sunwall, icol_shadewall, joff, realpar)
+end
 
 # ---- update_urban_ponding! : ponding state on urban surfaces ----
 @kernel function _soilhyd_urban_ponding_kernel!(h2osoi_liq, @Const(mask_urban),
@@ -675,19 +676,20 @@ end
 Adapt.@adapt_structure _WTOutDV
 
 @kernel function _water_table_kernel!(zwt_out, odv, @Const(idv), @Const(mask),
-        nlevsoi::Int, joff::Int, joff_zi::Int, dtime, aq_sp_yield_min, tfrz, denh2o, denice,
+        nlevsoi::Int, joff::Int, joff_zi::Int, @Const(realpar),
         recompute_frost_table::Bool)
     c = @index(Global)
     @inbounds if mask[c]
         T = eltype(zwt_out)
-        aqy   = T(aq_sp_yield_min)
+        dtime = realpar[1]
+        aqy   = T(realpar[2])
         e3    = T(1.0e3)
         thou  = T(1000.0)
         zr    = zero(T)
         on    = one(T)
-        TFRZl = T(tfrz)
-        DH2O  = T(denh2o)
-        DICE  = T(denice)
+        TFRZl = T(realpar[3])
+        DH2O  = T(realpar[4])
+        DICE  = T(realpar[5])
 
         # ---- init drainage fluxes ----
         odv.qflx_drain[c]         = zr
@@ -831,9 +833,10 @@ function soilhyd_water_table!(odv, idv, mask, nlevsoi::Int, joff::Int, joff_zi::
     # Convert all scalar reals to the working precision of the device arrays so no
     # Float64 reaches the Float32-only Metal backend (byte-identical on Float64 CPU).
     T = eltype(odv.zwt)
-    _launch!(_water_table_kernel!, odv.zwt, odv, idv, mask, nlevsoi, joff, joff_zi,
-             T(dtime), T(aq_sp_yield_min), T(tfrz), T(denh2o), T(denice),
-             recompute_frost_table;
+    realpar = _to_backend_like(odv.zwt, T,
+        T[dtime, aq_sp_yield_min, tfrz, denh2o, denice])
+    _launch!(_water_table_kernel!, odv.zwt, odv, idv, mask,
+             nlevsoi, joff, joff_zi, realpar, recompute_frost_table;
              ndrange = length(mask))
 end
 

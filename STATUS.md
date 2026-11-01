@@ -137,8 +137,26 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   primal, while its reverse rule launches a race-free gather kernel instead of asking Enzyme
   to differentiate Atomix's CAS loop. Forward-vs-reverse and CUDA-vs-CPU errors are both
   exactly 0 for scatter; the other probes remain at ≤2.22e-16 cross-AD and ≤1.11e-16 device
-  parity. Whole-driver CUDA reverse is still pending migration of embedded per-thread scatter
-  sites to launch-level operations and an end-to-end gradient gate. Enzyme has no Metal device
+  parity. **Whole-driver CUDA reverse — ✅ gradient matches CPU and FD**
+  (`scripts/gpu_ad_reverse_driver_validate.jl`, branch `ad/cuda-reverse-driver`, RTX 5070 Ti):
+  one timestep of canopy (2 Newton iterations) → soil temperature → surface hydrology → soil
+  water → water table → hydrology_no_drainage, 36 device phases, gives dL/d(t_grnd[1]) =
+  **-3.50231505 on CUDA and on CPU (absdiff 2.8e-14)**, Richardson FD of the CUDA forward
+  rel 4.8e-10. The earlier -1.3e-14 was KernelAbstractions' GPU kernel reverse re-reading
+  its primal inputs from the live arrays at reverse time, after a later launch in the same
+  differentiated call had overwritten them (the soil-temperature extraction overwrites the
+  `t_soisno` its RHS kernels read). GPU launches now go through a launch-level Enzyme rule
+  that copies the launch's arguments before the launch and reverses KA's kernel against that
+  copy. Cost: one device copy of each launch's arguments held until the reverse reaches it,
+  and scalar kernel arguments (`dtime`, constants) get a zero derivative on GPU (the same
+  rule works around an upstream KA/Enzyme rejection of Active scalar GPU kernel arguments;
+  repro `scripts/gpu_ad_active_scalar_repro.jl`). An earlier suspicion that Enzyme's reverse
+  of the batched band solve was wrong on CUDA did not hold (raw-kernel vs exact adjoint
+  2e-16, `scripts/cuda_band_solve_reverse_check.jl`); no custom rule is used for it. Also
+  fixed: host-built canopy aux, the missing `jtop/jbot` setup (illegal address), the
+  in-kernel atomic SNICAR scatter. Details: `docs/GPU_REVALIDATION_2026-10_CUDA.md`. A
+  fresh process takes ~4.5 h for the gate, mostly compiling the CUDA reverse. CPU reverse
+  is unchanged. Enzyme has no Metal device
   support; Metal's primal Atomix path is unchanged.
 
 ## 5. Fortran parity breadth
@@ -163,7 +181,7 @@ Re-run the README recipe once the CTSM case is restored.
 | Forward AD | ✅ validated | — |
 | Reverse AD | ✅ whole-driver incl. **photosynthesis** (`use_psn=1`) on 1.10 **and 1.12** | PHS-coupled (`use_hydrstress`) reverse + whole-*function* canopy still 1.12-blocked (latter avoided by decomposition) |
 | GPU Metal | ✅ validated 0.0 | — |
-| GPU CUDA | ✅ real-hardware validated | synthetic + CN + portable real-NetCDF mixed soil/lake full-driver gates pass |
+| GPU CUDA | ✅ real-hardware validated | synthetic + CN + portable real-NetCDF mixed soil/lake full-driver gates pass; whole-driver one-step reverse AD matches CPU and FD (§4); a fresh process takes ~4.5 h, mostly compiling |
 | GPU AMD | ⚠️ extension loads/registers; no hardware run | device-gated test + `scripts/gpu_validate_amdgpu.jl` ready; unrun on real AMD hardware |
 
 ## Concrete remaining work to claim "fully validated AD + GPU"
@@ -172,7 +190,8 @@ Re-run the README recipe once the CTSM case is restored.
    reverse are both FD-validated on 1.12 (done). Only the PHS-coupled path (`use_hydrstress`, its
    own `_psn_phs_*` KA kernels) remains — the same AD-mode host-loop transform extends to it.
 2. ~~Run `scripts/gpu_validate_cuda.jl` on real NVIDIA hardware~~ — **done** (§4). Remaining
-   GPU breadth is real AMD hardware, multi-GPU/MPI execution, and CUDA reverse-mode AD.
+   GPU breadth is real AMD hardware and multi-GPU/MPI execution. The one-step whole-driver
+   CUDA reverse gradient now matches CPU and FD (§4).
 3. **Restore the CTSM case + run the pdump verify** → broaden T1 parity beyond the Bow anchor.
 4. ~~Multi-year T4 streamflow at depth~~ — **done** (§2.5: all 7 gauges, full multi-year
    windows, real uncalibrated KGE/NSE). Remaining there is *calibration* for real KGE skill

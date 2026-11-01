@@ -43,6 +43,23 @@ hydrond_snow_persistence!(snow_persistence, mask_snow, mask_nosnow, dtime, bound
     _launch!(_hydrond_snow_persistence_kernel!, snow_persistence, mask_snow, mask_nosnow,
              eltype(snow_persistence)(dtime), first(bounds); ndrange = length(bounds))
 
+@kernel function _hydrond_snow_persistence_pullback_kernel!(dsnow_persistence,
+                                                             @Const(mask_nosnow),
+                                                             cmin::Int)
+    i = @index(Global)
+    @inbounds begin
+        c = cmin + i - 1
+        # no-snow overwrites persistence with zero, so its input cotangent is
+        # zero. Snow adds a constant and inactive columns are identity maps;
+        # both retain the incoming cotangent already stored in the shadow.
+        mask_nosnow[c] && (dsnow_persistence[c] = zero(eltype(dsnow_persistence)))
+    end
+end
+
+hydrond_snow_persistence_pullback!(dsnow_persistence, mask_nosnow, bounds) =
+    _launch!(_hydrond_snow_persistence_pullback_kernel!, dsnow_persistence,
+             mask_nosnow, first(bounds); ndrange = length(bounds))
+
 # --- update_snowdp! : per-column, fully independent ---
 @kernel function _hydrond_snowdp_kernel!(snowdp, @Const(snow_depth), @Const(frac_sno_eff),
                                          cmin::Int)

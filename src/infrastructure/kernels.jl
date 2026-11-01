@@ -81,18 +81,55 @@ const _DEFER_GPU_SYNC = Ref(false)
 @inline _to_backend_like(::Array, ::Type, v::AbstractArray{<:Integer}) = v
 @inline _to_backend_like(proto, ::Type{FT}, v::AbstractArray{<:Integer}) where {FT} =
     typeof(proto).name.wrapper(v)
+# A host BitArray mask (the CPU filter type) is a host prototype too: returning `v`
+# avoids rebuilding the constants as a BitArray (`BitArray(FT.(v))` would truncate to Bool).
+@inline _to_backend_like(::BitArray, ::Type, v::AbstractArray) = v
+@inline _to_backend_like(::BitArray, ::Type, v::AbstractArray{<:Integer}) = v
 
 @inline function _launch!(kernel, out, args...; ndrange = length(out))
     (ndrange isa Integer ? ndrange == 0 : prod(ndrange) == 0) && return out
     backend = _kernel_backend(out)
     if kconst_check_mode() === :off   # compile-time constant (see kconst_check.jl)
-        kernel(backend)(out, args...; ndrange = ndrange)
+        _kcall!(kernel, backend, out, args...; ndrange = ndrange)
     else
         _kconst_checked_launch!(kernel, backend, ndrange, (out, args...))
     end
     (_DEFER_GPU_SYNC[] && !(backend isa KA.CPU)) || KA.synchronize(backend)
     return out
 end
+
+# Launch `kernel(backend)(args...; ndrange)`. On a GPU backend the launch goes through
+# `_gpu_launch!`, which carries a launch-level Enzyme reverse rule
+# (src/infrastructure/enzyme_rules.jl): KernelAbstractions' own Enzyme extension
+# rejects any scalar kernel argument Enzyme annotates Active ("Active kernel arguments
+# not supported on GPU"), and Enzyme annotates every Float64 scalar argument Active —
+# even a literal or a value read from a Const argument. Primal behaviour is identical
+# on every backend; the CPU path is the plain launch.
+@inline function _kcall!(kernel, backend, args...; ndrange)
+    if backend isa KA.GPU
+        _gpu_launch!(kernel, backend, ndrange, args...)
+    else
+        kernel(backend)(args...; ndrange = ndrange)
+    end
+    return nothing
+end
+
+# Fill `x` with `v`. Host arrays use `fill!` (unchanged). Device arrays use a CLM
+# kernel launched through `_kcall!`, so the fill value reaches the GPU as a scalar
+# kernel argument the `_gpu_launch!` reverse rule handles; GPUArrays' generic
+# `fill!` / scalar broadcast kernels hit the "Active kernel arguments" error under
+# CUDA reverse AD (seen for `bmatrix .= 0` / `fill!(bmatrix, 0)` in set_matrix!).
+@kernel function _fill_value_kernel!(out, v)
+    i = @index(Global)
+    @inbounds out[i] = v
+end
+_fill_dev!(x::Union{Array,BitArray}, v) = fill!(x, v)
+_fill_dev!(x, v) = _launch!(_fill_value_kernel!, x, v; ndrange = length(x))
+
+_gpu_launch_inner!(kernel, backend, ndrange, args...) =
+    (kernel(backend)(args...; ndrange = ndrange); KA.synchronize(backend); nothing)
+_gpu_launch!(kernel, backend, ndrange, args...) =
+    _gpu_launch_inner!(kernel, backend, ndrange, args...)
 
 # Defer per-op GPU syncs across `f` (one sync at the end). No-op deferral for the CPU
 # backend / a nothing backend, so the host path is unchanged. `backend` is the region's

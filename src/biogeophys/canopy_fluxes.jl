@@ -265,7 +265,7 @@ function cf_resist_update!(frictionvel, canopystate, temperature, waterdiagbulk,
     T = eltype(tlbef)
     let be = _kernel_backend(tlbef)
         if fn > 0   # empty exposed-veg filter (glacier/bare) -> skip; KA Metal ndrange==0 divides by zero
-            _cf_resist_kernel!(be)(o, inp, filterp, patch_data.column, patch_data.gridcell,
+            _kcall!(_cf_resist_kernel!, be, o, inp, filterp, patch_data.column, patch_data.gridcell,
                 patch_data.itype, active, T(csoilc_val), use_undercanopy_stability,
                 use_biomass_heat_storage, use_lch4, T(params.cv), T(params.a_coef),
                 T(params.a_exp), T(VKC), T(GRAV), T(NU_PARAM), T(RIA_CANOPY),
@@ -739,7 +739,7 @@ function cf_energy_update!(canopystate, energyflux, frictionvel, temperature,
     _efsh_dbg = efsh_dbg === nothing ? similar(wtg) : efsh_dbg
     let be = _kernel_backend(wtg)
         if fn > 0   # empty exposed-veg filter (glacier/bare) -> skip; KA Metal ndrange==0 divides by zero
-            _cf_energy_kernel!(be)(o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
+            _kcall!(_cf_energy_kernel!, be, o1, o2, ep1, ep2, ec, em, sc, nmozsgn,
                 _dc2_dbg, _efsh_dbg,
                 filterp, active, patch_data.column,
                 col_data.snl, canopystate.frac_veg_nosno_patch,

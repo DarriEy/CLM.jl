@@ -50,12 +50,42 @@ include(joinpath(@__DIR__, "testdata.jl"))
     @test length(ph) == 14
     @test length(CLM.driver_rev_phases(bounds, filt, config; canopy_aux=(;), n_canopy=1)) == 15
     @test length(CLM.driver_rev_phases(bounds, filt, config; include_surface=false)) == 4
+
+    # The device (CUDA) assembly: 17 allocation-free soil-temperature phases (setup +
+    # 16 physics, the solve split into rhs/matrix/init/band/extract) + 10 surface-
+    # hydrology + soil_water + water_table + hydrology_no_drainage = 30; the canopy is
+    # flattened too (init + friction + resistance + energy = 4 for one energy-only
+    # iteration). Without surface: 20. The urban ground-heat-flux phase is left out of
+    # the list when the domain has no urban column (nu = 1 fewer).
+    nu = CLM.soiltemp_rev_aux(bounds, filt).has_urban ? 0 : 1
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true)) == 30 - nu
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
+        canopy_aux=(; use_psn=false), n_canopy=1)) == 34 - nu
+    @test length(CLM.driver_rev_phases(bounds, filt, config; device=true,
+        include_surface=false)) == 20 - nu
+
+    # The decomposed soil-temperature phases reproduce production soil_temperature!
+    # exactly (the CUDA reverse runs the decomposition, the CPU driver the monolith).
+    let bdec = CLM.driver_rev_bundle(deepcopy(inst)), imono = deepcopy(inst)
+        for entry in CLM.soiltemp_driver_rev_phases(bounds, filt)
+            entry[1](entry[3](bdec), entry[2]...)
+        end
+        CLM.soiltemp_rev_phase!((; inst=imono), CLM.soiltemp_rev_aux(bounds, filt))
+        for f in (:t_soisno_col, :t_grnd_col, :t_h2osfc_col)
+            a = getfield(bdec.inst.temperature, f); m = getfield(imono.temperature, f)
+            @test isequal(a, m)
+        end
+        @test isequal(bdec.inst.energyflux.eflx_fgr_col, imono.energyflux.eflx_fgr_col)
+        @test isequal(bdec.inst.energyflux.eflx_gnet_patch, imono.energyflux.eflx_gnet_patch)
+    end
     @test length(CLM.surface_hydrology_rev_phases(bounds, filt)) == 10
 
     # run the full assembled chain forward on the shared-inst bundle.
     b = CLM.driver_rev_bundle(inst)
-    for (f, cargs) in ph
-        f(b, cargs...)
+    for entry in ph
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(b), cargs...)
     end
     @test b.inst === inst                                   # bundle aliases the inst
     @test isfinite(b.inst.temperature.t_soisno_col[c0, j1])
@@ -96,11 +126,35 @@ include(joinpath(@__DIR__, "testdata.jl"))
     full = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4)
     @test length(full) == 15
     bf = CLM.driver_rev_bundle(deepcopy(inst))
-    for (f, cargs) in full
-        f(bf, cargs...)
+    for entry in full
+        f, cargs = entry[1], entry[2]
+        viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(bf), cargs...)
     end
     @test all(isfinite, bf.inst.temperature.t_veg_patch)
     @test isfinite(bf.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
+
+    # The device decomposition (forced onto the host) reproduces the host chain's
+    # forward state: the CUDA reverse differentiates the former, the CPU the latter.
+    fulld = CLM.driver_rev_phases(bounds, filt, config; canopy_aux=caux, n_canopy=4,
+                                  inst=inst, device=true)
+    @test length(fulld) == 43 - nu
+    bd = CLM.driver_rev_bundle(deepcopy(inst))
+    for entry in fulld
+        entry[1](entry[3](bd), entry[2]...)
+    end
+    ws_h, ws_d = bf.inst.water.waterstatebulk_inst.ws, bd.inst.water.waterstatebulk_inst.ws
+    for (a, d) in ((bf.inst.temperature.t_soisno_col, bd.inst.temperature.t_soisno_col),
+                   (bf.inst.temperature.t_grnd_col, bd.inst.temperature.t_grnd_col),
+                   (bf.inst.temperature.t_veg_patch, bd.inst.temperature.t_veg_patch),
+                   (ws_h.h2osoi_liq_col, ws_d.h2osoi_liq_col),
+                   (ws_h.h2osoi_vol_col, ws_d.h2osoi_vol_col),
+                   (ws_h.h2osfc_col, ws_d.h2osfc_col),
+                   (bf.inst.soilhydrology.zwt_col, bd.inst.soilhydrology.zwt_col))
+        m = isfinite.(a)
+        @test isequal(m, isfinite.(d))
+        @test maximum(abs.(a[m] .- d[m]); init=0.0) <= 1e-10 * max(maximum(abs, a[m]; init=0.0), 1.0)
+    end
 
     # canopy_rev_aux(use_psn=true) sources the real LUNA/albedo arrays + the canopy block
     # with photosynthesis runs forward finite (stomatal feedback path; reverse validated on
@@ -139,13 +193,19 @@ include(joinpath(@__DIR__, "testdata.jl"))
     phref = CLM.driver_rev_phases(bounds, filt, config;
                                   canopy_aux=CLM.canopy_rev_aux(bref_drv.inst, bounds, filt),
                                   n_canopy=Nauto)
-    for (f, cargs) in phref; f(bref_drv, cargs...); end
+    for entry in phref
+        f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(bref_drv), cargs...)
+    end
     @test all(isfinite, bref_drv.inst.temperature.t_veg_patch)
     @test isfinite(bref_drv.inst.water.waterstatebulk_inst.ws.h2osoi_vol_col[c0, CLM.varpar.nlevsno+4])
     @test isa(CLM.clm_drv_reverse!, Function)                # top-level entry exists
     # the default seed touches the soil thermal profile (active soil layers only).
     bseed = CLM.driver_rev_bundle(deepcopy(inst))
-    for (f, cargs) in phref; f(bseed, cargs...); end
+    for entry in phref
+        f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(bseed), cargs...)
+    end
     dbz = CLM.Enzyme.make_zero(bseed)
     CLM._default_drv_seed!(dbz, bseed)
     @test dbz.inst.temperature.t_soisno_col[c0, j1] ≈ 2*bseed.inst.temperature.t_soisno_col[c0, j1] atol=1e-12
@@ -163,7 +223,10 @@ include(joinpath(@__DIR__, "testdata.jl"))
     Nstep = 3; steps = [ph for _ in 1:Nstep]
     bflat = CLM.driver_rev_bundle(deepcopy(inst)); after1 = NaN
     for (s, phs) in enumerate(steps)
-        for (f, cargs) in phs; f(bflat, cargs...); end
+        for entry in phs
+            f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+            f(viewfn(bflat), cargs...)
+        end
         s == 1 && (after1 = bflat.inst.temperature.t_soisno_col[c0, jdiff])
     end
     tfin = bflat.inst.temperature.t_soisno_col[c0, jdiff]
@@ -173,9 +236,17 @@ include(joinpath(@__DIR__, "testdata.jl"))
     # multistep_reverse!'s forward sweep), then recompute the last step from its checkpoint.
     btl = CLM.driver_rev_bundle(deepcopy(inst)); cps = Any[]
     for phs in steps
-        push!(cps, deepcopy(btl)); for (f, cargs) in phs; f(btl, cargs...); end
+        push!(cps, deepcopy(btl))
+        for entry in phs
+            f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+            f(viewfn(btl), cargs...)
+        end
     end
-    blast = deepcopy(cps[end]); for (f, cargs) in steps[end]; f(blast, cargs...); end
+    blast = deepcopy(cps[end])
+    for entry in steps[end]
+        f, cargs = entry[1], entry[2]; viewfn = length(entry) == 3 ? entry[3] : identity
+        f(viewfn(blast), cargs...)
+    end
     @test btl.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
     @test blast.inst.temperature.t_soisno_col[c0, jdiff] ≈ tfin atol=1e-12
 
