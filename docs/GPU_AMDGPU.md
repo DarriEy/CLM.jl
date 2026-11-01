@@ -164,6 +164,12 @@ KernelAbstractions #826, and this branch with `KernelAbstractions = "0.9.45, 0.1
   `get_group_id`), so no KA kernel can be reversed on the PoCL CPU yet. With all the local
   patches, `test_enzyme_smoke.jl` (non-KA reverse) passes, and `test_photosynthesis_reverse.jl`
   crashes in the GC inside Enzyme's `julia_allocator`.
+- **GPU packages: Enzyme #3741 pins `GPUArrays = "10, 11"`.** Metal.jl 1.12 and CUDA.jl
+  6.5 need GPUArrays 12, so neither resolves next to it. With that compat widened locally,
+  Enzyme's `EnzymeGPUArraysExt` fails to load (`mapreducedim!` is gone in GPUArrays 12).
+  Metal.jl 1.12.0 on KA 0.10.4 then passes `test_metal_backend.jl` 10/10,
+  `test_ka010_readiness.jl` 36/36, `scripts/gpu_validate.jl` 3/3 and
+  `scripts/gpu_validate_soiltemp_e2e.jl` 9/9 (forward only; Enzyme has no Metal support).
 - **#826 also drops the CPU support for `Active` scalar kernel arguments that 0.9 had**
   ("Active kernel arguments not supported" now on `CPU()` as well). Once the rest works,
   CPU reverse through `_launch!` needs the same launch-level rule as the GPU path
