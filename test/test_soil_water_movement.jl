@@ -237,24 +237,33 @@
     end
 
     @testset "init_soilwater_movement" begin
-        # Default should work fine
-        cfg = CLM.init_soilwater_movement()
-        @test cfg.soilwater_movement_method == CLM.ZENGDECKER_2009
-        @test cfg.lower_boundary_condition == CLM.BC_AQUIFER
+        # These checks assume use_bedrock = false (the BC_AQUIFER / BC_FLUX configs are
+        # refused under use_bedrock); pin it, since an earlier test file in the same
+        # process (any clm_initialize! with use_bedrock = true) leaves it set.
+        _saved = CLM.varctl.use_bedrock
+        CLM.varctl.use_bedrock = false
+        try
+            # Default should work fine
+            cfg = CLM.init_soilwater_movement()
+            @test cfg.soilwater_movement_method == CLM.ZENGDECKER_2009
+            @test cfg.lower_boundary_condition == CLM.BC_AQUIFER
 
-        # ZD09 with non-aquifer should error
-        @test_throws ErrorException CLM.init_soilwater_movement(
-            soilwater_movement_method = CLM.ZENGDECKER_2009,
-            lower_boundary_condition = CLM.BC_FLUX
-        )
+            # ZD09 with non-aquifer should error
+            @test_throws ErrorException CLM.init_soilwater_movement(
+                soilwater_movement_method = CLM.ZENGDECKER_2009,
+                lower_boundary_condition = CLM.BC_FLUX
+            )
 
-        # Moisture form with flux BC should work
-        cfg2 = CLM.init_soilwater_movement(
-            soilwater_movement_method = CLM.MOISTURE_FORM,
-            lower_boundary_condition = CLM.BC_FLUX
-        )
-        @test cfg2.soilwater_movement_method == CLM.MOISTURE_FORM
-        @test cfg2.lower_boundary_condition == CLM.BC_FLUX
+            # Moisture form with flux BC should work
+            cfg2 = CLM.init_soilwater_movement(
+                soilwater_movement_method = CLM.MOISTURE_FORM,
+                lower_boundary_condition = CLM.BC_FLUX
+            )
+            @test cfg2.soilwater_movement_method == CLM.MOISTURE_FORM
+            @test cfg2.lower_boundary_condition == CLM.BC_FLUX
+        finally
+            CLM.varctl.use_bedrock = _saved
+        end
     end
 
     # ------------------------------------------------------------------

@@ -27,6 +27,8 @@
 #         [fortran_h0.nc | fates_planthydro_fortran.csv] [nsteps=240] [out.csv]
 #   (no argument => the committed fates_planthydro_fortran.csv)
 #   ... fates_planthydro_parity.jl export <fortran_h0.nc> [out.csv]   # refresh the extract
+#   FATES_HYDRO_SOLVER=2 ... fates_planthydro_parity.jl fates_planthydro_picard_fortran.csv
+#                                                        # 2-D Picard solver (README)
 using CLM, Printf, Dates, NCDatasets
 include(joinpath(@__DIR__, "..", "..", "fates_fortran_parity.jl"))   # FSURDAT, FPARAM, FORCDIR, START, DTIME
 
@@ -52,11 +54,17 @@ const ALL_FIELDS = (PLANT..., SCALARS...,
                     (f * "_" * string(j) for f in LAYERED for j in 1:NLAY)..., PERPFT...,
                     PERPFT_DEMOG...)
 
+# FATES_HYDRO_SOLVER=1|2|3 selects the plant-hydraulics solver (unset: the parameter
+# file's fates_hydro_solver, 1). Score a solver against a Fortran run made with the
+# same value in its parameter file.
+const HYDRO_SOLVER = haskey(ENV, "FATES_HYDRO_SOLVER") ? parse(Int, ENV["FATES_HYDRO_SOLVER"]) : nothing
+
 function build_hydro()
+    fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
-        use_fates=true, use_fates_planthydro=true, start_date=START, dtime=Int(DTIME),
-        use_bedrock=false)
+        use_fates=true, use_fates_planthydro=true, fates_hydro_solver=HYDRO_SOLVER,
+        start_date=START, dtime=Int(DTIME), use_bedrock=false)
     for g in 1:bounds.endg
         isfinite(inst.gridcell.latdeg[g]) || (inst.gridcell.latdeg[g] = inst.gridcell.lat[g]*180/π)
         isfinite(inst.gridcell.londeg[g]) || (inst.gridcell.londeg[g] = inst.gridcell.lon[g]*180/π)
@@ -121,7 +129,15 @@ function hydro_record(inst, c)
     end
     wf = inst.water.waterfluxbulk_inst
     r["QVEGT"] = wf.wf.qflx_tran_veg_col[c]
-    # BTRAN / LH: wtcol-weighted over the column's FATES vegetated patches ('veg' l2g).
+    # BTRAN / LH: the history p2g, wtcol-weighted over EVERY active patch of the
+    # column. BTRAN's l2g_scale_type='veg' (EnergyFluxType.F90:663) selects the
+    # istsoil/istcrop LANDUNITS (subgridAveMod.F90:1077-1079), not FATES's patch%is_veg,
+    # and p2c skips only inactive / zero-weight / spval patches (subgridAveMod.F90:203-204).
+    # So the FATES bare-ground patch counts: its btran is 0, not spval, because
+    # BareGroundFluxes zeroes btran on the no-exposed-veg filter
+    # (BareGroundFluxesMod.F90:284), and wrap_btran writes only patchi+1..patchi+npatch
+    # (clmfates_interfaceMod.F90:2509-2519). Host BTRAN is therefore the vegetated
+    # patches' btran times their canopy fraction (sum of canopy_fraction_pa, ~0.62 here).
     pch = inst.patch; ef = inst.energyflux
     wb = 0.0; bt = 0.0; lh = 0.0; wl = 0.0
     for p in eachindex(pch.column)
@@ -129,8 +145,9 @@ function hydro_record(inst, c)
         pch.active[p] || continue
         w = pch.wtcol[p]
         lh += w * ef.eflx_lh_tot_patch[p]; wl += w
-        if pch.is_veg[p] && isfinite(ef.btran_patch[p])
-            bt += w * ef.btran_patch[p]; wb += w
+        b = ef.btran_patch[p]
+        if isfinite(b) && b != CLM.SPVAL
+            bt += w * b; wb += w
         end
     end
     r["BTRAN"] = wb > 0 ? bt / wb : NaN

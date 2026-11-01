@@ -26,6 +26,11 @@
 using Test
 include(joinpath(@__DIR__, "testdata.jl"))
 Base.include(@__MODULE__, joinpath(@__DIR__, "..", "scripts", "fates_multiyear_compare.jl"))
+using CLM
+# The FATES harness build sets the Fortran case snow namelist (module-global Refs,
+# fates_case_snow_namelist!); restore the port defaults when this file is done.
+_snow_ctrl_saved = (CLM.WIND_DEPENDENT_SNOW_DENSITY[], CLM.OVERBURDEN_COMPACTION_METHOD[],
+                    CLM.NEW_SNOW_DENSITY[])
 
 const _FMY_REF = joinpath(@__DIR__, "..", "scripts", "validation", "fates_fortran_parity",
                           "fates_multiyear_fortran_daily.csv.gz")
@@ -79,3 +84,6 @@ const _FMY_REF = joinpath(@__DIR__, "..", "scripts", "validation", "fates_fortra
         end
     end
 end
+
+CLM.WIND_DEPENDENT_SNOW_DENSITY[], CLM.OVERBURDEN_COMPACTION_METHOD[], CLM.NEW_SNOW_DENSITY[] =
+    _snow_ctrl_saved

@@ -698,6 +698,23 @@ function init_soilwater_movement(; kwargs...)
 end
 
 """
+    soilwater_movement_config(use_aquifer_layer::Bool) -> SoilWaterMovementConfig
+
+The configuration the live driver (and its reverse mirror) runs the soil-water solve
+with: Zeng-Decker 2009 + BC_AQUIFER when `use_aquifer_layer`, otherwise the moisture
+form + BC_ZERO_FLUX, and in both cases `e_ice` from the params file
+(`soilhydrology_params.e_ice`). CTSM's SoilWaterMovementMod reads its own copy of
+`e_ice` (SoilWaterMovementMod.F90:104) and uses it in IceImpedance (:2144); the
+struct default of 6.0 (the stock clm5 value) must not stand in for a calibrated file.
+"""
+function soilwater_movement_config(use_aquifer_layer::Bool)
+    e = soilhydrology_params.e_ice
+    return use_aquifer_layer ? SoilWaterMovementConfig(e_ice = e) :
+        SoilWaterMovementConfig(soilwater_movement_method = MOISTURE_FORM,
+                                lower_boundary_condition = BC_ZERO_FLUX, e_ice = e)
+end
+
+"""
     use_aquifer_layer(cfg::SoilWaterMovementConfig) -> Bool
 
 Return true if an aquifer layer is used (lower boundary is aquifer or water table).

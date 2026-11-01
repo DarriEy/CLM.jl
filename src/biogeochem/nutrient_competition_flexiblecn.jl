@@ -791,8 +791,12 @@ end
             if cphase == cphase_leafemerge_in
                 grain_flag[p] = zero(T)
             elseif cphase == cphase_grainfill_in
-                is_soybean = (ivt == ntmp_soybean || ivt == nirrig_tmp_soybean ||
-                              ivt == ntrp_soybean || ivt == nirrig_trp_soybean)
+                # ntmp_soybean & co. are 0-based Fortran PFT indices (23/24/77/78):
+                # compare the 0-based itype, not the 1-based ivt (which matched
+                # itype 22 = irrigated winter wheat and missed irrigated soybean).
+                it0 = itype[p]
+                is_soybean = (it0 == ntmp_soybean || it0 == nirrig_tmp_soybean ||
+                              it0 == ntrp_soybean || it0 == nirrig_trp_soybean)
                 if astem[p] == astemf[ivt] || !is_soybean
                     if grain_flag[p] == zero(T)
                         t1 = one(T) / dt

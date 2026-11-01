@@ -26,9 +26,14 @@ Selects the method and variant index for water and carbon root profiles.
 
 Ported from module-level variables in `RootBiophysMod.F90`.
 """
+# Defaults are the clm5_0 NAMELIST defaults (namelist_defaults_ctsm.xml:184,188:
+# rooting_profile_method_water = rooting_profile_method_carbon = 1, Jackson 1996).
+# RootBiophysMod.F90:64-65's code fallback is Zeng 2001 (0), which is only the clm4_5
+# namelist value for water; every clm5_0 case (and every reference lnd_in) runs Jackson.
+# The parity harnesses had to set Jackson by hand to match Fortran.
 Base.@kwdef mutable struct RootingProfileConfig
-    rooting_profile_method_water::Int    = ZENG_2001_ROOT  # method for water root profile
-    rooting_profile_method_carbon::Int   = ZENG_2001_ROOT  # method for carbon root profile
+    rooting_profile_method_water::Int    = JACKSON_1996_ROOT  # method for water root profile
+    rooting_profile_method_carbon::Int   = JACKSON_1996_ROOT  # method for carbon root profile
     rooting_profile_varindex_water::Int  = 1               # variant index for water (Jackson only)
     rooting_profile_varindex_carbon::Int = 2               # variant index for carbon (Jackson only)
 end
@@ -41,8 +46,8 @@ const rooting_profile_config = RootingProfileConfig()
 
 """
     init_rootprof!(config::RootingProfileConfig;
-                   method_water::Int=ZENG_2001_ROOT,
-                   method_carbon::Int=ZENG_2001_ROOT,
+                   method_water::Int=JACKSON_1996_ROOT,
+                   method_carbon::Int=JACKSON_1996_ROOT,
                    varindex_water::Int=1,
                    varindex_carbon::Int=2)
 
@@ -52,8 +57,8 @@ In the Fortran version this reads from a namelist; here we accept keyword argume
 Ported from `init_rootprof` in `RootBiophysMod.F90`.
 """
 function init_rootprof!(config::RootingProfileConfig;
-                        method_water::Int=ZENG_2001_ROOT,
-                        method_carbon::Int=ZENG_2001_ROOT,
+                        method_water::Int=JACKSON_1996_ROOT,
+                        method_carbon::Int=JACKSON_1996_ROOT,
                         varindex_water::Int=1,
                         varindex_carbon::Int=2)
     config.rooting_profile_method_water    = method_water

@@ -124,7 +124,8 @@ function _snapshot_globals()
                 CLM.bareground_fluxes_params, CLM.canopy_fluxes_params,
                 CLM.surface_resistance_params, CLM.soilstate_params,
                 CLM.cn_phenology_params, CLM.waterdiagbulk_params,
-                CLM.params_inst, CLM.luna_params_inst, CLM.pftcon)
+                CLM.params_inst, CLM.luna_params_inst, CLM.pftcon,
+                CLM.infilt_excess_params)
         snap[obj] = Dict(f => deepcopy(getfield(obj, f)) for f in fieldnames(typeof(obj)))
     end
     snap[:refs] = (CLM.SURFACE_WATER_PC[], CLM.SURFACE_WATER_MU[],
@@ -166,6 +167,14 @@ end
             for (name, getter, expected) in _PARAM_CASES
                 @test getter() ≈ expected
             end
+            # e_ice is read by three CTSM modules (SoilHydrologyMod, SoilWaterMovementMod,
+            # InfiltrationExcessRunoffMod). The infiltration-excess qinmax and the
+            # Richards-solve config must see the params-file value, not their own 6.0.
+            @test CLM.infilt_excess_params.e_ice ≈ 3.5
+            @test CLM.soilwater_movement_config(false).e_ice ≈ 3.5
+            @test CLM.soilwater_movement_config(true).e_ice ≈ 3.5
+            @test CLM.soilwater_movement_config(false).lower_boundary_condition == CLM.BC_ZERO_FLUX
+            @test CLM.soilwater_movement_config(true).lower_boundary_condition == CLM.BC_AQUIFER
         end
     finally
         _restore_globals!(snap)

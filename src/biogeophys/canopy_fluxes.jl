@@ -1886,6 +1886,17 @@ function canopy_fluxes_core!(
             # the eltype AND the container (device array stays a device array).
             crop_pft_s = isempty(crop_pft) ? zero(medlynslope_pft) : crop_pft
 
+            # Photosynthesis runs on the patches still iterating, as in CTSM: it is
+            # called with the shrinking `filterp` (CanopyFluxesMod.F90:1125-1137,
+            # filter rebuilt at :1435-1444). Calling it on every exposed-veg patch kept
+            # updating qflx_tran_veg (PHS) of patches that had already converged, so
+            # their final transpiration no longer matched the transpiration their
+            # ecidif cap and energy balance were computed with. On Bow that left a
+            # 1.7e-7 mm snocan residue where Fortran empties the canopy, and the
+            # canopy-snow albedo term (fcansno ~ snocan^0.15) turned it into a 0.6 %
+            # SABV error for the next four hours.
+            mask_iter = mask_exposedvegp .& active
+
           if use_hydrstress
             # --- PHS photosynthesis (plant hydraulic stress) ---
             # forc_rho is COLUMN-indexed inside the PHS solver (forc_rho[c]); pass
@@ -1906,7 +1917,7 @@ function canopy_fluxes_core!(
                 c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
                 mbbopt_pft, medlynintercept_pft, medlynslope_pft,
                 pftcon.froot_leaf, pftcon.root_radius, pftcon.root_density,
-                crop_pft_s, ivt_vec, patch_data.column, mask_exposedvegp, bounds_patch,
+                crop_pft_s, ivt_vec, patch_data.column, mask_iter, bounds_patch,
                 _froot_c2, _froot_c2, soilstate.k_soil_root_patch,
                 soilstate.root_conductance_patch, soilstate.soil_conductance_patch,
                 soilstate.rootfr_patch,
@@ -1932,7 +1943,7 @@ function canopy_fluxes_core!(
                 c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
                 mbbopt_pft, medlynintercept_pft, medlynslope_pft,
                 ivt_vec, patch_data.column,
-                mask_exposedvegp, bounds_patch, "sun";
+                mask_iter, bounds_patch, "sun";
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
                 leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft_s,
                 overrides=overrides)
@@ -1950,7 +1961,7 @@ function canopy_fluxes_core!(
                 c3psn_pft, leafcn_pft, flnr_pft, fnitr_pft, slatop_pft,
                 mbbopt_pft, medlynintercept_pft, medlynslope_pft,
                 ivt_vec, patch_data.column,
-                mask_exposedvegp, bounds_patch, "sha";
+                mask_iter, bounds_patch, "sha";
                 use_cn=use_cn, use_luna=use_luna, use_c13=use_c13,
                 leaf_mr_vcm=leaf_mr_vcm, crop_pft=crop_pft_s,
                 vcmaxcint_sun=vcmaxcint_sun_patch,
@@ -1970,11 +1981,11 @@ function canopy_fluxes_core!(
               fractionation!(photosyns, forc_pbot_patch, forc_pco2_grc,
                   parsun_z_patch, nrad_patch, c3psn_pft, ivt_vec,
                   patch_data.column, patch_data.gridcell,
-                  mask_exposedvegp, bounds_patch, "sun"; use_hydrstress=use_hydrstress)
+                  mask_iter, bounds_patch, "sun"; use_hydrstress=use_hydrstress)
               fractionation!(photosyns, forc_pbot_patch, forc_pco2_grc,
                   parsha_z_patch, nrad_patch, c3psn_pft, ivt_vec,
                   patch_data.column, patch_data.gridcell,
-                  mask_exposedvegp, bounds_patch, "sha"; use_hydrstress=use_hydrstress)
+                  mask_iter, bounds_patch, "sha"; use_hydrstress=use_hydrstress)
           end
 
         end

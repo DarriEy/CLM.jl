@@ -704,8 +704,11 @@ end
                 grain_flag[p] = zero(eltype(grain_flag))  # setting to 0 while in phase 2
             elseif crop_phase_vals[p] == cphase_grainfill_in
                 # Beth's retranslocation of leafn, stemn, rootn to organ
-                is_soybean = (ivt == ntmp_soybean || ivt == nirrig_tmp_soybean ||
-                              ivt == ntrp_soybean || ivt == nirrig_trp_soybean)
+                # ntmp_soybean & co. are 0-based Fortran PFT indices: compare the
+                # 0-based itype, not the 1-based ivt.
+                it0 = itype[p]
+                is_soybean = (it0 == ntmp_soybean || it0 == nirrig_tmp_soybean ||
+                              it0 == ntrp_soybean || it0 == nirrig_trp_soybean)
 
                 if astem[p] == astemf[ivt] || !is_soybean
                     if grain_flag[p] == zero(eltype(grain_flag))

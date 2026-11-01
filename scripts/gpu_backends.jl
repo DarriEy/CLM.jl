@@ -70,10 +70,15 @@ function detect_backend()
     result = nothing
     # NOTE: `CuArray`, not `cu` — `cu(A)` silently demotes Float64 to Float32, which
     # would compare a Float32 device result against the Float64 CPU reference.
+    # `CLM_GPU_BACKEND=<name>` (e.g. "AMDGPU") pins detection to that one package,
+    # so a vendor-specific driver (gpu_validate_amdgpu.jl) can't silently validate a
+    # different GPU on a box with several. Unset = first functional wins (unchanged).
+    pin = get(ENV, "CLM_GPU_BACKEND", "")
     for (name, ctor, FT) in (("CUDA",   :CuArray,  Float64),
                              ("AMDGPU", :ROCArray, Float64),
                              ("oneAPI", :oneArray, Float64),
                              ("Metal",  :MtlArray, Float32))
+        isempty(pin) || lowercase(pin) == lowercase(name) || continue
         m = _try_backend(Symbol(name))
         m === nothing && continue
         _BACKEND_MODULE[] = m

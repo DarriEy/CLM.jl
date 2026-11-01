@@ -82,6 +82,32 @@ function _restart_registry_biogeophys()
             i -> i.temperature.t_ref2m_patch,
             (i, d) -> i.temperature.t_ref2m_patch .= d),
 
+        # --- LUNA acclimation state (PhotosynthesisMod.F90:1066-1101, use_luna) ---
+        # The last-valid pair is what LUNA falls back to on days it skips
+        # (LunaMod.F90:491-495); without it a restarted leafless patch reverts to
+        # the InitAllocate seed (30/60). Empty when use_luna is off -> skipped.
+        _rv2("vcmx25_z", "patch", "levcan",
+            i -> i.photosyns.vcmx25_z_patch,
+            (i, d) -> i.photosyns.vcmx25_z_patch .= d),
+        _rv2("jmx25_z", "patch", "levcan",
+            i -> i.photosyns.jmx25_z_patch,
+            (i, d) -> i.photosyns.jmx25_z_patch .= d),
+        _rv2("vcmx25_z_last_valid_patch", "patch", "levcan",
+            i -> i.photosyns.vcmx25_z_last_valid_patch,
+            (i, d) -> i.photosyns.vcmx25_z_last_valid_patch .= d),
+        _rv2("jmx25_z_last_valid_patch", "patch", "levcan",
+            i -> i.photosyns.jmx25_z_last_valid_patch,
+            (i, d) -> i.photosyns.jmx25_z_last_valid_patch .= d),
+        _rv2("pnlc_z", "patch", "levcan",
+            i -> i.photosyns.pnlc_z_patch,
+            (i, d) -> i.photosyns.pnlc_z_patch .= d),
+        _rv2("enzs_z", "patch", "levcan",
+            i -> i.photosyns.enzs_z_patch,
+            (i, d) -> i.photosyns.enzs_z_patch .= d),
+        _rv1("gpp24", "patch",
+            i -> i.photosyns.fpsn24_patch,
+            (i, d) -> i.photosyns.fpsn24_patch .= d),
+
         # --- Ozone (prognostic uptake dose; accumulates across the run) ---
         _rv1("O3UPTAKESUN", "patch",
             i -> i.ozone.o3uptakesun_patch,
@@ -173,6 +199,24 @@ function _restart_registry_biogeophys()
         _rv1("HTOP", "patch",
             i -> i.canopystate.htop_patch,
             (i, d) -> i.canopystate.htop_patch .= d),
+
+        # --- Active layer (ActiveLayerMod.F90 Restart) ---
+        # altmax_lastyear(_indx) changes only at the 1 January roll, so a restart
+        # that dropped it would put every later step back on the cold-start index
+        # (0) until the next roll: soil_bgc_vertical_profile! and FATES rooting
+        # depth both read it.
+        _rv1("altmax", "column",
+            i -> i.active_layer.altmax_col,
+            (i, d) -> i.active_layer.altmax_col .= d),
+        _rv1("altmax_lastyear", "column",
+            i -> i.active_layer.altmax_lastyear_col,
+            (i, d) -> i.active_layer.altmax_lastyear_col .= d),
+        _rv1("altmax_indx", "column",
+            i -> i.active_layer.altmax_indx_col,
+            (i, d) -> _set_int!(i.active_layer.altmax_indx_col, d)),
+        _rv1("altmax_lastyear_indx", "column",
+            i -> i.active_layer.altmax_lastyear_indx_col,
+            (i, d) -> _set_int!(i.active_layer.altmax_lastyear_indx_col, d)),
     ]
 end
 

@@ -39,6 +39,12 @@
 # clm_drv!'s update_daylength! left prev_dayl == dayl, ws_flag stuck at 1, and the
 # season-deciduous grass never dropped its leaves. Seeded once now: TLAI Oct-Dec
 # <=5.8e-3 (was 7.5e-2), LEAFC <=0.14 (was 2.1), TOTVEGC <=4.8e-2 (was 8.3e-2).
+# ALIGNMENT FIXED (2026-10-30): the comparison indexed the h0 by day, but record 1 is
+# the startup run's nstep-0 snapshot, so Julia day d was compared with Fortran day d-1;
+# and the orbit was taken from the pre-advance calday (one step behind Fortran). The
+# "grass onset/offset timing" residual (grass LEAFC +20 % Apr, -5 % Oct) was entirely
+# the record offset: aligned, the grass onset and offset fire on the same day and
+# step as Fortran (see docs/DRIVER_DEFAULTS_AUDIT.md, "Follow-up: grass phenology timing").
 #
 # HISTORY — STATUS (2026-06-20): scaffold complete + the comparison framework works, but it
 # surfaced a BLOCKER on the first end-to-end use_cn=true annual run: the soil
@@ -156,6 +162,17 @@ const CN_H0   = joinpath(CN_DIR, "Bow_at_Banff_lumped.clm2.h0.2202-01-02-00000.n
 const CN_FFORC = replace(FFORCING, "clmforc.2003.nc" => "clmforc.2003.nc")  # 2003 forcing
 const FORCE_YEAR = 2003
 const _read_fortran_restart! = getfield(CLM, Symbol("read_fortran_restart!"))
+# The cn_annual reference is a `-bgc bgc -use_case 2000_control` case: its lnd_in has the
+# CTSM namelist defaults int_snow_max = 2000 and baseflow_scalar = 0.001 (and no
+# h2osfcflag, i.e. the default 1), NOT the Bow SP calibration (3113.2227 / 0.0022119554)
+# that this harness used to copy from the SP gate. int_snow_max caps int_snow in
+# FracSnowDuringMelt (SnowCoverFractionSwensonLawrence2012Mod.F90:263), which sets the
+# melt-compaction term ddz3 (SnowHydrologyMod.F90:2003-2035); Bow's int_snow is ~9000 mm,
+# so the cap binds. With the SP value the late-September snowpack did not melt out on
+# day 280 as Fortran's does, ~5 mm SWE carried into the October snow, and the October
+# grass GPP came out 14 % low (docs/DRIVER_DEFAULTS_AUDIT.md).
+const CN_INT_SNOW_MAX     = 2000.0
+const CN_BASEFLOW_SCALAR  = 0.001
 
 # model timestamp → forcing-file timestamp (year replaced; both 2202 & 2003 are 365-day)
 _force_date(d) = DateTime(FORCE_YEAR, Dates.month(d), Dates.day(d), Dates.hour(d),
@@ -178,15 +195,15 @@ function run_cn_annual(; ndays::Int = 365)
     snowage = FSNOWAGE
     (inst, bounds, filt, tm) = CLM.clm_initialize!(; fsurdat = FSURDAT, paramfile = FPARAM,
         start_date = start_date, dtime = 3600, use_cn = true, use_luna = true,
-        use_bedrock = true, use_aquifer_layer = false, h2osfcflag = 0,
+        use_bedrock = true, use_aquifer_layer = false,
         fsnowoptics = isfile(snowopt) ? snowopt : "", fsnowaging = isfile(snowage) ? snowage : "",
-        int_snow_max = 3113.2227)
+        int_snow_max = CN_INT_SNOW_MAX)
     ng, nc, np = bounds.endg, bounds.endc, bounds.endp
     CLM.atm2lnd_read_namelist!(inst.atm2lnd; repartition_rain_snow = true, lapse_rate = 0.006,
         lapse_rate_longwave = 0.032, precip_repartition_nonglc_all_snow_t = 0.0,
         precip_repartition_nonglc_all_rain_t = 2.0, precip_repartition_glc_all_snow_t = -2.0,
         precip_repartition_glc_all_rain_t = 0.0)
-    CLM.init_soil_hydrology_config(baseflow_scalar = 0.0022119554)
+    CLM.init_soil_hydrology_config(baseflow_scalar = CN_BASEFLOW_SCALAR)
     let ds_p = NCDataset(FPARAM, "r")
         scf = inst.scf_method
         haskey(ds_p, "n_melt_coef") && (nmc = Float64(ds_p["n_melt_coef"][1]);
@@ -378,9 +395,17 @@ function run_cn_annual(; ndays::Int = 365)
         acc = Dict(f[1] => 0.0 for f in fields); ns = 0
         for h in 1:24
             cur = start_date + Day(d - 1) + Hour(h - 1)
+            # Orbit from the POST-advance calday, as clm_run! does. Fortran's startup
+            # clock runs nstep 0 at the start time and advances after each clm_drv
+            # (lnd_comp_nuopc.F90:890-891 calday/declin, :903 clm_drv, :921
+            # advance_timestep), so the nstep-k step this loop step matches (the
+            # k-th step of the h0 day) sees calday = start + k*dtime. Using the
+            # pre-advance calday lagged the declination, and so the daylength, by one
+            # step: the season-deciduous grass offset (dayl < crit_dayl) fired one
+            # hour late.
+            CLM.advance_timestep!(tm)
             calday = CLM.get_curr_calday(tm); (declin, _) = CLM.compute_orbital(calday)
-            (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
-            nextsw = calday + 3600.0 / CLM.SECSPDAY
+            nextsw = calday
             # Seed daylength ONCE. clm_drv! (is_first_step=false here) runs
             # update_daylength!, which shifts prev_dayl <- dayl each step
             # (DaylengthMod.F90:192-202), so seed the step BEFORE the first one and
@@ -388,10 +413,10 @@ function run_cn_annual(; ndays::Int = 365)
             # pinned ws_flag at 1, and the season-deciduous grass never dropped its
             # leaves in autumn (CNPhenologyMod.F90:1023-1027, 1182).
             if d == 1 && h == 1
+                (declinm1, _) = CLM.compute_orbital(calday - 3600.0 / CLM.SECSPDAY)
                 (declinm2, _) = CLM.compute_orbital(calday - 2 * 3600.0 / CLM.SECSPDAY)
                 CLM.init_daylength!(inst.gridcell, declinm1, declinm2, CLM.ORB_OBLIQR_DEFAULT, 1:ng)
             end
-            CLM.advance_timestep!(tm)
             CLM.read_forcing_step!(fr, inst.atm2lnd, _force_date(cur), ng, nc)
             CLM.downscale_forcings!(bounds, inst.atm2lnd, inst.column, inst.landunit, inst.topo)
             (yr, mon, dy, tod) = CLM.get_curr_date(tm)
@@ -399,7 +424,7 @@ function run_cn_annual(; ndays::Int = 365)
                 CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
                 nstep = tm.nstep, is_first_step = false,
                 is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
-                is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy,
+                is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = dy, secs = tod,
                 photosyns = inst.photosyns)
             # CN_NANSCAN=1: after every step, report the first non-finite value in the
             # PHS-read/written state on active patches / the soil column.
@@ -492,6 +517,13 @@ function run_cn_annual(; ndays::Int = 365)
         return inst, bounds
     end
     fds = NCDataset(CN_H0, "r")
+    # Align by the record's time stamp, not its index. The startup run writes a
+    # zero-length nstep-0 snapshot as record 1 (time = 0, bounds [0, 0]); the mean
+    # over model day d is the record with time == d (bounds [d-1, d]). Indexing the
+    # records by day compared Julia day d with Fortran day d-1, which showed up as
+    # spurious onset/offset "timing" errors (grass LEAFC +20 % in April, -5 % in
+    # October). Day 365 lives in the next year's file and is skipped.
+    _frec = Dict(round(Int, t) => k for (k, t) in enumerate(Float64.(fds["time"].var[:])))
     mstart = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
     mend   = [31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]
     mons = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
@@ -505,9 +537,10 @@ function run_cn_annual(; ndays::Int = 365)
         for m in 1:12
             d1, d2 = mstart[m], min(mend[m], nrec)
             d1 > nrec && continue
-            jm = mean(@view jd[d1:d2])
-            fvals = [_fv(fds[nm][1, dd]) for dd in d1:d2]; fvals = filter(isfinite, fvals)
-            fm = isempty(fvals) ? NaN : mean(fvals)
+            dds = [dd for dd in d1:d2 if haskey(_frec, dd)]
+            isempty(dds) && continue
+            jm = mean(jd[dds])
+            fm = mean(_fv(fds[nm][1, _frec[dd]]) for dd in dds)
             rel = (isnan(fm) || isnan(jm)) ? NaN : abs(jm - fm) / (1 + abs(fm))
             @printf("  %-3s        %12.4g %12.4g %10.2e\n", mons[m], jm, fm, rel)
         end

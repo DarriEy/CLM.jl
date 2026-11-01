@@ -836,6 +836,16 @@ function clm_drv_core!(config::CLMDriverConfig,
     # here instead.
     if inst.fates !== nothing
         fates_apply_deferred_activation!(inst)
+        # dyn_ED only rewrites patch%wtcol. CTSM then runs
+        # dynSubgrid_wrapup_weight_changes -> compute_higher_order_weights
+        # (dynSubgridDriverMod.F90:313 dyn_ED, :333 wrapup, :389 compute), which
+        # re-derives patch%wtlunit / patch%wtgcell (and col%wtgcell) from the new
+        # wtcol before reweight_wrapup/setFilters (:395). Without it the FATES patches
+        # kept their surfdata wtgcell (an inactive slot kept a nonzero gridcell weight,
+        # a vegetated patch kept a stale one), which every p2g consumer -- history,
+        # lnd2atm, drydep -- reads. FATES never moves landunit weights, so
+        # update_landunit_weights (:387) has nothing to do here.
+        compute_higher_order_weights!(bc, col, lun, pch)
         # setFiltersOneGroup asserts CLUMP-level bounds; in single-clump mode the clump
         # bounds ARE the proc bounds, so present a CLUMP-level view (the mirror of the
         # `_bc_proc` view built for dyn_subgrid below).
@@ -916,9 +926,15 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ========================================================================
     # Specified phenology
     # ========================================================================
+    # interpMonthlyVeg takes the date one step AHEAD: get_curr_date(..., offset=dtime)
+    # (SatellitePhenologyMod.F90:234). The LAI it sets up is used by SatellitePhenology
+    # at the end of this step for the NEXT step's albedo and fluxes. mon/day here are
+    # the current (end-of-step) date, so the daily interpolation weight used to change
+    # one step late, at 24:00 instead of 23:00, every day of the year.
+    (sp_kmo, sp_kda) = sp_interp_date(mon, day, secs, dtime)
     if config.use_cn
         if config.n_drydep > 0
-            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=sp_kmo, kda=sp_kda)
             if needs_read && inst.surfdata !== nothing
                 read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
                     monthly_lai=inst.surfdata.monthly_lai,
@@ -930,7 +946,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         end
     elseif config.use_fates
         if config.use_fates_sp
-            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=sp_kmo, kda=sp_kda)
             if needs_read && inst.surfdata !== nothing
                 read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
                     monthly_lai=inst.surfdata.monthly_lai,
@@ -942,7 +958,7 @@ function clm_drv_core!(config::CLMDriverConfig,
         end
     else
         if doalb || config.n_drydep > 0
-            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=mon, kda=day)
+            months, needs_read = interp_monthly_veg!(inst.satellite_phenology; kmo=sp_kmo, kda=sp_kda)
             if needs_read && inst.surfdata !== nothing
                 read_monthly_vegetation!(inst.satellite_phenology, cs, pch, bc_patch;
                     monthly_lai=inst.surfdata.monthly_lai,
@@ -960,16 +976,22 @@ function clm_drv_core!(config::CLMDriverConfig,
     # ActiveLayer — WIRED
     # The annual roll `altmax_lastyear(_indx) = altmax(_indx)` fires on
     # `mon == 1 .and. day == 1 .and. sec/dtime == 1` (ActiveLayerMod.F90:114, SH
-    # :126), so alt_calc! needs the real seconds-of-day. Passing a constant
-    # `sec = 0` meant that test could never pass: `altmax_lastyear_indx_col` kept
-    # its cold-start 0 (ActiveLayerMod.F90:305) for the whole run. FATES reads it
-    # every day as `max_rooting_depth_index_col` (clmfates_interfaceMod.F90:1131-1132),
-    # so from year 2 on every FATES root profile (drought phenology, btran, litter)
-    # stayed squeezed into the top 2 soil layers. Under FATES the real `secs` is
-    # passed. Non-FATES callers keep `sec = 0` so they stay byte-identical. The same
-    # missed roll affects the CN decomposition profile; that is a separate change.
+    # :126), so alt_calc! needs the real seconds-of-day (end-of-step `secs`, as
+    # get_curr_date returns it). Passing a constant `sec = 0` meant that test could
+    # never pass: `altmax_lastyear_indx_col` kept its cold-start 0
+    # (ActiveLayerMod.F90:305), or its restart value, for the whole run. Its readers:
+    #   * soil_bgc_vertical_profile! (SoilBiogeochemVerticalProfileMod.F90:145-214):
+    #     the N-deposition, N-fixation, leaf/stem and root profiles. With index 0 they
+    #     collapse into the top decomposition layer, so every multi-year CN run used
+    #     the wrong profiles from year 2.
+    #   * FATES `max_rooting_depth_index_col` (clmfates_interfaceMod.F90:1131-1132).
+    #   * calc_root_moist_stress! under perchroot_alt (SoilMoistStressMod.F90:278).
+    #   * litter_vert_transp! reads max(altmax, altmax_lastyear)
+    #     (SoilBiogeochemLittVertTranspMod.F90:192-211).
+    # Every caller must therefore pass `secs` (the drivers do: clm_run!, run_clm,
+    # the parity harnesses). A caller that leaves the default `secs = 0` never rolls.
     alt_calc!(inst.active_layer, filt.soilc, temp, col, grc;
-              mon=mon, day=day, sec=(config.use_fates ? secs : 0), dtime=Int(dtime))
+              mon=mon, day=day, sec=secs, dtime=Int(dtime))
     if (config.use_cn || config.use_fates_bgc) && config.decomp_method != config.no_soil_decomp
         # SoilBiogeochemVerticalProfile — WIRED
         soil_bgc_vertical_profile!(
@@ -1190,16 +1212,18 @@ function clm_drv_core!(config::CLMDriverConfig,
             fire_stream_interp!(inst.cnfire_li2014, inst.cnfire_stream, grc;
                                 calday     = jday + secs / SECSPDAY,
                                 dayspyr    = 365.0,
-                                bounds_grc = bc_grc)
+                                bounds_grc = bc_grc,
+                                year       = year)
         end
     end
     if config.use_fates && fates_fire_data_active(inst.fates_fire_data)
         # clm_fates%InterpFileInputs -> fates_fire_data_method%FireInterp
         # (clm_driver.F90:464, only when fates_spitfire_mode > scalar_lightning).
         fates_fire_interp!(inst.fates_fire_data, grc;
-                           calday     = jday + secs / SECSPDAY,
+                           calday     = jday + (secs + inst.fates_fire_data.tod_offset) / SECSPDAY,
                            dayspyr    = 365.0,
-                           bounds_grc = bc_grc)
+                           bounds_grc = bc_grc,
+                           year       = year)
     end
     # Placeholder: urbantv_interp!(bounds_proc) [urban TV]
 
@@ -1699,6 +1723,22 @@ function clm_drv_core!(config::CLMDriverConfig,
         # 15 °C): the FATES cold-deciduous phenology then reads a constant, wrong 15 °C veg
         # temperature and eventually fires a spurious synchronized leaf-off that never re-
         # flushes → carbon starvation → a phantom boom/bust die-back on multi-year runs.
+        # Fortran clm_fates%WrapUpdateFatesRmean (clmfates_interfaceMod.F90:3227-3245)
+        # first packs EVERY FATES patch's own leaf temperature,
+        #     bc_in(s)%t_veg_pa(ifp) = temperature_inst%t_veg_patch(p),  p = ifp + patchi(c)
+        # so each patch's tveg24 follows its own canopy.
+        let s = 0
+            for c in 1:length(col.is_fates)
+                col.is_fates[c] || continue
+                s += 1
+                s <= inst.fates.nsites || break
+                fbc = inst.fates.bc_in[s]
+                for (ifp, p) in fates_veg_patches(inst.fates.sites[s], c, col)
+                    ifp <= length(fbc.t_veg_pa) || continue
+                    fbc.t_veg_pa[ifp] = inst.temperature.t_veg_patch[p]
+                end
+            end
+        end
         UpdateFatesRMeansTStep(inst.fates.sites, inst.fates.bc_in, inst.fates.bc_out)
 
         # (The per-timestep "hifrq" FATES history fill runs in the FATES dynamics
@@ -2095,12 +2135,12 @@ function clm_drv_core!(config::CLMDriverConfig,
               "This pair yields unbounded drainage that no balance check detects.")
     end
 
-    swm_cfg = if config.use_aquifer_layer
-        SoilWaterMovementConfig()  # ZD09 + BC_AQUIFER
-    else
-        SoilWaterMovementConfig(soilwater_movement_method=MOISTURE_FORM,
-                                lower_boundary_condition=BC_ZERO_FLUX)
-    end
+    # e_ice comes from the params file, as in CTSM (SoilWaterMovementMod.F90:104 reads
+    # its own params_inst%e_ice; IceImpedance at :2144). The struct default (6.0, the
+    # stock clm5 value) used to stand in for it, so a calibrated e_ice never reached
+    # the Richards solve or hk_l (Bow: 3.417 -> frozen-soil hk_l ~35 % low, which the
+    # PHS soil-root conductance and the winter BTRANMN followed).
+    swm_cfg = soilwater_movement_config(config.use_aquifer_layer)
     soil_water!(col,
                 filt.hydrologyc, filt.urbanc,
                 sh, ss, wfb, wsb,
@@ -2279,7 +2319,9 @@ function clm_drv_core!(config::CLMDriverConfig,
             wsb.snow_persistence_col,
             glc_dyn_runoff_routing_grc,
             col.landunit, col.gridcell, lun.itype,
-            filt.allc, filt.do_smb_c, bc_col)  # default glc_snow_persistence_max_days=7300
+            filt.allc, filt.do_smb_c, bc_col;
+            # clm5_0 namelist default 0 (namelist_defaults_ctsm.xml:540); 7300 is clm4_5.
+            glc_snow_persistence_max_days = varctl.glc_snow_persistence_max_days)
     end
 
     # AerosolMasses (non-lake) — WIRED

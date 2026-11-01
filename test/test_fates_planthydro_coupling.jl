@@ -56,7 +56,14 @@ include("testdata.jl")
                             soil2root = copy(inst.fates.bc_out[1].qflx_soil2root_sisl),
                             tran = wf.wf.qflx_tran_veg_col[c],
                             plant = inst.water.waterdiagnosticbulk_inst.total_plant_stored_h2o_col[c],
-                            plant_bc = inst.fates.bc_out[1].plant_stored_h2o_si)
+                            plant_bc = inst.fates.bc_out[1].plant_stored_h2o_si,
+                            bg = inst.column.patchi[c],
+                            btran = copy(inst.energyflux.btran_patch),
+                            wtcol = copy(inst.patch.wtcol),
+                            active = copy(inst.patch.active),
+                            veg = collect(CLM.fates_veg_patches(inst.fates.sites[1], c,
+                                                                inst.column)),
+                            btran_pa = copy(inst.fates.bc_out[1].btran_pa))
             end
             recs, inst = Base.invokelatest(G(:run_julia), nsteps; hook=hook)
             nl = CLM.varpar.nlevsoi
@@ -114,6 +121,26 @@ include("testdata.jl")
             qJ = sum(recs[k]["QVEGT"] for k in 3:nsteps+1)
             qF = sum(ft["QVEGT"][k] for k in 3:nsteps+1)
             @test abs(qJ / qF - 1) < 0.05
+
+            # 3c. host BTRAN. Under planthydro bc_out%btran_pa is the balive-weighted
+            # cohort btran (BTranForHLMDiagnosticsFromCohortHydr), unpacked onto the
+            # FATES vegetated HLM patches only (clmfates_interfaceMod.F90:2509-2519).
+            # The bare-ground patch keeps BareGroundFluxes' btran = 0
+            # (BareGroundFluxesMod.F90:284), and the history BTRAN ('veg' l2g = soil
+            # landunit) averages over it too. The harness used to skip it (is_veg only),
+            # which read 1/canopy_fraction = 1.60x the Fortran from step 1.
+            for i in 2:nsteps
+                s = snaps[i]
+                @test s.active[s.bg] && s.wtcol[s.bg] > 0
+                @test s.btran[s.bg] == 0.0
+                for (ifp, p) in s.veg
+                    @test s.btran[p] == s.btran_pa[ifp]
+                end
+            end
+            @test maximum(rel("BTRAN", k) for k in 3:nsteps+1) < 1e-4   # measured 1.0e-5
+            bJ = sum(recs[k]["BTRAN"] for k in 3:nsteps+1)
+            bF = sum(ft["BTRAN"][k] for k in 3:nsteps+1)
+            @test abs(bJ / bF - 1) < 1e-4                               # measured 1.7e-6
 
             # 4. hydraulic-failure mortality from ftc.
             site = inst.fates.sites[1]

@@ -1321,15 +1321,12 @@ function UpdateFatesRMeansTStep(sites::AbstractVector, bc_in::AbstractVector, bc
     for s in 1:length(sites)
         ifp = 0
         site_npp = 0.0
-        # Representative site veg temperature for the temperature running means. The
-        # port's HLM↔FATES photosynthesis coupling is single-veg-patch (canopy_fluxes
-        # packs only bc_in.t_veg_pa[1] with a SOLVED leaf temperature; the disturbance
-        # patches ifp>1 keep a stale value). All FATES patches at a site share the same
-        # column/gridcell climate and the phenology is site-level, so drive every patch's
-        # tveg24/tveg_lpa/tveg_longterm from the first FINITE t_veg_pa. When none is finite
-        # (e.g. a night/dark step with no solved leaf temperature — as in the unit-test
-        # fixtures) skip the temperature-mean updates entirely, leaving the means at their
-        # init rather than poisoning them with NaN. (NPP + seedling means still update.)
+        # Each patch's tveg24/tveg_lpa/tveg_longterm follows its OWN t_veg_pa(ifp)
+        # (FatesInterfaceMod.F90:2119-2121; the host packs every patch, clm_driver.jl,
+        # clmfates_interfaceMod.F90:3238-3240). A non-finite entry (unit-test fixtures
+        # that drive this without a host leaf temperature) falls back to the first
+        # finite t_veg_pa of the site; when none is finite the temperature means are
+        # left untouched rather than poisoned with NaN (NPP + seedling means still update).
         tveg_rep = NaN
         for k in 1:length(bc_in[s].t_veg_pa)
             if isfinite(bc_in[s].t_veg_pa[k]); tveg_rep = bc_in[s].t_veg_pa[k]; break; end
@@ -1338,10 +1335,12 @@ function UpdateFatesRMeansTStep(sites::AbstractVector, bc_in::AbstractVector, bc
         while cpatch !== nothing
             if cpatch.patchno != 0
                 ifp += 1
-                if isfinite(tveg_rep)
-                    UpdateRMean!(cpatch.tveg24,       tveg_rep)
-                    UpdateRMean!(cpatch.tveg_lpa,      tveg_rep)
-                    UpdateRMean!(cpatch.tveg_longterm, tveg_rep)
+                tv = ifp <= length(bc_in[s].t_veg_pa) ? bc_in[s].t_veg_pa[ifp] : NaN
+                isfinite(tv) || (tv = tveg_rep)
+                if isfinite(tv)
+                    UpdateRMean!(cpatch.tveg24,       tv)
+                    UpdateRMean!(cpatch.tveg_lpa,      tv)
+                    UpdateRMean!(cpatch.tveg_longterm, tv)
                 end
 
                 # Update the seedling-layer running means (TRS regeneration only).

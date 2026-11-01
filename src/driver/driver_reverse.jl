@@ -814,9 +814,7 @@ function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
 end
 
 function soilwater_rev_aux(filt, config; dtime = 1800.0)
-    cfg = config.use_aquifer_layer ? SoilWaterMovementConfig() :
-        SoilWaterMovementConfig(soilwater_movement_method = MOISTURE_FORM,
-                                lower_boundary_condition = BC_ZERO_FLUX)
+    cfg = soilwater_movement_config(config.use_aquifer_layer)  # same as the forward driver
     realpar = _to_backend_like(filt.hydrologyc, Float64,
         Float64[dtime, cfg.e_ice, cfg.dtmin, cfg.xTolerUpper, cfg.xTolerLower,
                 cfg.verySmall, DENH2O, M_TO_MM])

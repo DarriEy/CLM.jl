@@ -427,6 +427,13 @@ function _calib_dual_copy(src, ::Type{D}) where D
                 setfield!(dst, name, D.(sv))
             elseif sv isa Float64
                 setfield!(dst, name, D(sv))
+            elseif (sv isa Array && isbitstype(eltype(sv))) || sv isa BitArray
+                # Non-Float64 STATE arrays (Int / Bool: column.snl, imelt, flags, ...)
+                # must be copied, not shared. Shared by reference, a Dual evaluation
+                # mutated the Float64 source: a snow-layer combine in one run set
+                # inst_f64.column.snl, so the next evaluation from the "same" state
+                # started with snl inconsistent with its (copied) layer arrays.
+                setfield!(dst, name, copy(sv))
             else
                 setfield!(dst, name, sv)
             end

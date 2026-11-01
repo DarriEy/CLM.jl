@@ -368,3 +368,42 @@ TG ≤2.3e-3, and GPP improves (Oct 4.2e-7 → 1.5e-7 abs rel). EFLX_LH_TOT Oct 
 before October: the evergreen needleleaf patch's LEAFC runs low (Apr rel 4.4e-2), and
 the summer TOTVEGC deficit (Sep 3.6e-2) carries through. Regression:
 `test/test_phenology.jl` "season_decid autumn offset (daylength stepping)".
+
+---
+
+## 9. The 1 January active-layer roll on the CN path (2026-10-29)
+
+CTSM rolls last year's active layer on the first step of 1 January:
+`mon==1 .and. day==1 .and. sec/dtime==1` (`ActiveLayerMod.F90:114`; SH 1 July, `:126`).
+`clm_drv!` passed `alt_calc!` the real seconds-of-day only under `use_fates` (#357). On the
+default CN path it passed `sec = 0`, so the roll never fired and `altmax_lastyear_indx_col`
+stayed at its cold-start 0 (or its restart value) for the whole run.
+`soil_bgc_vertical_profile!` integrates the N-fixation, N-deposition, leaf/stem and root
+profiles over `1:altmax_lastyear_indx` (`SoilBiogeochemVerticalProfileMod.F90:145-214`). With
+index 0 every profile falls into the top decomposition layer.
+
+Now every path passes `secs`. That covers `clm_drv!`, `run_clm`, this harness, the drift,
+multisite and longhorizon scripts, and `clm_run!` / `fortran_parity_common`, which already did.
+The native restart also carries `altmax`, `altmax_lastyear`, `altmax_indx` and
+`altmax_lastyear_indx` (ActiveLayerMod `Restart`). Before this change a Julia restart
+dropped them.
+
+**Which runs change.** Only runs that cross 1 January with a last-year index different
+from this year's maximum.
+
+- **Bow from the 2202 BGC restart (this harness, §8): bit-identical.** The restart
+  already has `altmax_lastyear_indx = altmax_indx = 25`, since the column thaws to its
+  42 m bottom. A 2-year version of the run, against a 2202-2203 Fortran h0, is also
+  bit-identical in both years.
+- **Bow from a cold start (2-year CN run vs a 2002-2003 Fortran h0): changed.** Year 1 is
+  bit-identical. In year 2, Fortran rolls `ALTMAX_LASTYEAR` to 5.18 m. Julia now rolls to
+  5.67 m (index 17); before the fix it stayed at 0. ALTMAX y2 rel goes from 0.55 to 0.048.
+  The top-layer share of `nfixation_prof` goes from 1.0 to 0.091. Year-2 annual-mean rel
+  vs Fortran, before → after: TOTSOMC 6.24e-3 → 6.12e-3, TOTSOMC_1m 9.48e-3 → 9.31e-3,
+  SMINN 0.554 → 0.546, and TOTVEGC, TLAI, GPP, NPP and FROOTC all slightly toward
+  Fortran. The cold-start CN state is still far from Fortran in absolute terms (TOTVEGC
+  ≈0.3×, FUN off, N fixation 0), so these are direction checks, not a parity score.
+- **One-year SP multisite runs (`parity_run_domain.jl`, Bow and Stillwater): bit-identical.**
+  Nothing on the SP path reads `altmax_lastyear` (perchroot_alt is off).
+
+Regression: `test/test_cn_active_layer_roll.jl`.

@@ -48,6 +48,7 @@ module cropdumpMod
 
   public :: cropdump_write
   public :: cropdump_soyfix_sweep
+  public :: cropdump_fun_write
 
 contains
 
@@ -258,6 +259,45 @@ contains
     call wp('T_REF2M_MIN',  temperature_inst%t_ref2m_min_patch)
     call wp('T_REF2M_MAX',  temperature_inst%t_ref2m_max_patch)
     call wp('TLAI',         canopystate_inst%tlai_patch)
+    ! FUN-path allocation inputs/outputs (soyfix-fun parity; harmless without FUN)
+    call wp('LAISUN',       canopystate_inst%laisun_patch)
+    call wp('LAISHA',       canopystate_inst%laisha_patch)
+    call wp('NPP_GROWTH',   ccf%npp_growth_patch)
+    call wp('SMINN_TO_PLANT_FUN', cnf%sminn_to_plant_fun_patch)
+    call wp('RETRANSN_TO_NPOOL',  cnf%retransn_to_npool_patch)
+    call wp('FREE_RETRANSN_TO_NPOOL', cnf%free_retransn_to_npool_patch)
+    call wp('SMINN_TO_NPOOL',     cnf%sminn_to_npool_patch)
+    call wp('AVAIL_RETRANSN',     cnf%avail_retransn_patch)
+    call wp('NPOOL_TO_LEAFN',     cnf%npool_to_leafn_patch)
+    call wp('NPOOL_TO_LEAFN_STORAGE', cnf%npool_to_leafn_storage_patch)
+    call wp('NPOOL_TO_FROOTN',    cnf%npool_to_frootn_patch)
+    call wp('NPOOL_TO_FROOTN_STORAGE', cnf%npool_to_frootn_storage_patch)
+    call wp('NPOOL_TO_LIVESTEMN', cnf%npool_to_livestemn_patch)
+    call wp('NPOOL_TO_LIVESTEMN_STORAGE', cnf%npool_to_livestemn_storage_patch)
+    call wp('CPOOL_TO_LEAFC_STORAGE', ccf%cpool_to_leafc_storage_patch)
+    call wp('CPOOL_TO_FROOTC_STORAGE', ccf%cpool_to_frootc_storage_patch)
+    call wp('CPOOL_TO_LIVESTEMC_STORAGE', ccf%cpool_to_livestemc_storage_patch)
+    call wp('LEAFC_STORAGE',  ccs%leafc_storage_patch)
+    call wp('FROOTC_STORAGE', ccs%frootc_storage_patch)
+    call wp('LIVESTEMC_STORAGE', ccs%livestemc_storage_patch)
+    call wp('LEAFN_STORAGE',  cns%leafn_storage_patch)
+    call wp('FROOTN_STORAGE', cns%frootn_storage_patch)
+    call wp('LIVESTEMN_STORAGE', cns%livestemn_storage_patch)
+    call wp('LEAFCN_OFFSET',  cs%leafcn_offset_patch)
+    call wp('LEAFC_TO_LITTER_FUN', ccf%leafc_to_litter_fun_patch)
+    call wp('PREV_LEAFC_TO_LITTER', ccf%prev_leafc_to_litter_patch)
+    call wp('PREV_FROOTC_TO_LITTER', ccf%prev_frootc_to_litter_patch)
+    call wp('NUPTAKE',        cnf%Nuptake_patch)
+    call wp('NFIX',           cnf%Nfix_patch)
+    call wp('NACTIVE',        cnf%Nactive_patch)
+    call wp('NNONMYC',        cnf%Nnonmyc_patch)
+    call wp('NRETRANS',       cnf%Nretrans_patch)
+    call wp('LIVESTEMN_TO_RETRANSN', cnf%livestemn_to_retransn_patch)
+    call wp('FROOTN_TO_RETRANSN', cnf%frootn_to_retransn_patch)
+    call wp('GRAIN_FLAG',     cs%grain_flag_patch)
+    call wp('TEMPMAX_RETRANSN', cs%tempmax_retransn_patch)
+    call wp('ANNMAX_RETRANSN',  cs%annmax_retransn_patch)
+    call wp('ANNSUM_POTENTIAL_GPP', cs%annsum_potential_gpp_patch)
 
     ! ---------------- column reals ----------------
     call wc('FPG',              soilbiogeochem_state_inst%fpg_col)
@@ -504,5 +544,287 @@ contains
       ier = nf90_put_var(ncid, v, ib)
     end subroutine wi1
   end subroutine cropdump_soyfix_sweep
+
+  !-----------------------------------------------------------------------
+  subroutine cropdump_fun_write(bounds, label, num_soilc, filter_soilc, num_soilp, filter_soilp, &
+       ws, wf, temperature_inst, soilstate_inst, cs, ccs, ccf, cns, cnf, sbnf, sbcf, canopystate_inst, sbns)
+    !
+    ! CNFUN parity dump (CLM.jl soyfix-fun): called from the SoilBiogeochemCompetition
+    ! SourceMod immediately BEFORE ('before_cnfun') and AFTER ('after_cnfun', i.e. after
+    ! CNFUN and its p2c calls) the CNFUN call. Writes fundump_<label>_n<nstep>.nc with
+    ! every input CNFUN reads and every output it writes, so the Julia cnfun! can be
+    ! driven with the exact Fortran inputs and compared field by field.
+    ! Same CROPDUMP_WINDOWS gating as cropdump_write.
+    !
+    use netcdf
+    use clm_time_manager, only : get_nstep, get_curr_date
+    use clm_varpar      , only : nlevdecomp
+    use PatchType       , only : patch
+    use WaterStateBulkType           , only : waterstatebulk_type
+    use WaterFluxBulkType            , only : waterfluxbulk_type
+    use TemperatureType              , only : temperature_type
+    use SoilStateType                , only : soilstate_type
+    use CNVegStateType               , only : cnveg_state_type
+    use CNVegCarbonStateType         , only : cnveg_carbonstate_type
+    use CNVegCarbonFluxType          , only : cnveg_carbonflux_type
+    use CNVegNitrogenStateType       , only : cnveg_nitrogenstate_type
+    use CNVegNitrogenFluxType        , only : cnveg_nitrogenflux_type
+    use SoilBiogeochemNitrogenFluxType , only : soilbiogeochem_nitrogenflux_type
+    use SoilBiogeochemCarbonFluxType   , only : soilbiogeochem_carbonflux_type
+    use SoilBiogeochemNitrogenStateType, only : soilbiogeochem_nitrogenstate_type
+    use CanopyStateType              , only : canopystate_type
+    type(bounds_type), intent(in) :: bounds
+    character(len=*) , intent(in) :: label
+    integer          , intent(in) :: num_soilc, filter_soilc(:), num_soilp, filter_soilp(:)
+    type(waterstatebulk_type)              , intent(in) :: ws
+    type(waterfluxbulk_type)               , intent(in) :: wf
+    type(temperature_type)                 , intent(in) :: temperature_inst
+    type(soilstate_type)                   , intent(in) :: soilstate_inst
+    type(cnveg_state_type)                 , intent(in) :: cs
+    type(cnveg_carbonstate_type)           , intent(in) :: ccs
+    type(cnveg_carbonflux_type)            , intent(in) :: ccf
+    type(cnveg_nitrogenstate_type)         , intent(in) :: cns
+    type(cnveg_nitrogenflux_type)          , intent(in) :: cnf
+    type(soilbiogeochem_nitrogenflux_type) , intent(in) :: sbnf
+    type(soilbiogeochem_carbonflux_type)   , intent(in) :: sbcf
+    type(canopystate_type)                 , intent(in) :: canopystate_inst
+    type(soilbiogeochem_nitrogenstate_type), intent(in) :: sbns
+
+    integer :: nstep, yr, mon, day, tod, k, ncid, ier, d_col, d_pft, d_lev, v, p, c, j, np, nc, f
+    logical :: inwin
+    character(len=256) :: fname
+    real(r8), allocatable :: pb(:), cb(:), pl(:,:), cl(:,:)
+    integer , allocatable :: ib(:), icb(:)
+
+    if (.not. initialized) call init_windows()
+    if (nwin == 0) return
+    nstep = get_nstep()
+    inwin = .false.
+    do k = 1, nwin
+       if (nstep >= wlo(k) .and. nstep <= whi(k)) inwin = .true.
+    end do
+    if (.not. inwin) return
+    if (.not. masterproc) return
+
+    call get_curr_date(yr, mon, day, tod)
+    np = bounds%endp - bounds%begp + 1
+    nc = bounds%endc - bounds%begc + 1
+    allocate(pb(np), cb(nc), ib(np), icb(nc), pl(np,nlevdecomp), cl(nc,nlevdecomp))
+
+    write(fname,'(a,a,a,i0,a)') 'fundump_', trim(label), '_n', nstep, '.nc'
+    ier = nf90_create(trim(fname), NF90_CLOBBER, ncid)
+    if (ier /= NF90_NOERR) then
+       write(iulog,*) 'cropdump_fun_write: nf90_create failed: ', trim(nf90_strerror(ier))
+       return
+    end if
+    ier = nf90_def_dim(ncid, 'column', nc, d_col)
+    ier = nf90_def_dim(ncid, 'pft',    np, d_pft)
+    ier = nf90_def_dim(ncid, 'levdcmp', nlevdecomp, d_lev)
+    ier = nf90_put_att(ncid, NF90_GLOBAL, 'label', trim(label))
+    ier = nf90_enddef(ncid)
+    call wi0('nstep', nstep); call wi0('ymd', yr*10000+mon*100+day); call wi0('tod', tod)
+
+    ! ---- integers / filters ----
+    do p = bounds%begp, bounds%endp; ib(p-bounds%begp+1) = patch%itype(p); end do
+    call wip('ITYPE')
+    do p = bounds%begp, bounds%endp; ib(p-bounds%begp+1) = patch%column(p) - bounds%begc + 1; end do
+    call wip('PCOLUMN')
+    ib(:) = 0
+    do f = 1, num_soilp; ib(filter_soilp(f)-bounds%begp+1) = 1; end do
+    call wip('FILTER_P')
+    icb(:) = 0
+    do f = 1, num_soilc; icb(filter_soilc(f)-bounds%begc+1) = 1; end do
+    ier = nf90_redef(ncid); ier = nf90_def_var(ncid, 'FILTER_C', NF90_INT, (/d_col/), v)
+    ier = nf90_enddef(ncid); ier = nf90_put_var(ncid, v, icb)
+
+    ! ---- patch reals: inputs ----
+    call wp('WTCOL',                patch%wtcol)
+    call wp('LEAFCN_OFFSET',        cs%leafcn_offset_patch)
+    call wp('PLANTCN',              cs%plantCN_patch)
+    call wp('ONSET_FLAG',           cs%onset_flag_patch)
+    call wp('OFFSET_FLAG',          cs%offset_flag_patch)
+    call wp('C_ALLOMETRY',          cs%c_allometry_patch)
+    call wp('N_ALLOMETRY',          cs%n_allometry_patch)
+    call wp('AVAILC',               ccf%availc_patch)
+    call wp('LEAFC',                ccs%leafc_patch)
+    call wp('LEAFC_STORAGE',        ccs%leafc_storage_patch)
+    call wp('FROOTC',               ccs%frootc_patch)
+    call wp('FROOTC_STORAGE',       ccs%frootc_storage_patch)
+    call wp('LIVESTEMC',            ccs%livestemc_patch)
+    call wp('LIVECROOTC',           ccs%livecrootc_patch)
+    call wp('LEAFC_STORAGE_XFER_ACC', ccs%leafc_storage_xfer_acc_patch)
+    call wp('STORAGE_CDEMAND',      ccs%storage_cdemand_patch)
+    call wp('TLAI',                 canopystate_inst%tlai_patch)
+    call wp('LEAFN',                cns%leafn_patch)
+    call wp('LEAFN_STORAGE',        cns%leafn_storage_patch)
+    call wp('FROOTN',               cns%frootn_patch)
+    call wp('LIVESTEMN',            cns%livestemn_patch)
+    call wp('LIVECROOTN',           cns%livecrootn_patch)
+    call wp('RETRANSN',             cns%retransn_patch)
+    call wp('LEAFN_STORAGE_XFER_ACC', cns%leafn_storage_xfer_acc_patch)
+    call wp('STORAGE_NDEMAND',      cns%storage_ndemand_patch)
+    call wp('LEAFC_TO_LITTER',      ccf%leafc_to_litter_patch)
+    call wp('LEAFC_TO_LITTER_FUN',  ccf%leafc_to_litter_fun_patch)
+    call wp('PREV_LEAFC_TO_LITTER', ccf%prev_leafc_to_litter_patch)
+    call wp('LEAFC_STORAGE_TO_XFER', ccf%leafc_storage_to_xfer_patch)
+    call wp('LEAFN_STORAGE_TO_XFER', cnf%leafn_storage_to_xfer_patch)
+    call wp('PLANT_NDEMAND',        cnf%plant_ndemand_patch)
+    call wp('SOYFIXN',              cnf%soyfixn_patch)
+    ! ---- patch reals: outputs ----
+    call wp('NPP_NACTIVE',     ccf%npp_Nactive_patch)
+    call wp('NPP_NNONMYC',     ccf%npp_Nnonmyc_patch)
+    call wp('NPP_NAM',         ccf%npp_Nam_patch)
+    call wp('NPP_NECM',        ccf%npp_Necm_patch)
+    call wp('NPP_NACTIVE_NO3', ccf%npp_Nactive_no3_patch)
+    call wp('NPP_NNONMYC_NO3', ccf%npp_Nnonmyc_no3_patch)
+    call wp('NPP_NAM_NO3',     ccf%npp_Nam_no3_patch)
+    call wp('NPP_NECM_NO3',    ccf%npp_Necm_no3_patch)
+    call wp('NPP_NACTIVE_NH4', ccf%npp_Nactive_nh4_patch)
+    call wp('NPP_NNONMYC_NH4', ccf%npp_Nnonmyc_nh4_patch)
+    call wp('NPP_NAM_NH4',     ccf%npp_Nam_nh4_patch)
+    call wp('NPP_NECM_NH4',    ccf%npp_Necm_nh4_patch)
+    call wp('NPP_NFIX',        ccf%npp_Nfix_patch)
+    call wp('NPP_NRETRANS',    ccf%npp_Nretrans_patch)
+    call wp('NPP_NUPTAKE',     ccf%npp_Nuptake_patch)
+    call wp('NPP_GROWTH',      ccf%npp_growth_patch)
+    call wp('NPP_BURNEDOFF',   ccf%npp_burnedoff_patch)
+    call wp('SOILC_CHANGE',    ccf%soilc_change_patch)
+    call wp('PLANT_NDEMAND_RETRANS', cnf%plant_ndemand_retrans_patch)
+    call wp('NACTIVE',         cnf%Nactive_patch)
+    call wp('NNONMYC',         cnf%Nnonmyc_patch)
+    call wp('NAM',             cnf%Nam_patch)
+    call wp('NECM',            cnf%Necm_patch)
+    call wp('NACTIVE_NO3',     cnf%Nactive_no3_patch)
+    call wp('NNONMYC_NO3',     cnf%Nnonmyc_no3_patch)
+    call wp('NAM_NO3',         cnf%Nam_no3_patch)
+    call wp('NECM_NO3',        cnf%Necm_no3_patch)
+    call wp('NACTIVE_NH4',     cnf%Nactive_nh4_patch)
+    call wp('NNONMYC_NH4',     cnf%Nnonmyc_nh4_patch)
+    call wp('NAM_NH4',         cnf%Nam_nh4_patch)
+    call wp('NECM_NH4',        cnf%Necm_nh4_patch)
+    call wp('NPASSIVE',        cnf%Npassive_patch)
+    call wp('NFIX',            cnf%Nfix_patch)
+    call wp('COST_NFIX',       cnf%cost_Nfix_patch)
+    call wp('COST_NACTIVE',    cnf%cost_Nactive_patch)
+    call wp('COST_NRETRANS',   cnf%cost_Nretrans_patch)
+    call wp('NUPTAKE_NPP_FRACTION', cnf%nuptake_npp_fraction_patch)
+    call wp('NRETRANS',        cnf%Nretrans_patch)
+    call wp('NUPTAKE',         cnf%Nuptake_patch)
+    call wp('RETRANSN_TO_NPOOL',      cnf%retransn_to_npool_patch)
+    call wp('FREE_RETRANSN_TO_NPOOL', cnf%free_retransn_to_npool_patch)
+    call wp('SMINN_TO_PLANT_FUN',     cnf%sminn_to_plant_fun_patch)
+
+    ! ---- patch x level ----
+    call wpl('CROOTFR', soilstate_inst%crootfr_patch)
+    call wpl('SMINN_TO_PLANT_FUN_VR',     cnf%sminn_to_plant_fun_vr_patch)
+    call wpl('SMINN_TO_PLANT_FUN_NO3_VR', cnf%sminn_to_plant_fun_no3_vr_patch)
+    call wpl('SMINN_TO_PLANT_FUN_NH4_VR', cnf%sminn_to_plant_fun_nh4_vr_patch)
+
+    ! ---- column x level (soil layers 1:nlevdecomp) ----
+    call wcl('SMIN_NO3_TO_PLANT_VR', sbnf%smin_no3_to_plant_vr_col)
+    call wcl('SMIN_NH4_TO_PLANT_VR', sbnf%smin_nh4_to_plant_vr_col)
+    call wcl('SMINN_TO_PLANT_FUN_NO3_VR_COL', sbnf%sminn_to_plant_fun_no3_vr_col)
+    call wcl('SMINN_TO_PLANT_FUN_NH4_VR_COL', sbnf%sminn_to_plant_fun_nh4_vr_col)
+    call wcl('SMIN_NO3_VR', sbns%smin_no3_vr_col)
+    call wcl('SMIN_NH4_VR', sbns%smin_nh4_vr_col)
+    do j = 1, nlevdecomp
+       do c = bounds%begc, bounds%endc
+          cl(c-bounds%begc+1,j) = ws%h2osoi_liq_col(c,j)
+       end do
+    end do
+    call wclb('H2OSOI_LIQ')
+    do j = 1, nlevdecomp
+       do c = bounds%begc, bounds%endc
+          cl(c-bounds%begc+1,j) = temperature_inst%t_soisno_col(c,j)
+       end do
+    end do
+    call wclb('T_SOISNO')
+
+    ! ---- column reals ----
+    do c = bounds%begc, bounds%endc; cb(c-bounds%begc+1) = sbnf%nfix_to_sminn_col(c); end do
+    call wcb('NFIX_TO_SMINN')
+    do c = bounds%begc, bounds%endc; cb(c-bounds%begc+1) = sbcf%soilc_change_col(c); end do
+    call wcb('SOILC_CHANGE_COL')
+
+    ier = nf90_close(ncid)
+    deallocate(pb, cb, ib, icb, pl, cl)
+    write(iulog,'(a,a,a,i0)') 'cropdump_fun_write: wrote ', trim(fname), ' at nstep = ', nstep
+
+  contains
+
+    subroutine wi0(name, val)
+      character(len=*), intent(in) :: name
+      integer, intent(in) :: val
+      ier = nf90_redef(ncid)
+      ier = nf90_def_var(ncid, name, NF90_INT, v)
+      ier = nf90_enddef(ncid)
+      ier = nf90_put_var(ncid, v, val)
+    end subroutine wi0
+
+    subroutine wip(name)
+      character(len=*), intent(in) :: name
+      ier = nf90_redef(ncid)
+      ier = nf90_def_var(ncid, name, NF90_INT, (/d_pft/), v)
+      ier = nf90_enddef(ncid)
+      ier = nf90_put_var(ncid, v, ib)
+    end subroutine wip
+
+    subroutine wp(name, src)
+      character(len=*), intent(in) :: name
+      real(r8), intent(in) :: src(bounds%begp:)
+      integer :: pp
+      do pp = bounds%begp, bounds%endp
+         pb(pp-bounds%begp+1) = src(pp)
+      end do
+      ier = nf90_redef(ncid)
+      ier = nf90_def_var(ncid, name, NF90_DOUBLE, (/d_pft/), v)
+      ier = nf90_enddef(ncid)
+      ier = nf90_put_var(ncid, v, pb)
+    end subroutine wp
+
+    subroutine wpl(name, src)
+      character(len=*), intent(in) :: name
+      real(r8), intent(in) :: src(bounds%begp:, 1:)
+      integer :: pp, jj
+      do jj = 1, nlevdecomp
+         do pp = bounds%begp, bounds%endp
+            pl(pp-bounds%begp+1, jj) = src(pp, jj)
+         end do
+      end do
+      ier = nf90_redef(ncid)
+      ier = nf90_def_var(ncid, name, NF90_DOUBLE, (/d_pft, d_lev/), v)
+      ier = nf90_enddef(ncid)
+      ier = nf90_put_var(ncid, v, pl)
+    end subroutine wpl
+
+    subroutine wcl(name, src)
+      character(len=*), intent(in) :: name
+      real(r8), intent(in) :: src(bounds%begc:, 1:)
+      integer :: cc, jj
+      do jj = 1, nlevdecomp
+         do cc = bounds%begc, bounds%endc
+            cl(cc-bounds%begc+1, jj) = src(cc, jj)
+         end do
+      end do
+      call wclb(name)
+    end subroutine wcl
+
+    subroutine wclb(name)
+      character(len=*), intent(in) :: name
+      ier = nf90_redef(ncid)
+      ier = nf90_def_var(ncid, name, NF90_DOUBLE, (/d_col, d_lev/), v)
+      ier = nf90_enddef(ncid)
+      ier = nf90_put_var(ncid, v, cl)
+    end subroutine wclb
+
+    subroutine wcb(name)
+      character(len=*), intent(in) :: name
+      ier = nf90_redef(ncid)
+      ier = nf90_def_var(ncid, name, NF90_DOUBLE, (/d_col/), v)
+      ier = nf90_enddef(ncid)
+      ier = nf90_put_var(ncid, v, cb)
+    end subroutine wcb
+
+  end subroutine cropdump_fun_write
 
 end module cropdumpMod

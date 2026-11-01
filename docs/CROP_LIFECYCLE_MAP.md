@@ -763,6 +763,83 @@ What this does *not* show: a coupled trajectory with non-zero fixation (it canno
 exist in this configuration), nor CNFUN's internal fixation (the default `use_fun`
 path, where CNSoyfix is never called).
 
+## 3l. Soybean N fixation with FUN on — validated in a coupled run (2026-10-29)
+
+§3k could only drive `CNSoyfix` through an in-model sweep, because the non-FUN
+FlexibleCN column never reaches `fpg < 1`. With **`use_fun = .true.`** (the CLM5
+default) CTSM never calls `CNSoyfix` (CNDriverMod.F90:324). Soybean fixation is
+instead CNFUN's **symbiotic `Nfix`**: `FUN_fracfixers = 1` for soybean (itype 23/24),
+and the cost of fixation depends on soil temperature (`fun_cost_fix`). This fixation
+**is** live in the coupled column.
+
+**Reference.** The instrumented case `crop_fun_macos` (its own `cesm.exe`) dumps every
+CNFUN input and output around both CNFUN calls inside SoilBiogeochemCompetition
+(`fundump_{before,after}_cnfun_n<n>.nc`, with the four `cropdump_*` labels alongside).
+The run (`$SYMFLUENCE_DATA/runs/crop_fun_ref`) is the USplains column, cold-started
+2016 with `use_cn use_crop use_fertilizer use_flexiblecn use_fun`. The surfdata
+already carries temperate soybean (rainfed 15.9%, irrigated 0.2%), so no CFT had to be
+re-assigned. Soybean in 2017: planted 05-26, leaves out 06-01, grain fill 07-31,
+harvested 10-22. The dumps cover 840 steps: 05-31..06-04, 07-15..16, 07-28..08-20
+(spring-wheat harvest, corn grain-fill onset) and 10-20..24 (soybean harvest).
+
+**Parity** (`scripts/fortran_parity_crop_fun.jl`, Fortran inputs injected each step;
+error is max |Julia − Fortran| over the field's scale):
+
+| routine | coverage | max error / scale |
+|---|---|---|
+| `cnfun!` + p2c: `Nfix`, `Nuptake`, `sminn_to_plant_fun`, active/nonmyc × NO3/NH4, `npp_*`, `npp_growth`, burned-off C, retrans, the `_vr` patch and column fluxes, `nfix_to_sminn`, `soilc_change` | 840 steps × 14 patches. Soybean `Nfix` > 0 in 804 of 1 680 soybean patch-steps, max 1.15e-6 gN/m²/s | ≤ 1.3e-15 (`COST_NACTIVE`, a ratio of near-zero fluxes: 4.8e-7; one SPVAL flip in `COST_NFIX` on grass) |
+| FlexibleCN N demand, prognostic-crop call, FUN (`plant_ndemand = availc·n/c`, grain-fill retranslocation, `avail_retransn`, `retransn_to_npool`) | 7 560 crop patch-steps, 2 grain-fill onsets | 0 |
+| FlexibleCN allocation, FUN (`sminn_to_npool = sminn_to_plant_fun`, `plant_calloc = npp_growth`, cpool/npool fluxes) | 5 792, of which 1 584 soybean | ≤ 1e-15 |
+| `npool` / `retransn` update (`n_state_update1!`) | 7 560 | 0 |
+| harvest step of `CNOffsetLitterfall` with FUN | 4 harvests (spring wheat ×2, soybean ×2) | ≤ 1e-15 |
+| `SOYFIXN` | 5 040 soybean patch-dumps | ≡ 0 in Fortran (SetValues; CNSoyfix not called), as in Julia |
+| `FPG` | — | never written under FUN ("FUN has no concept of FPG", SoilBiogeochemCompetitionMod.F90:978); 1e36/NaN in Fortran. CTSM does not even register SOYFIXN/FPG as history fields under FUN |
+
+**Julia divergences found and fixed (each toward the F90):**
+1. **FUN read snow-layer temperatures.** The driver passed `cnfun!` the full
+   `temperature.t_soisno_col`, whose first `nlevsno` columns are snow layers. So
+   `fun_cost_fix` saw snow slots (SPVAL when there is no snow) for the top soil layers
+   and soil layer j−12 below them, where Fortran reads `t_soisno(c,1:nlevdecomp)`
+   (CNFUNMod.F90:1056). Symbiotic fixation was wrong for every fixer PFT; natural PFTs
+   1-14 have `FUN_fracfixers` 0.25. This is the cause of the "Nfix ≈ 0, Julia 1e-28 vs
+   Fortran 1e-12" residual in `docs/PARITY_STATUS.md`, which was filed as cosmetic. Now
+   `cnfun!(...; t_soisno_soil)` is passed the soil slice.
+2. **CNFUN soil-N clamp read back pre-clamp N.** The per-layer accumulators summed the
+   nonmycorrhizal N from *before* the NO3/NH4 availability clamp, while `npp_to_nonmyc`
+   and the `_vr` fluxes were clamped. `Nnonmyc` was up to 1/3 too high (18% on grass)
+   wherever a layer's mineral N ran out. This is not an index error: the original code
+   gives the Fortran answer under `--check-bounds=yes` with no BoundsError, and also
+   with every `@Const` removed from `_fun_p2_kernel!` (removing it only from the
+   `sminn_*_layer_step` arguments does not help). No argument aliases a written array.
+   It is the `@Const`/aliasscope load reordering on the CPU backend. Fix: the kernel no
+   longer uses `@Const`, and the clamp carries the four fluxes in local scalars, using
+   Fortran's floating-point order for `npp_to_spend` (CNFUNMod.F90:1302-1356). That
+   order also fixes the `npp_to_spend >= 1e-13` burn-off threshold flip.
+3. `fun_retranslocation` gate `ivt(p) < npcropmin`: Julia compared the 1-based ivt
+   (CNFUNMod.F90:1191).
+4. FUN `ndays_off` is now read from the params file (15 d), instead of the 21 d
+   default (CNFUNMod.F90:105).
+5. **CNPhenology phase 1 runs before allocation under FUN** (CNDriverMod.F90:399-412).
+   Julia ran both phases after decomposition regardless of `use_fun`, so planting,
+   harvest and the onset/offset flags reached allocation and CNFUN one step late.
+6. **Two `calc_plant_nutrient_demand` calls** (CNDriverMod.F90:440-457): non-crop
+   patches with `call_is_for_pcrop = .false.`, then prognostic crops with `.true.`.
+   Julia made a single all-patch `.false.` call, so crops **never** did the grain-fill
+   retranslocation of leaf/stem/root N and got the natural-veg `avail_retransn`. This
+   applies with and without FUN, on crop runs only.
+7. The soybean test in that grain-fill retranslocation compared the 1-based ivt with
+   the 0-based `ntmp_soybean`, in both competition methods. Irrigated winter wheat was
+   treated as soybean, and irrigated soybean was missed.
+8. **The FUN branch of CNOffsetLitterfall / CNBackgroundLitterfall was missing**
+   (CNPhenologyMod.F90:3720-3858, 3982-4067). It consists of the pool clamp,
+   `leafn_to_retransn = retransn_to_npool + free_retransn_to_npool`, the
+   `leafcn_offset` update, the leaf-N litter/retranslocation split from those, and the
+   froot-N cap.
+
+**Not covered:** soybean's own grain-fill onset (it waits for `astem == astemf`, after
+08-20); the FUN `season/stress_decid` storage-demand branch (no deciduous PFT is in
+offset in these windows); matrix-CN.
+
 ## 4. Standing rules for this work
 
 - Do **not** wire a call whose upstream input is still zero (#253's refusal of

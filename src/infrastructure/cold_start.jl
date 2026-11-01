@@ -43,7 +43,8 @@ moisture, soil properties from surface data, and satellite phenology.
 function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
                                  filt::ClumpFilter, surf::SurfaceInputData;
                                  use_aquifer_layer::Bool = true,
-                                 use_hillslope_routing::Bool = false)
+                                 use_hillslope_routing::Bool = false,
+                                 use_cn::Bool = false)
     # WaterFluxType / WaterFluxBulkType::InitCold (PR #209). Part of the same
     # InitCold sweep as init_cold_biogeophys! below, but kept as its own entry
     # point because it threads `use_hillslope_routing` (which selects whether the
@@ -73,7 +74,7 @@ function cold_start_initialize!(inst::CLMInstances, bounds::BoundsType,
     init_water_diagnostic_state!(inst, bounds)
     init_soil_state_defaults!(inst, bounds)
     init_eff_porosity!(inst, bounds)
-    init_satellite_phenology!(inst, bounds, surf)
+    init_satellite_phenology!(inst, bounds, surf; seed_canopy = !use_cn)
     init_misc_state!(inst, bounds)
     init_surface_albedo_cold!(inst, bounds)
     init_soil_hydrology_cold!(inst, bounds; use_aquifer_layer=use_aquifer_layer)
@@ -798,12 +799,22 @@ function init_soil_state_defaults!(inst::CLMInstances, bounds::BoundsType)
 end
 
 """
-    init_satellite_phenology!(inst, bounds, surf)
+    init_satellite_phenology!(inst, bounds, surf; seed_canopy=true)
 
 Initialize satellite phenology (monthly LAI/SAI) from surface data.
+
+`seed_canopy=false` (the `use_cn` cold start) fills only the SP interpolation arrays
+and leaves the canopy state (`tlai`, `tsai`, `elai`, `esai`, `htop`, `hbot`) at
+its `CanopyStateType::InitCold` zeros. CTSM runs `SatellitePhenologyInit` /
+`interpMonthlyVeg` only for SP (or FATES-SP / dry deposition):
+`clm_initializeMod.F90:461-486,697-707`; under `use_cn` the canopy comes from
+`CNVegStructUpdate` alone, starting from `CanopyStateType.F90:529-536` (all zero).
+Seeding the SP values here gave the CN cold start the surface-data SAI (2.77 for
+Bow's needleleaf vs CN's 0.5) as `tsai_old`, which `CNVegStructUpdate`'s
+`tsai = max(tsai_alpha*tsai_old + ..., tsai_min)` then relaxed only over months.
 """
 function init_satellite_phenology!(inst::CLMInstances, bounds::BoundsType,
-                                    surf::SurfaceInputData)
+                                    surf::SurfaceInputData; seed_canopy::Bool = true)
     sp = inst.satellite_phenology
     cs = inst.canopystate
     pch = inst.patch
@@ -832,13 +843,15 @@ function init_satellite_phenology!(inst::CLMInstances, bounds::BoundsType,
             sp.mhvb2t[p, 1] = hbot_val
             sp.mhvb2t[p, 2] = hbot_val
 
-            # Set current LAI/SAI on canopy state
-            cs.tlai_patch[p] = lai_val
-            cs.tsai_patch[p] = sai_val
-            cs.htop_patch[p] = max(htop_val, 0.01)
-            cs.hbot_patch[p] = max(hbot_val, 0.01)
-            cs.elai_patch[p] = lai_val
-            cs.esai_patch[p] = sai_val
+            # Set current LAI/SAI on canopy state (SP only, see docstring)
+            if seed_canopy
+                cs.tlai_patch[p] = lai_val
+                cs.tsai_patch[p] = sai_val
+                cs.htop_patch[p] = max(htop_val, 0.01)
+                cs.hbot_patch[p] = max(hbot_val, 0.01)
+                cs.elai_patch[p] = lai_val
+                cs.esai_patch[p] = sai_val
+            end
         else
             sp.mlai2t[p, 1] = 0.0
             sp.mlai2t[p, 2] = 0.0
@@ -848,12 +861,14 @@ function init_satellite_phenology!(inst::CLMInstances, bounds::BoundsType,
             sp.mhvt2t[p, 2] = 0.0
             sp.mhvb2t[p, 1] = 0.0
             sp.mhvb2t[p, 2] = 0.0
-            cs.tlai_patch[p] = 0.0
-            cs.tsai_patch[p] = 0.0
-            cs.htop_patch[p] = 0.01
-            cs.hbot_patch[p] = 0.01
-            cs.elai_patch[p] = 0.0
-            cs.esai_patch[p] = 0.0
+            if seed_canopy
+                cs.tlai_patch[p] = 0.0
+                cs.tsai_patch[p] = 0.0
+                cs.htop_patch[p] = 0.01
+                cs.hbot_patch[p] = 0.01
+                cs.elai_patch[p] = 0.0
+                cs.esai_patch[p] = 0.0
+            end
         end
 
         # Set frac_veg_nosno_alb (matches satellite_phenology!)

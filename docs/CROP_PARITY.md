@@ -1,3 +1,8 @@
+> **UPDATE 2026-10-29 — FUN crop N.** Soybean fixation with `use_fun = .true.` (CNFUN's
+> symbiotic `Nfix`; CNSoyfix is not called under FUN) and the FUN-path crop N fluxes
+> now match a coupled ctsm5.3.012 run per step; eight Julia divergences were fixed.
+> Results: `docs/CROP_LIFECYCLE_MAP.md` §3l. Recipe: § "FUN crop N (2026-10-29)".
+
 # Crop / irrigation / fire-crop Fortran parity — status (2026-07-18)
 
 > **UPDATE 2026-10-28 — crop tails closed.** Grain-fill allocation + grain fluxes,
@@ -669,3 +674,30 @@ Everything is scripted under `scripts/validation/crop_parity/`; outputs go to
 
    The fixture feeds `test/test_crop_tails_parity.jl`, so CI asserts the Fortran values
    without the ~300 MB of dumps.
+
+## FUN crop N (2026-10-29) — reproducing the soybean-fixation / FUN reference
+
+1. **Case + build (once)**, a separate case so `crop_parity_macos` stays untouched:
+
+       CREATE=1 bash scripts/validation/crop_parity/build_crop_fun_case.sh
+
+   It clones `crop_parity_macos` to `crop_fun_macos`, and adds the CNDriverMod hooks,
+   `cropdumpMod.F90` (now also `cropdump_fun_write` + the FUN allocation fields) and a
+   SoilBiogeochemCompetitionMod SourceMod with `before_cnfun`/`after_cnfun` hooks around
+   both CNFUN calls (`apply_competition_fun_hooks.py`). Rerun without `CREATE` after
+   editing `cropdumpMod.F90` (~1 min incremental build).
+2. **Run** (cold start, 3 years, ~3 min; ~230 MB of dumps for these windows):
+
+       RUN=$SYMFLUENCE_DATA/runs/crop_fun_ref USE_FUN=.true. \
+           HIST2_EXTRA=",'NFIX','NUPTAKE','NPOOL','SMINN_TO_PLANT_FUN','NACTIVE'" \
+           bash scripts/validation/crop_parity/setup_crop_tails_run.sh
+       RUN=$SYMFLUENCE_DATA/runs/crop_fun_ref \
+           EXE=$SYMFLUENCE_DATA/installs/clm/cases/crop_fun_macos/bld/cesm.exe \
+           CROPDUMP_WINDOWS=12357:12476,13437:13484,13773:14324,15765:15884 \
+           bash scripts/validation/crop_parity/run_crop_tails.sh
+
+   (= 2017-05-31..06-04, 07-15..16, 07-28..08-20, 10-20..24.) With `USE_FUN=.true.` the
+   setup drops SOYFIXN/FPG from tape 2: CTSM does not register them under FUN, and
+   asking for them aborts in `htapes_fieldlist`.
+3. **Compare:** `julia --project=. scripts/fortran_parity_crop_fun.jl`. The data-gated
+   test is `test/test_crop_fun_parity.jl`.

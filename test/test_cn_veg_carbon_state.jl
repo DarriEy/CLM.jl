@@ -255,9 +255,9 @@
         for p in 1:np
             @test cs.leafcmax_patch[p] == 0.0
             @test cs.leafc_patch[p] == 0.0
-            @test cs.leafc_storage_patch[p] ≈ CLM.INITIAL_VEGC
+            @test cs.leafc_storage_patch[p] ≈ CLM.cnvegcstate_const.initial_vegC
             @test cs.frootc_patch[p] == 0.0
-            @test cs.frootc_storage_patch[p] ≈ CLM.INITIAL_VEGC
+            @test cs.frootc_storage_patch[p] ≈ CLM.cnvegcstate_const.initial_vegC
             @test cs.leafc_xfer_patch[p] == 0.0
             @test cs.livestemc_patch[p] == 0.0
             @test cs.deadstemc_patch[p] == 0.0
@@ -282,8 +282,8 @@
         ratio = 0.5
         CLM.cnveg_carbon_state_init_cold!(cs, 1:np; ratio=ratio)
 
-        @test cs.leafc_storage_patch[1] ≈ CLM.INITIAL_VEGC * ratio
-        @test cs.frootc_storage_patch[1] ≈ CLM.INITIAL_VEGC * ratio
+        @test cs.leafc_storage_patch[1] ≈ CLM.cnvegcstate_const.initial_vegC * ratio
+        @test cs.frootc_storage_patch[1] ≈ CLM.cnvegcstate_const.initial_vegC * ratio
     end
 
     @testset "cnveg_carbon_state_init_cold! with matrixcn" begin
@@ -303,8 +303,8 @@
             @test cs.grainc_SASUsave_patch[p] == 0.0
             @test cs.matrix_calloc_leaf_acc_patch[p] == 0.0
             @test cs.matrix_cturnover_leaf_acc_patch[p] == 0.0
-            @test cs.matrix_cap_leafc_storage_patch[p] ≈ CLM.INITIAL_VEGC
-            @test cs.matrix_cap_frootc_storage_patch[p] ≈ CLM.INITIAL_VEGC
+            @test cs.matrix_cap_leafc_storage_patch[p] ≈ CLM.cnvegcstate_const.initial_vegC
+            @test cs.matrix_cap_frootc_storage_patch[p] ≈ CLM.cnvegcstate_const.initial_vegC
         end
     end
 
@@ -349,7 +349,7 @@
     @testset "module-level constants" begin
         @test CLM.SPINUP_FACTOR_DEADWOOD_DEFAULT == 1.0
         @test CLM.SPINUP_FACTOR_AD == 10.0
-        @test CLM.INITIAL_VEGC == 20.0
+        @test CLM.INITIAL_VEGC == 20.0   # code fallback; the namelist default (cnvegcstate_const) is 100
     end
 
 end

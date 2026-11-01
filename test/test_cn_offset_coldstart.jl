@@ -121,7 +121,11 @@ using CLM
     end
 
     # ---- 4. initial_vegC is a namelist knob, defaulting to the CTSM value ----
-    @testset "initial_vegC default is the CTSM default (20)" begin
-        @test CLM.cnvegcstate_const.initial_vegC == CLM.INITIAL_VEGC == 20.0
+    # clm5_0 BGC namelist default (namelist_defaults_ctsm.xml:2033, use_cn .and.
+    # mm_nuptake_opt -> 100); INITIAL_VEGC = 20 is the CNVegCarbonStateType.F90:232
+    # code fallback, which no clm5_0 case runs with.
+    @testset "initial_vegC default is the CTSM namelist default (100)" begin
+        @test CLM.cnvegcstate_const.initial_vegC == CLM.INITIAL_VEGC_NAMELIST_DEFAULT == 100.0
+        @test CLM.INITIAL_VEGC == 20.0
     end
 end

@@ -10,7 +10,8 @@
 #
 # Scored: FATES_GPP, TLAI, ELAI, TSAI, HTOP, FSH, EFLX_LH_TOT, FATES_NCOHORTS,
 # FATES_NPATCHES, FATES_VEGC, FATES_LAI, and per PFT FATES_NOCOMP_PATCHAREA_PF (nocomp
-# modes), FATES_CANOPYCROWNAREA_PF, FATES_NPLANT_PF, FATES_LEAFC_PF.
+# modes), FATES_CANOPYCROWNAREA_PF, FATES_NPLANT_PF, FATES_LEAFC_PF, and the host
+# fields of HIST_NAMES as written by the port's history writer (HIST_*).
 #
 # usage:
 #   julia --project=. scripts/validation/fates_fortran_parity/fates_modes_parity.jl \
@@ -30,10 +31,29 @@ const SCALARS = ("FATES_GPP", "TLAI", "ELAI", "TSAI", "HTOP", "FSH", "EFLX_LH_TO
 const PF_FIELDS = ("FATES_NOCOMP_PATCHAREA_PF", "FATES_CANOPYCROWNAREA_PF",
                    "FATES_NPLANT_PF", "FATES_LEAFC_PF")
 const NPFT = 14
-const ALL_FIELDS = (SCALARS..., (f * "_" * string(k) for f in PF_FIELDS for k in 1:NPFT)...)
+# Host fields scored as the port's HISTORY WRITER aggregates them to the gridcell
+# (CLM._aggregate_to_gridcell, the p2g of hist_dov2xy), not via a harness-side
+# average: key "HIST_<h0 name>". BTRAN is the hourly instantaneous btran with the
+# Fortran l2g_scale_type='veg' (EnergyFluxType.F90 hist_addfld BTRAN); the port's
+# default "BTRAN" history field is the daily-min snapshot (BTRANMN).
+const HIST_NAMES = ("BTRAN", "TV", "FSH", "EFLX_LH_TOT", "FSA", "FSR", "FIRA", "FCTR",
+                    "FCEV", "FGEV", "FGR", "SABV", "SABG", "TSA", "Q2M", "TLAI", "FIRE")
+const HIST_FIELDS = Tuple("HIST_" * n for n in HIST_NAMES)
+const ALL_FIELDS = (SCALARS..., (f * "_" * string(k) for f in PF_FIELDS for k in 1:NPFT)...,
+                    HIST_FIELDS...)
+
+"History-writer field definitions for HIST_NAMES."
+function hist_defs()
+    d = Dict(f.name => f for f in CLM.default_hist_fields())
+    d["BTRAN"] = CLM.HistFieldDef("BTRAN", "transpiration beta factor", "unitless", "patch",
+        inst -> Float64.(inst.energyflux.btran_patch), :avg, "veg")
+    return [d[n] for n in HIST_NAMES]
+end
+const HIST_DEFS = hist_defs()
 
 function build_mode(mode)
     fl = MODE_FLAGS[mode]
+    fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, fl..., fates_history_dimlevel=2, start_date=START, dtime=Int(DTIME), use_bedrock=false)
@@ -91,11 +111,16 @@ function mode_record(inst, c)
             r[f * "_" * string(k)] = a === nothing ? NaN : a[1, k]
         end
     end
+    ng = maximum(inst.column.gridcell)
+    for (key, def) in zip(HIST_FIELDS, HIST_DEFS)
+        v = CLM._aggregate_to_gridcell(def, inst, ng)
+        r[key] = (v === nothing || v[1] == -9999.0) ? NaN : v[1]
+    end
     return r
 end
 
 "Step the port nsteps (plus the NUOPC nstep=0 init step), recording after every step."
-function run_julia(mode, nsteps::Int)
+function run_julia(mode, nsteps::Int; hook = nothing)
     inst, bounds, filt, filt_ia, config, _tm = build_mode(mode)
     c = findfirst(inst.column.is_fates)
     ng, nc = bounds.endg, bounds.endc
@@ -129,6 +154,7 @@ function run_julia(mode, nsteps::Int)
             is_beg_curr_day=(i > 0 && tod == 0), is_end_curr_day=false, is_beg_curr_year=false,
             dtime=DTIME, mon=month(cur), day=day(cur), secs=tod,
             jday=dayofyear(cur), photosyns=inst.photosyns)
+        hook === nothing || hook(inst, i)
         push!(recs, mode_record(inst, c))
     end
     CLM.forcing_reader_close!(fr)
@@ -153,6 +179,9 @@ function read_fortran(path)
         out = Dict{String,Vector{Float64}}()
         for f in SCALARS
             haskey(d, f) && (out[f] = Float64.(vec(Array(d[f][:]))))
+        end
+        for (key, n) in zip(HIST_FIELDS, HIST_NAMES)
+            haskey(d, n) && (out[key] = Float64.(vec(Array(d[n][:]))))
         end
         for f in PF_FIELDS
             haskey(d, f) || continue

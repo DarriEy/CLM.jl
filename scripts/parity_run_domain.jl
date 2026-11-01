@@ -12,10 +12,10 @@
 #   DOMAIN=Aripuana   julia +1.12 --project=. scripts/parity_run_domain.jl
 #   DOMAIN=Bow        julia +1.12 --project=. scripts/parity_run_domain.jl
 #
-# All three reference runs share the Bow lnd_in physics config (use_hydrstress +
-# use_luna, Jackson1996 rooting, Vionnet2012 + wind-dependent snow density,
-# baseflow_scalar/int_snow_max per lnd_in), so the only per-domain differences are
-# the file paths, the year, dtime, and those two calibrated scalars.
+# All reference runs share the clm5_0 default lnd_in physics config (use_hydrstress +
+# use_luna, Jackson1996 rooting, Vionnet2012 + wind-dependent snow density), which the
+# port now takes from its own defaults; the only per-domain differences are the file
+# paths, the year, dtime, and the calibrated baseflow_scalar / int_snow_max.
 # ==========================================================================
 
 using NCDatasets, Dates, Printf, CLM
@@ -178,13 +178,13 @@ for (lbl, f) in (("surfdata", fsurdat), ("params", paramfile), ("forcing", cfg.f
 end
 println()
 
-# All reference domains use the Bow lnd_in config: Jackson1996 rooting + Vionnet2012
-# wind-dependent snow density (matching their datm/lnd_in).
-CLM.rooting_profile_config.rooting_profile_method_water  = CLM.JACKSON_1996_ROOT
-CLM.rooting_profile_config.rooting_profile_method_carbon = CLM.JACKSON_1996_ROOT
-CLM.snow_hydrology_set_control_for_testing!(;
-    wind_dep_snow_density = true,
-    overburden_compaction_method = CLM.OVERBURDEN_COMPACTION_VIONNET2012)
+# All reference domains run the clm5_0 namelist DEFAULTS (Jackson1996 rooting,
+# Vionnet2012 + wind-dependent snow density, PHS + LUNA, h2osfcflag = 1, light_inhibit,
+# modifyphoto_and_lmr_forcrop, the atm2lnd repartitioning). These are the port's
+# defaults since the CTSM-defaults audit (docs/DRIVER_DEFAULTS_AUDIT.md, campaign #3),
+# so this harness passes only what the lnd_in files genuinely set per domain
+# (baseflow_scalar / int_snow_max calibrations, the aquifer exception) and the
+# restart / forcing plumbing.
 
 t0 = time()
 inst = run_clm!(;
@@ -193,8 +193,7 @@ inst = run_clm!(;
     start_date = DateTime(yr, 1, 1), end_date = DateTime(yr + 1, 1, 1),
     dtime = cfg.dtime, use_cn = false,
     verbose = get(ENV, "CLM_VERBOSE", "1") in ("1", "true", "TRUE", "yes"),
-    use_aquifer_layer = get(cfg, :aquifer, false), use_hydrstress = true, use_luna = true,
-    h2osfcflag = 1,  # CLM5 default (surface water active); matters for wet sites
+    use_aquifer_layer = get(cfg, :aquifer, false),
     baseflow_scalar = cfg.baseflow, int_snow_max = cfg.int_snow,
     ffortran_restart = cfg.restart,
     interp_forcing = true,

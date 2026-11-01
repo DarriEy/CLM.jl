@@ -650,7 +650,7 @@
 
         CLM.cn_evergreen_phenology!(d.pstate, d.mask_soilp, d.pftcon,
             d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
-            d.patch_data, 365.0)
+            d.patch_data, 365.0; evergreen_phenology_opt = 1)
 
         # Background litterfall rate
         expected_bglfr = 1.0 / (3.0 * 365.0 * CLM.SECSPDAY)
@@ -676,6 +676,56 @@
         @test d.cnveg_nf.frootn_storage_to_xfer_patch[1] ≈ tranr * 0.12 / dt
     end
 
+    # CNPhenologyMod.F90:778-829: with CN_evergreen_phenology_opt == 1 the whole
+    # transfer pool goes to display every step (t1 = 1/dt). Without it, FlexibleCN's
+    # fcur = 0 for evergreens left all new leaf growth stranded in leafc_xfer.
+    @testset "cn_evergreen_phenology! transfer -> display (opt 1)" begin
+        d = make_test_data()
+        d.pftcon.evergreen[5] = 1.0
+        d.pftcon.woody[5] = 1.0
+        d.pftcon.leaf_long[5] = 3.0
+        d.cnveg_cs.leafc_xfer_patch[1] = 0.7;  d.cnveg_cs.frootc_xfer_patch[1] = 0.3
+        d.cnveg_cs.livestemc_xfer_patch[1] = 0.2; d.cnveg_cs.deadstemc_xfer_patch[1] = 0.1
+        d.cnveg_cs.livecrootc_xfer_patch[1] = 0.05; d.cnveg_cs.deadcrootc_xfer_patch[1] = 0.04
+        d.cnveg_ns.leafn_xfer_patch[1] = 0.02; d.cnveg_ns.frootn_xfer_patch[1] = 0.01
+        d.cnveg_ns.livestemn_xfer_patch[1] = 0.004; d.cnveg_ns.deadstemn_xfer_patch[1] = 0.003
+        d.cnveg_ns.livecrootn_xfer_patch[1] = 0.002; d.cnveg_ns.deadcrootn_xfer_patch[1] = 0.001
+        CLM.cn_evergreen_phenology!(d.pstate, d.mask_soilp, d.pftcon,
+            d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
+            d.patch_data, 365.0; evergreen_phenology_opt = 1)
+        dt = d.pstate.dt
+        @test d.cnveg_cf.leafc_xfer_to_leafc_patch[1] ≈ 0.7 / dt
+        @test d.cnveg_cf.frootc_xfer_to_frootc_patch[1] ≈ 0.3 / dt
+        @test d.cnveg_cf.livestemc_xfer_to_livestemc_patch[1] ≈ 0.2 / dt
+        @test d.cnveg_cf.deadstemc_xfer_to_deadstemc_patch[1] ≈ 0.1 / dt
+        @test d.cnveg_cf.livecrootc_xfer_to_livecrootc_patch[1] ≈ 0.05 / dt
+        @test d.cnveg_cf.deadcrootc_xfer_to_deadcrootc_patch[1] ≈ 0.04 / dt
+        @test d.cnveg_nf.leafn_xfer_to_leafn_patch[1] ≈ 0.02 / dt
+        @test d.cnveg_nf.frootn_xfer_to_frootn_patch[1] ≈ 0.01 / dt
+        @test d.cnveg_nf.livestemn_xfer_to_livestemn_patch[1] ≈ 0.004 / dt
+        @test d.cnveg_nf.deadstemn_xfer_to_deadstemn_patch[1] ≈ 0.003 / dt
+        @test d.cnveg_nf.livecrootn_xfer_to_livecrootn_patch[1] ≈ 0.002 / dt
+        @test d.cnveg_nf.deadcrootn_xfer_to_deadcrootn_patch[1] ≈ 0.001 / dt
+    end
+
+    # opt == 0: Fortran skips both the storage->transfer and transfer->display
+    # blocks; only the background litterfall rate is set.
+    @testset "cn_evergreen_phenology! opt 0 skips the transfers" begin
+        d = make_test_data()
+        d.pftcon.evergreen[5] = 1.0
+        d.pftcon.woody[5] = 1.0
+        d.pftcon.leaf_long[5] = 3.0
+        d.cnveg_cs.leafc_xfer_patch[1] = 0.7
+        d.cnveg_cf.leafc_xfer_to_leafc_patch[1] = 0.0
+        CLM.cn_evergreen_phenology!(d.pstate, d.mask_soilp, d.pftcon,
+            d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
+            d.patch_data, 365.0; evergreen_phenology_opt = 0)
+        @test d.cnveg_state.bglfr_patch[1] ≈ 1.0 / (3.0 * 365.0 * CLM.SECSPDAY)
+        @test d.cnveg_cf.leafc_storage_to_xfer_patch[1] == 0.0
+        @test d.cnveg_nf.leafn_storage_to_xfer_patch[1] == 0.0
+        @test d.cnveg_cf.leafc_xfer_to_leafc_patch[1] == 0.0
+    end
+
     @testset "cn_evergreen_phenology! non-woody" begin
         d = make_test_data()
         d.pftcon.evergreen[5] = 1.0
@@ -683,7 +733,7 @@
 
         CLM.cn_evergreen_phenology!(d.pstate, d.mask_soilp, d.pftcon,
             d.cnveg_state, d.cnveg_cs, d.cnveg_ns, d.cnveg_cf, d.cnveg_nf,
-            d.patch_data, 365.0)
+            d.patch_data, 365.0; evergreen_phenology_opt = 1)
 
         # Leaf and froot transfers happen
         @test d.cnveg_cf.leafc_storage_to_xfer_patch[1] > 0.0
@@ -1086,17 +1136,25 @@
         old_tempavg = d.cnveg_state.tempavg_t2m_patch[1]
 
         CLM.cn_phenology_climate!(d.pstate, d.mask_soilp, d.temperature,
-            d.cnveg_state, d.crop, d.patch_data, d.pftcon)
+            d.cnveg_state, d.crop, d.patch_data, d.pftcon; dayspyr = 365.0)
 
-        # tempavg should move towards t_ref2m
-        @test d.cnveg_state.tempavg_t2m_patch[1] != old_tempavg
-        # Should move in direction of t_ref2m
+        # Fortran CNPhenologyClimate (CNPhenologyMod.F90:579): a running SUM,
+        # tempavg += t_ref2m * fracday/dayspyr — not a relaxation toward t_ref2m.
         t_ref = d.temperature.t_ref2m_patch[1]
-        if t_ref > old_tempavg
-            @test d.cnveg_state.tempavg_t2m_patch[1] > old_tempavg
-        else
-            @test d.cnveg_state.tempavg_t2m_patch[1] < old_tempavg
+        fd = d.pstate.fracday
+        @test d.cnveg_state.tempavg_t2m_patch[1] ≈ old_tempavg + t_ref * fd / 365.0
+
+        # One year of steps from the annual-update reset (0) yields the annual mean of
+        # t_ref2m, which CNAnnualUpdate copies to annavg_t2m (crit_onset_gdd input).
+        d.cnveg_state.tempavg_t2m_patch[1] = 0.0
+        nsteps = round(Int, 365 / fd)
+        temps = [t_ref + 10.0 * sin(2π * k / nsteps) for k in 1:nsteps]
+        for k in 1:nsteps
+            d.temperature.t_ref2m_patch[1] = temps[k]
+            CLM.cn_phenology_climate!(d.pstate, d.mask_soilp, d.temperature,
+                d.cnveg_state, d.crop, d.patch_data, d.pftcon; dayspyr = 365.0)
         end
+        @test d.cnveg_state.tempavg_t2m_patch[1] ≈ sum(temps) / nsteps rtol = 1e-10
     end
 
     # =====================================================================
@@ -1125,7 +1183,9 @@
         d.pftcon.woody[5] = 1.0
         d.pftcon.leaf_long[5] = 3.0
 
-        varctl = CLM.VarCtl()
+        # CN_evergreen_phenology_opt = 1 is the CTSM default with use_flexibleCN
+        # (clm_initialize! sets it); a bare VarCtl() carries the code fallback 0.
+        varctl = CLM.VarCtl(CN_evergreen_phenology_opt = 1)
         leaf_prof = ones(1, 1)
         froot_prof = ones(1, 1)
 
@@ -1139,6 +1199,18 @@
         # Evergreen should have set bglfr and storage→transfer
         @test d.cnveg_state.bglfr_patch[1] > 0.0
         @test d.cnveg_cf.leafc_storage_to_xfer_patch[1] > 0.0
+
+        # opt 0 (the VarCtl code fallback): only bglfr, no transfers
+        d0 = make_test_data()
+        d0.pftcon.evergreen[5] = 1.0; d0.pftcon.woody[5] = 1.0; d0.pftcon.leaf_long[5] = 3.0
+        CLM.cn_phenology!(d0.pstate, d0.params, d0.pftcon,
+            d0.mask_soilp, d0.mask_pcropp, d0.mask_soilc,
+            d0.temperature, d0.water_diag, d0.canopy_state, d0.soil_state,
+            d0.cnveg_state, d0.cnveg_cs, d0.cnveg_cf, d0.cnveg_ns, d0.cnveg_nf,
+            d0.crop, d0.patch_data, d0.gridcell, d0.cn_params,
+            leaf_prof, froot_prof, 1; varctl=CLM.VarCtl())
+        @test d0.cnveg_state.bglfr_patch[1] > 0.0
+        @test d0.cnveg_cf.leafc_storage_to_xfer_patch[1] == 0.0
     end
 
     # =====================================================================

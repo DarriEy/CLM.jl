@@ -113,7 +113,9 @@ function read_fates_restart!(path::AbstractString, inst)
         ed_update_site(fates.sites[s], bc, fates.bc_out[s], true)
     end
 
-    # wrap_update_hlmfates_dyn(..., is_initing_from_restart = .true.)
+    # wrap_update_hlmfates_dyn(..., is_initing_from_restart = .true.): snow bc packed,
+    # the restarted site%snow_depth kept.
+    fates_update_snow_burial!(inst, site_col; is_initing_from_restart = true)
     canopy_summarization!(nsites, fates.sites, fates.bc_in)
     fates_wrap_seed_outgoing!(fates)
     update_hlm_dynamics!(nsites, fates.sites, site_col, fates.bc_out)

@@ -57,7 +57,9 @@ EXT_VARS = [
     # canopy structure + transpiration/canopy-evap fluxes
     ('TSAI', ['TSAI'], 0.05), ('ELAI', ['ELAI'], 0.1),
     ('LAISUN', ['LAISUN'], 0.1), ('LAISHA', ['LAISHA'], 0.1),
-    ('BTRANMN', ['BTRANMN', 'BTRAN'], 0.02),
+    # No BTRAN fallback: BTRAN is the hourly-mean btran, BTRANMN the daily minimum of
+    # hourly means (EnergyFluxType.F90:1027-1047); they are different statistics.
+    ('BTRANMN', ['BTRANMN'], 0.02),
     ('QVEGT', ['QVEGT'], 2e-6), ('QVEGE', ['QVEGE'], 2e-6),
     # soil thermal / ice. Julia writes a column-summed SOILICE; the matching
     # Fortran field is TOTSOILICE (Fortran's own SOILICE is per-layer). List

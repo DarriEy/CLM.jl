@@ -44,11 +44,18 @@ const CN_CCRIT_DEFAULT = 1.0e-8
 """Critical negative carbon state value for abort (gC/m2)."""
 const CN_CNEGCRIT_DEFAULT = -6.0e+1
 
-"""Critical nitrogen state value for truncation (gN/m2)."""
-const CN_NCRIT_DEFAULT = 1.0e-8
+"""Critical nitrogen state value for truncation (gN/m2).
 
-"""Critical negative nitrogen state value for abort (gN/m2)."""
-const CN_NNEGCRIT_DEFAULT = -7.0e+0
+The clm5_0 `&cnprecision_inparm` NAMELIST default (namelist_defaults_ctsm.xml:646,
+`ncrit use_cn=.true.` = 1.d-9). CNPrecisionControlMod.F90:27's code fallback is 1.e-8,
+which is also the clm4_5 namelist value; every clm5_0 BGC case runs with 1e-9."""
+const CN_NCRIT_DEFAULT = 1.0e-9
+
+"""Critical negative nitrogen state value for abort (gN/m2).
+
+The clm5_0 NAMELIST default (namelist_defaults_ctsm.xml:652, -6.d+0). The code
+fallback (CNPrecisionControlMod.F90:28) is -7."""
+const CN_NNEGCRIT_DEFAULT = -6.0e+0
 
 """Minimum nitrogen value used when calculating CN ratio (gN/m2)."""
 const CN_N_MIN = 1.0e-9

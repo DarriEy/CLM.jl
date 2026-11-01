@@ -38,7 +38,8 @@ Per-subsystem detail: `MIMICS_MULTISITE_FORTRAN_PARITY.md`, `CNDV_DRYDEP_BOW_PAR
 2. **Veg-pool NaN under `use_fun=true` cold-start** = the pre-existing, documented cold-start
    canopy-NaN blocker (`psn → availc = NaN`) propagating through FUN — **not** a FUN bug. Fortran's
    `CNFUNMod` has the identical unguarded arithmetic; with real params the FUN kernel never NaNs on
-   finite input. `use_fun` defaults false, so the default path is unaffected.
+   finite input. (`use_fun` defaulted false at the time; since the CTSM-defaults audit it
+   defaults true for use_cn, as in CTSM.)
 
 Lesson reaffirmed: multi-site + true cold-start (not injected mid-run state) surfaced both — a
 single-point injected-state harness was structurally blind to them.

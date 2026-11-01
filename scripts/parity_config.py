@@ -72,7 +72,7 @@ VARS = [
     ("TV","TV","Veg T","State",0.5),("TSOI_10CM","TSOI_10CM","Soil T 10cm","State",0.5),
     ("SOILWATER_10CM","SOILWATER_10CM","Soil water 10cm","State",0.02),("SOILICE","TOTSOILICE","Soil ice","State",0.02),
     ("ZWT","ZWT","Water table","State",0.001),("ELAI","ELAI","Exposed LAI","State",0.02),
-    ("BTRAN","BTRANMN","BTRAN","State",0.002),("U10","U10","10-m wind","State",0.05),
+    ("BTRANMN","BTRANMN","BTRANMN","State",0.002),("U10","U10","10-m wind","State",0.05),
     ("Q2M","Q2M","2-m humidity","State",5e-5),("RH2M","RH2M","2-m RH","State",0.5),
     ("TSAI","TSAI","Stem area idx","State",0.02),("TLAI","TLAI","Total LAI","State",0.02),
     ("LAISUN","LAISUN","Sunlit LAI","State",0.02),("LAISHA","LAISHA","Shaded LAI","State",0.02),

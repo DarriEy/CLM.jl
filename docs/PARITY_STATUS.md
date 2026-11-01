@@ -134,9 +134,11 @@ single-step residuals **compound**:
    matched step (the vcmax_z, btran, leaf_mr, and froot_mr inputs all already
    match Fortran). It is a residual, not a defect.
 
-2. **Nfix ≈ 0.** Julia reports ~`1e-28`, Fortran ~`1e-12`. Both are effectively
-   zero N fixation at this site/season; the difference is cosmetic (denormal /
-   round-to-zero ordering), not physical.
+2. ~~**Nfix ≈ 0.** Julia reports ~`1e-28`, Fortran ~`1e-12`.~~ **This was a bug, not
+   cosmetic (fixed 2026-10-29).** The CN driver handed CNFUN the snow-padded
+   `t_soisno_col`, so the symbiotic-fixation cost read snow-layer slots. See
+   `docs/CROP_LIFECYCLE_MAP.md` §3l, where soybean `Nfix` now matches ctsm5.3.012 to
+   1e-15.
 
 3. **Cross-language reality.** Different floating-point operation ordering,
    different nonlinear solvers (the PHS Newton fixed-point iteration in

@@ -51,6 +51,12 @@ Base.@kwdef mutable struct FireStreamField
     lon::Vector{Float64}   = Float64[]        # degrees_east, ascending
     lat::Vector{Float64}   = Float64[]        # degrees_north, ascending
     doy::Vector{Float64}   = Float64[]        # stream time as day-of-year
+    tabs::Vector{Float64}  = Float64[]        # stream time, noleap days since 0000-01-01
+    # stream_year_first / _last / model_year_align (hdm: taxmode='extend'). 0 = no
+    # year window: nearest by day-of-year over all records (synthetic one-year streams).
+    year_first::Int        = 0
+    year_last::Int         = 0
+    year_align::Int        = 0
     fld::Array{Float64,3}  = zeros(0, 0, 0)   # (lon, lat, time), file units
     varname::String        = ""
     filename::String       = ""
@@ -93,7 +99,9 @@ function _fire_stream_read!(f::FireStreamField, filename::AbstractString,
 
         # `.var` bypasses CF decoding so we get the raw numeric offsets.
         traw  = Float64.(Array(ds["time"].var[:]))
-        f.doy = _ndep_time_to_doy(traw, get(ds["time"].attrib, "units", ""))
+        tunits = get(ds["time"].attrib, "units", "")
+        f.doy  = _ndep_time_to_doy(traw, tunits)
+        f.tabs = _fire_time_to_abs(traw, tunits)
     end
 
     f.varname  = String(varname)
@@ -102,24 +110,76 @@ function _fire_stream_read!(f::FireStreamField, filename::AbstractString,
     return nothing
 end
 
+# Stream time axis as noleap days since 0000-01-01 (both CTSM fire streams are on the
+# noleap calendar), so a record's year is fld(t, 365). Used for the hdm year window.
+function _fire_time_to_abs(traw::Vector{Float64}, units::AbstractString)
+    m = match(r"days since\s+(-?\d+)-(\d+)-(\d+)", units)
+    m === nothing && return Float64[]
+    y0, mo, d0 = parse(Int, m[1]), parse(Int, m[2]), parse(Int, m[3])
+    cum = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+    return @. 365.0 * y0 + cum[mo] + (d0 - 1) + traw
+end
+
 """
     fire_stream_init!(s::FireStreamData; flnfm="", fhdm="",
-                      lnfm_varname="lnfm", hdm_varname="hdm")
+                      lnfm_varname="lnfm", hdm_varname="hdm",
+                      stream_year_first_popdens=0, stream_year_last_popdens=0,
+                      model_year_align_popdens=0)
 
 Read the lightning and population-density stream files.
 
 Mirrors `lnfm_init` + `hdm_init` in `FireDataBaseType.F90` (which are called from
 `BaseFireInit` only when `need_lightning_and_popdens()` is true — i.e. for the
 Li-family methods). An empty filename leaves that stream inactive.
+
+`stream_year_first_popdens` / `stream_year_last_popdens` / `model_year_align_popdens`
+are the `popd_streams` namelist window (`hdm_init`, FireDataBaseType.F90). When set
+(> 0), only records dated in [first-01-01, (last+1)-01-01) are used and the model
+year maps to data year `first + year - align` (CDEPS `shr_stream_findBounds`,
+taxmode 'extend'), as needed for the multi-year HYDE file (1850-2016: CTSM runs
+use one year of it). Left at 0, hdm is nearest by day of year over every record,
+which suits a single-year stream only.
 """
 function fire_stream_init!(s::FireStreamData;
                            flnfm::AbstractString = "",
                            fhdm::AbstractString  = "",
                            lnfm_varname::AbstractString = "lnfm",
-                           hdm_varname::AbstractString  = "hdm")
+                           hdm_varname::AbstractString  = "hdm",
+                           stream_year_first_popdens::Int = 0,
+                           stream_year_last_popdens::Int  = 0,
+                           model_year_align_popdens::Int  = 0)
     isempty(flnfm) || _fire_stream_read!(s.lnfm, flnfm, lnfm_varname, "counts/km^2/hr")
     isempty(fhdm)  || _fire_stream_read!(s.hdm,  fhdm,  hdm_varname,  "counts/km^2")
+    if !isempty(fhdm) && stream_year_first_popdens > 0
+        last_ = max(stream_year_last_popdens, stream_year_first_popdens)
+        align = model_year_align_popdens > 0 ? model_year_align_popdens : stream_year_first_popdens
+        h = s.hdm
+        isempty(h.tabs) && error("fire_stream_init!: hdm year window needs a 'days since' time axis")
+        any(t -> stream_year_first_popdens <= fld(t, 365.0) <= last_, h.tabs) ||
+            error("fire_stream_init!: no hdm record in years $(stream_year_first_popdens)-$(last_)")
+        h.year_first, h.year_last, h.year_align = stream_year_first_popdens, last_, align
+    end
     return nothing
+end
+
+# hdm record for model (year, calday) under CDEPS taxmode='extend', tintalgo='nearest'
+# (dshr_stream_mod.F90 shr_stream_findBounds; dshr_tinterp_mod.F90:108-119). Valid
+# records are those dated in [year_first-01-01, (year_last+1)-01-01); the model year
+# maps to data year year_first + year - year_align; before the first valid record
+# (LVD) or at/after the last (GVD) the end record is held; in between, the nearer
+# bound wins and a tie goes to the lower bound (abs(sint1) <= abs(sint2)).
+function _fire_extend_nearest_index(f::FireStreamField, year::Integer, calday::Real)
+    lo = 365.0 * f.year_first
+    hi = 365.0 * (f.year_last + 1)
+    lvd = findfirst(t -> t >= lo, f.tabs)
+    gvd = findlast(t -> t < hi, f.tabs)
+    dyear = f.year_first + Int(year) - f.year_align
+    tm = 365.0 * dyear + (Float64(calday) - 1.0)
+    tm < f.tabs[lvd]  && return lvd
+    tm >= f.tabs[gvd] && return gvd
+    k1 = findlast(t -> t <= tm, f.tabs)
+    k2 = k1 + 1
+    return abs(tm - f.tabs[k1]) <= abs(f.tabs[k2] - tm) ? k1 : k2
 end
 
 # Nearest-in-time sample index on a cyclic day-of-year axis (hdm's
@@ -164,9 +224,11 @@ function fire_stream_interp!(fire_li2014::CNFireLi2014Data,
                              grc::GridcellData;
                              calday::Real,
                              dayspyr::Real,
-                             bounds_grc::UnitRange{Int})
+                             bounds_grc::UnitRange{Int},
+                             year::Union{Nothing,Integer} = nothing)
     _fire_stream_interp_into!(fire_li2014.forc_lnfm, fire_li2014.forc_hdm, s, grc;
-                              calday = calday, dayspyr = dayspyr, bounds_grc = bounds_grc)
+                              calday = calday, dayspyr = dayspyr, bounds_grc = bounds_grc,
+                              year = year)
 end
 
 # FireInterp core shared by the CN (Li) and FATES (FATESFireDataMod) hosts: fill the
@@ -174,7 +236,8 @@ end
 function _fire_stream_interp_into!(forc_lnfm::AbstractVector, forc_hdm::AbstractVector,
                                    s::FireStreamData, grc::GridcellData;
                                    calday::Real, dayspyr::Real,
-                                   bounds_grc::UnitRange{Int})
+                                   bounds_grc::UnitRange{Int},
+                                   year::Union{Nothing,Integer} = nothing)
     isempty(bounds_grc) && return nothing
 
     if s.lnfm.active
@@ -189,7 +252,9 @@ function _fire_stream_interp_into!(forc_lnfm::AbstractVector, forc_hdm::Abstract
     end
 
     if s.hdm.active
-        k = _fire_nearest_time_index(s.hdm.doy, calday, dayspyr)
+        k = (s.hdm.year_first > 0 && year !== nothing) ?
+            _fire_extend_nearest_index(s.hdm, year, calday) :
+            _fire_nearest_time_index(s.hdm.doy, calday, dayspyr)
         for g in bounds_grc
             forc_hdm[g] = _fire_space_interp(s.hdm, k, grc.londeg[g], grc.latdeg[g])
         end
@@ -219,6 +284,13 @@ Base.@kwdef mutable struct FATESFireData
     forc_hdm::Vector{Float64}       = Float64[]   # population density [counts/km2]
     lnfm24::Vector{Float64}         = Float64[]   # 24-h running mean of forc_lnfm
     lnfm24_nsteps::Vector{Float64}  = Float64[]   # accumulMod per-point nsteps
+    # Seconds added to the driver's (jday, secs) before the streams are advanced.
+    # Fortran advances them at get_curr_date (lnfm_interp/hdm_interp,
+    # FireDataBaseType.F90), the END of the step, which is what clm_run passes. The
+    # FATES parity harness passes the START of the step (scripts/fates_fortran_parity.jl)
+    # and sets this to dtime. That matters for the 3-hourly LIS lightning
+    # climatology: a one-step lag moves the day-mean forc_lnfm by 1.5 % on average.
+    tod_offset::Int                 = 0
 end
 
 fates_fire_data_active(d::FATESFireData) = !isempty(d.lnfm24)
@@ -230,8 +302,9 @@ fates_fire_data_active(d::FATESFireData) = !isempty(d.lnfm24)
 the gridcell arrays (lnfm24 = its init_value 0).
 """
 function fates_fire_data_init!(d::FATESFireData, ng::Int;
-                               flnfm::AbstractString = "", fhdm::AbstractString = "")
-    fire_stream_init!(d.stream; flnfm = flnfm, fhdm = fhdm)
+                               flnfm::AbstractString = "", fhdm::AbstractString = "",
+                               stream_kwargs...)
+    fire_stream_init!(d.stream; flnfm = flnfm, fhdm = fhdm, stream_kwargs...)
     d.forc_lnfm     = zeros(ng)
     d.forc_hdm      = zeros(ng)
     d.lnfm24        = zeros(ng)
@@ -241,9 +314,10 @@ end
 
 "`FATESFireDataMod::FireInterp` (called from clm_fates%InterpFileInputs each step)."
 fates_fire_interp!(d::FATESFireData, grc::GridcellData; calday::Real, dayspyr::Real,
-                   bounds_grc::UnitRange{Int}) =
+                   bounds_grc::UnitRange{Int}, year::Union{Nothing,Integer} = nothing) =
     _fire_stream_interp_into!(d.forc_lnfm, d.forc_hdm, d.stream, grc;
-                              calday = calday, dayspyr = dayspyr, bounds_grc = bounds_grc)
+                              calday = calday, dayspyr = dayspyr, bounds_grc = bounds_grc,
+                              year = year)
 
 """
 `FATESFireDataMod::UpdateAccVars`: lnfm24 runmean (1 day) of forc_lnfm over the

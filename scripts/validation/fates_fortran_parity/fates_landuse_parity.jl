@@ -69,6 +69,7 @@ end
 
 function build(mode)
     fl = mode_flags(mode)
+    fates_case_snow_namelist!()   # the Fortran case lnd_in snow namelist (fates_fortran_parity.jl)
     inst, bounds, filt, tm = CLM.clm_initialize!(; fsurdat=FSURDAT, paramfile=FPARAM,
         fsnowoptics=FSNOWOPTICS, fsnowaging=FSNOWAGING,
         use_fates=true, fl..., fates_paramfile=landuse_cdl(), fates_history_dimlevel=2,

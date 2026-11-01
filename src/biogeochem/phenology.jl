@@ -177,22 +177,30 @@ const _min_critical_daylength_onset = 39300.0 / 2.0
 # mask is a BitVector (CPU backend); read-only args are @Const.
 # ==========================================================================
 
-# --- cn_phenology_climate!: 10-day running-mean t2m accumulator ----------
+# --- cn_phenology_climate!: annual-mean t2m accumulator ----------------
+# Fortran CNPhenologyClimate (CNPhenologyMod.F90:577-580):
+#   tempavg_t2m(p) = tempavg_t2m(p) + t_ref2m(p) * (fracday/dayspyr)
+# i.e. a running SUM that reaches the annual mean of t_ref2m after one year;
+# CNAnnualUpdate (CNAnnualUpdateMod.F90:86-87) copies it to annavg_t2m and resets it to
+# 0. annavg_t2m sets crit_onset_gdd (CNPhenologyMod.F90:1019-1020). The port used an
+# exponential relaxation with a one-day time constant, so annavg_t2m became the
+# late-December temperature: on Bow's cold start the year-2 grass onset threshold
+# fell from ~80 to ~18 GDD and the grass leafed out 17 days early.
 @kernel function _phen_climate_kernel!(tempavg_t2m, @Const(mask),
-                                       @Const(t_ref2m), fracday,
+                                       @Const(t_ref2m), fracday_over_dayspyr,
                                        spval)
     T = eltype(tempavg_t2m)
     p = @index(Global)
     @inbounds if mask[p]
         if t_ref2m[p] != spval
-            tempavg_t2m[p] = tempavg_t2m[p] + fracday * (t_ref2m[p] - tempavg_t2m[p])
+            tempavg_t2m[p] = tempavg_t2m[p] + t_ref2m[p] * fracday_over_dayspyr
         end
     end
 end
 
-phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, spval) =
+phen_climate!(tempavg_t2m, mask, t_ref2m, fracday, dayspyr, spval) =
     _launch!(_phen_climate_kernel!, tempavg_t2m, mask, t_ref2m,
-             eltype(tempavg_t2m)(fracday), eltype(tempavg_t2m)(spval))
+             eltype(tempavg_t2m)(fracday / dayspyr), eltype(tempavg_t2m)(spval))
 
 # --- cn_evergreen_phenology!: storage→transfer for evergreen patches -----
 # --- device-view structs for _phen_evergreen_kernel! ---------------------
@@ -351,6 +359,56 @@ function phen_evergreen!(bglfr, bgtr, lgsf,
         ndrange = length(mask))
     KA.synchronize(backend)
 
+    return nothing
+end
+
+# --- cn_evergreen_phenology!: transfer→display for evergreen patches ------
+# CNPhenologyMod.F90:785-829 (non-matrix branch, CN_evergreen_phenology_opt == 1):
+# every step the whole transfer pool is displayed, t1 = 1/dt. One launch per
+# element (C or N): leaf + froot always, the four wood pools only when woody.
+@kernel function _phen_evergreen_xfer_kernel!(
+        leaf_to, froot_to, livestem_to, deadstem_to, livecroot_to, deadcroot_to,
+        @Const(leaf_x), @Const(froot_x), @Const(livestem_x), @Const(deadstem_x),
+        @Const(livecroot_x), @Const(deadcroot_x),
+        @Const(mask), @Const(itype), @Const(evergreen), @Const(woody), t1)
+    p = @index(Global)
+    @inbounds if mask[p]
+        T = eltype(leaf_to)
+        ivt = itype[p] + 1
+        if evergreen[ivt] == one(T)
+            leaf_to[p]  = t1 * leaf_x[p]
+            froot_to[p] = t1 * froot_x[p]
+            if woody[ivt] == one(T)
+                livestem_to[p]  = t1 * livestem_x[p]
+                deadstem_to[p]  = t1 * deadstem_x[p]
+                livecroot_to[p] = t1 * livecroot_x[p]
+                deadcroot_to[p] = t1 * deadcroot_x[p]
+            end
+        end
+    end
+end
+
+function phen_evergreen_xfer!(cnveg_cs::CNVegCarbonStateData, cnveg_ns::CNVegNitrogenStateData,
+        cnveg_cf::CNVegCarbonFluxData, cnveg_nf::CNVegNitrogenFluxData,
+        mask, itype, evergreen, woody, dt)
+    cs = cnveg_cs; ns = cnveg_ns; cf = cnveg_cf; nf = cnveg_nf
+    t1 = eltype(cf.leafc_xfer_to_leafc_patch)(1 / dt)
+    _launch!(_phen_evergreen_xfer_kernel!,
+        cf.leafc_xfer_to_leafc_patch, cf.frootc_xfer_to_frootc_patch,
+        cf.livestemc_xfer_to_livestemc_patch, cf.deadstemc_xfer_to_deadstemc_patch,
+        cf.livecrootc_xfer_to_livecrootc_patch, cf.deadcrootc_xfer_to_deadcrootc_patch,
+        cs.leafc_xfer_patch, cs.frootc_xfer_patch,
+        cs.livestemc_xfer_patch, cs.deadstemc_xfer_patch,
+        cs.livecrootc_xfer_patch, cs.deadcrootc_xfer_patch,
+        mask, itype, evergreen, woody, t1)
+    _launch!(_phen_evergreen_xfer_kernel!,
+        nf.leafn_xfer_to_leafn_patch, nf.frootn_xfer_to_frootn_patch,
+        nf.livestemn_xfer_to_livestemn_patch, nf.deadstemn_xfer_to_deadstemn_patch,
+        nf.livecrootn_xfer_to_livecrootn_patch, nf.deadcrootn_xfer_to_deadcrootn_patch,
+        ns.leafn_xfer_patch, ns.frootn_xfer_patch,
+        ns.livestemn_xfer_patch, ns.deadstemn_xfer_patch,
+        ns.livecrootn_xfer_patch, ns.deadcrootn_xfer_patch,
+        mask, itype, evergreen, woody, t1)
     return nothing
 end
 
@@ -539,16 +597,70 @@ function phen_onset_growth!(
     return nothing
 end
 
+# --- leaf/fine-root N litterfall + retranslocation split -------------------
+# Shared by CNOffsetLitterfall (CNPhenologyMod.F90:3747-3858) and
+# CNBackgroundLitterfall (ibid. 3982-4067), non-matrix path. With FUN the leaf N
+# split is driven by what CNFUN retranslocated THIS step (paid_retransn_to_npool =
+# retransn_to_npool, plus free_retransn_to_npool), which also updates
+# leafcn_offset; the CNratio_floating block then re-partitions the leaf N turnover
+# with that FUN fraction (0.5 without FUN). FUN finally caps the fine-root N
+# litterfall at the pool.
+@inline function _phen_litter_nsplit!(leafc_to_litter_fun, leafn_to_litter,
+        leafn_to_retransn, frootn_to_litter, leafcn_offset, p, ivt,
+        lc2l, fc2l, lc, fc, ln, fn, lflitcn, leafcn, frootcn,
+        paid_retransn_to_npool, free_retransn_to_npool, dt,
+        CNratio_floating::Bool, use_fun::Bool)
+    T = typeof(lc2l)
+    fr_leafn_to_litter = T(0.5)
+    if use_fun
+        leafc_to_litter_fun[p] = lc2l
+        leafn_to_retransn[p] = paid_retransn_to_npool[p] + free_retransn_to_npool[p]
+        if ln > zero(T)
+            if ln - leafn_to_retransn[p] * dt > zero(T)
+                leafcn_offset[p] = lc / (ln - leafn_to_retransn[p] * dt)
+            else
+                leafcn_offset[p] = lc / ln
+            end
+        else
+            leafcn_offset[p] = leafcn[ivt]
+        end
+        leafn_to_litter[p] = max(lc2l / leafcn_offset[p] - leafn_to_retransn[p], zero(T))
+        denom = leafn_to_retransn[p] + leafn_to_litter[p]
+        if denom != zero(T)
+            fr_leafn_to_litter = leafn_to_litter[p] / denom
+        elseif leafn_to_litter[p] == zero(T)
+            fr_leafn_to_litter = zero(T)
+        else
+            fr_leafn_to_litter = one(T)
+        end
+    else
+        leafn_to_litter[p]   = lc2l / lflitcn[ivt]
+        leafn_to_retransn[p] = (lc2l / leafcn[ivt]) - leafn_to_litter[p]
+    end
+    frootn_to_litter[p] = fc2l / frootcn[ivt]
+    if CNratio_floating
+        ntovr_leaf = lc == zero(T) ? zero(T) : lc2l * (ln / lc)
+        leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
+        leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
+        frootn_to_litter[p]  = fc == zero(T) ? zero(T) : fc2l * (fn / fc)
+    end
+    if use_fun && frootn_to_litter[p] * dt > fn
+        frootn_to_litter[p] = fn / dt
+    end
+    return nothing
+end
+
 # --- cn_offset_litterfall!: display→litter fluxes during offset ----------
 @kernel function _phen_offset_litterfall_kernel!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         @Const(mask), @Const(itype), @Const(mask_pcrop),
         @Const(offset_flag), @Const(offset_counter),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        @Const(cpool_to_frootc),
+        @Const(cpool_to_frootc), @Const(cpool_to_leafc),
+        @Const(paid_retransn_to_npool), @Const(free_retransn_to_npool),
         dt, CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
@@ -580,32 +692,22 @@ end
                     t1 * (frootc[p] - prev_frootc_to_litter[p] * offset_counter[p])
             end
 
-            if CNratio_floating
-                fr_leafn_to_litter = T(0.5)
-                if leafc[p] == zero(T)
-                    ntovr_leaf = zero(T)
-                else
-                    ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
+            # FUN: never shed more than the pool (+ this step's allocation to it)
+            # (CNPhenologyMod.F90:3720-3745).
+            if use_fun
+                if leafc_to_litter[p] * dt > leafc[p]
+                    leafc_to_litter[p] = leafc[p] / dt + cpool_to_leafc[p]
                 end
-                leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
-                leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
-                if frootc[p] == zero(T)
-                    frootn_to_litter[p] = zero(T)
-                else
-                    frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
+                if frootc_to_litter[p] * dt > frootc[p]
+                    frootc_to_litter[p] = frootc[p] / dt + cpool_to_frootc[p]
                 end
-            else
-                leafn_to_litter[p]   = leafc_to_litter[p] / lflitcn[ivt]
-                leafn_to_retransn[p] = (leafc_to_litter[p] / leafcn[ivt]) - leafn_to_litter[p]
-                frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
             end
 
-            # FUN uses the current step's leaf litterfall for retranslocation
-            # accounting (CNPhenologyMod.F90:3749). Set inside the litterfall
-            # branch so non-litterfall patches keep their prior value.
-            if use_fun
-                leafc_to_litter_fun[p] = leafc_to_litter[p]
-            end
+            _phen_litter_nsplit!(leafc_to_litter_fun, leafn_to_litter, leafn_to_retransn,
+                frootn_to_litter, leafcn_offset, p, ivt, leafc_to_litter[p],
+                frootc_to_litter[p], leafc[p], frootc[p], leafn[p], frootn[p],
+                lflitcn, leafcn, frootcn, paid_retransn_to_npool, free_retransn_to_npool,
+                dt, CNratio_floating, use_fun)
 
             prev_leafc_to_litter[p]  = leafc_to_litter[p]
             prev_frootc_to_litter[p] = frootc_to_litter[p]
@@ -620,14 +722,17 @@ function phen_offset_litterfall!(
         mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
         cpool_to_frootc,
-        dt, CNratio_floating, use_fun)
+        dt, CNratio_floating, use_fun;
+        leafcn_offset = leafc_to_litter_fun, cpool_to_leafc = cpool_to_frootc,
+        paid_retransn_to_npool = cpool_to_frootc, free_retransn_to_npool = cpool_to_frootc)
+    # The FUN-only arrays default to placeholders that are never read without FUN.
     _launch!(_phen_offset_litterfall_kernel!,
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         prev_leafc_to_litter, prev_frootc_to_litter,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         mask, itype, mask_pcrop, offset_flag, offset_counter,
         leafc, frootc, leafn, frootn, lflitcn, leafcn, frootcn,
-        cpool_to_frootc,
+        cpool_to_frootc, cpool_to_leafc, paid_retransn_to_npool, free_retransn_to_npool,
         eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
 end
 
@@ -750,11 +855,12 @@ end
 # --- cn_background_litterfall!: background litter fluxes ------------------
 @kernel function _phen_background_litterfall_kernel!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         @Const(mask), @Const(itype), @Const(bglfr),
         @Const(leafc), @Const(frootc), @Const(leafn), @Const(frootn),
         @Const(lflitcn), @Const(leafcn), @Const(frootcn),
-        CNratio_floating::Bool, use_fun::Bool)
+        @Const(paid_retransn_to_npool), @Const(free_retransn_to_npool),
+        dt, CNratio_floating::Bool, use_fun::Bool)
     T = eltype(leafc_to_litter)
     p = @index(Global)
     @inbounds if mask[p]
@@ -762,29 +868,11 @@ end
             ivt = itype[p] + 1
             leafc_to_litter[p]  = bglfr[p] * leafc[p]
             frootc_to_litter[p] = bglfr[p] * frootc[p]
-            # FUN uses the current step's leaf litterfall (CNPhenologyMod.F90:3983)
-            if use_fun
-                leafc_to_litter_fun[p] = leafc_to_litter[p]
-            end
-            if CNratio_floating
-                fr_leafn_to_litter = T(0.5)
-                if leafc[p] == zero(T)
-                    ntovr_leaf = zero(T)
-                else
-                    ntovr_leaf = leafc_to_litter[p] * (leafn[p] / leafc[p])
-                end
-                leafn_to_litter[p]   = fr_leafn_to_litter * ntovr_leaf
-                leafn_to_retransn[p] = ntovr_leaf - leafn_to_litter[p]
-                if frootc[p] == zero(T)
-                    frootn_to_litter[p] = zero(T)
-                else
-                    frootn_to_litter[p] = frootc_to_litter[p] * (frootn[p] / frootc[p])
-                end
-            else
-                leafn_to_litter[p]   = leafc_to_litter[p] / lflitcn[ivt]
-                leafn_to_retransn[p] = (leafc_to_litter[p] / leafcn[ivt]) - leafn_to_litter[p]
-                frootn_to_litter[p]  = frootc_to_litter[p] / frootcn[ivt]
-            end
+            _phen_litter_nsplit!(leafc_to_litter_fun, leafn_to_litter, leafn_to_retransn,
+                frootn_to_litter, leafcn_offset, p, ivt, leafc_to_litter[p],
+                frootc_to_litter[p], leafc[p], frootc[p], leafn[p], frootn[p],
+                lflitcn, leafcn, frootcn, paid_retransn_to_npool, free_retransn_to_npool,
+                dt, CNratio_floating, use_fun)
         end
     end
 end
@@ -793,12 +881,16 @@ function phen_background_litterfall!(
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
         leafn_to_litter, leafn_to_retransn, frootn_to_litter,
         mask, itype, bglfr, leafc, frootc, leafn, frootn,
-        lflitcn, leafcn, frootcn, CNratio_floating, use_fun)
+        lflitcn, leafcn, frootcn, CNratio_floating, use_fun;
+        dt = 1800.0, leafcn_offset = leafc_to_litter_fun,
+        paid_retransn_to_npool = leafc_to_litter, free_retransn_to_npool = leafc_to_litter)
+    # The FUN-only arrays default to placeholders that are never read without FUN.
     _launch!(_phen_background_litterfall_kernel!,
         leafc_to_litter, frootc_to_litter, leafc_to_litter_fun,
-        leafn_to_litter, leafn_to_retransn, frootn_to_litter,
+        leafn_to_litter, leafn_to_retransn, frootn_to_litter, leafcn_offset,
         mask, itype, bglfr, leafc, frootc, leafn, frootn,
-        lflitcn, leafcn, frootcn, CNratio_floating, use_fun)
+        lflitcn, leafcn, frootcn, paid_retransn_to_npool, free_retransn_to_npool,
+        eltype(leafc_to_litter)(dt), CNratio_floating, use_fun)
 end
 
 # --- cn_livewood_turnover!: live wood → dead wood turnover ----------------
@@ -1047,11 +1139,12 @@ function cn_phenology!(pstate::PhenologyState, params::PhenologyParams,
 
     if phase == 1
         cn_phenology_climate!(pstate, mask_soilp, temperature, cnveg_state, crop,
-                              patch_data, pftcon)
+                              patch_data, pftcon; dayspyr = dayspyr)
 
         cn_evergreen_phenology!(pstate, mask_soilp, pftcon, cnveg_state,
                                 cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
-                                patch_data, avg_dayspyr)
+                                patch_data, avg_dayspyr;
+                                evergreen_phenology_opt = varctl.CN_evergreen_phenology_opt)
 
         cn_season_decid_phenology!(pstate, params, mask_soilp, pftcon,
                                    temperature, water_diag, cnveg_state,
@@ -1136,12 +1229,14 @@ function cn_phenology_climate!(pstate::PhenologyState,
                                cnveg_state::CNVegStateData,
                                crop::CropData,
                                patch_data::PatchData,
-                               pftcon::PftConPhenology)
+                               pftcon::PftConPhenology;
+                               dayspyr::Real = 365.0)
     fracday = pstate.fracday
 
-    # Update tempavg_t2m accumulator (10-day running mean) — per-patch independent.
+    # Update the tempavg_t2m annual-mean accumulator (get_curr_days_per_year in
+    # Fortran) — per-patch independent.
     phen_climate!(cnveg_state.tempavg_t2m_patch, mask_soilp,
-                  temperature.t_ref2m_patch, fracday, SPVAL)
+                  temperature.t_ref2m_patch, fracday, dayspyr, SPVAL)
 
     return nothing
 end
@@ -1158,28 +1253,27 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
                                  cnveg_cf::CNVegCarbonFluxData,
                                  cnveg_nf::CNVegNitrogenFluxData,
                                  patch_data::PatchData,
-                                 avg_dayspyr::Real)
+                                 avg_dayspyr::Real;
+                                 evergreen_phenology_opt::Int = varctl.CN_evergreen_phenology_opt)
     dt         = pstate.dt
-    # The evergreen storage→transfer uses Fortran's FIXED tranr = 0.0002
-    # (CNPhenologyMod CNEvergreenPhenology), NOT fstor2tran=0.5 — that 0.5 is the
-    # DECIDUOUS onset fraction. Using fstor2tran here drained evergreen storage
-    # 2500x too fast (halving leafc_storage every step).
-    #
-    # KNOWN DIVERGENCE (deliberate, not an oversight — do not "fix" casually):
-    # Fortran applies this transfer ONLY when `cn_evergreen_phenology_opt == 1`;
-    # with opt == 0 it skips the storage→transfer entirely. `varctl` HAS the flag
-    # (`CN_evergreen_phenology_opt::Int = 0`, varctl.jl:112) and its default is 0 —
-    # so a faithful port would skip. CLM.jl instead applies tranr = 0.0002
-    # UNCONDITIONALLY. The rate is small, but "small" is not "zero", and this is a
-    # real fidelity gap, not a rounding detail.
-    #
-    # It is NOT gated here because the whole 16-biome parity scorecard (1102/1104
-    # vars within tol) was validated against the current always-on behaviour;
-    # switching it off is a result-changing change that needs its own re-validation
-    # against the Fortran reference, not a rider on an unrelated PR. Gating it =
-    # `tranr = (varctl.CN_evergreen_phenology_opt == 1) ? 0.0002 : 0.0`, then re-run
-    # scripts/parity_run_domain.jl across the scorecard.
-    tranr = 0.0002
+    # CNEvergreenPhenology (CNPhenologyMod.F90:724-831). bglfr/bgtr/lgsf are set for
+    # every evergreen patch; everything else is the `CN_evergreen_phenology_opt == 1`
+    # block (the CTSM namelist default whenever use_flexibleCN, :587):
+    #   * storage -> transfer at Fortran's FIXED tranr = 0.0002 per step (not
+    #     fstor2tran = 0.5, the DECIDUOUS onset fraction), :739-776;
+    #   * transfer -> display, t1 = 1/dt, i.e. the whole transfer pool every step,
+    #     :778-829.
+    # The port used to apply the first half unconditionally and never the second, so
+    # evergreen transfer pools only filled. That was invisible while use_flexibleCN
+    # was off (the CLM4.5 allocation sends evergreen growth straight to display via
+    # fcur), but FlexibleCN sets fcur = 0 for evergreens
+    # (NutrientCompetitionFlexibleCNMod.F90:412-414), so ALL new evergreen leaf and
+    # fine-root growth goes to storage and reaches display only through this block.
+    # With opt == 0 Fortran skips both transfers; tranr = 0 below makes the
+    # storage -> transfer fluxes zero (their per-step zeroed value) and the
+    # transfer -> display kernel is not launched.
+    _opt1 = evergreen_phenology_opt == 1
+    tranr = _opt1 ? 0.0002 : 0.0
 
     # Per-patch independent: evergreen background rates + storage→transfer.
     phen_evergreen!(
@@ -1200,6 +1294,10 @@ function cn_evergreen_phenology!(pstate::PhenologyState,
         cnveg_ns.livestemn_storage_patch, cnveg_ns.deadstemn_storage_patch,
         cnveg_ns.livecrootn_storage_patch, cnveg_ns.deadcrootn_storage_patch,
         dt, tranr, Float64(avg_dayspyr), SECSPDAY)
+
+    # Transfer -> display (CNPhenologyMod.F90:778-829, non-matrix branch).
+    _opt1 && phen_evergreen_xfer!(cnveg_cs, cnveg_ns, cnveg_cf, cnveg_nf,
+        mask_soilp, patch_data.itype, pftcon.evergreen, pftcon.woody, dt)
 
     return nothing
 end
@@ -2038,11 +2136,10 @@ end
                 # Rain trigger (CNPhenologyMod.F90:1638-1644). Was hardcoded
                 # `true` because prec10 did not exist as a field; it does now (a
                 # real 10-day running mean, accumulated in atm2lnd_update_acc_vars!).
-                # Gated on constrain_stress_deciduous_onset, whose CLM.jl default is
-                # false → this stays unconditionally true by default, exactly as
-                # before. (NOTE: Fortran's CLM5/CLM6 namelist default for that flag
-                # is .true.; only clm4_5 is .false. Flipping the CLM.jl default is a
-                # separate, parity-validated change — not made here.)
+                # Gated on constrain_stress_deciduous_onset: the CNSharedParamsData
+                # struct keeps the code fallback (.false.), and clm_initialize! sets
+                # the clm5_0 namelist default .true. for use_cn runs
+                # (namelist_defaults_ctsm.xml:635; only clm4_5 is .false.).
                 additional_onset_condition = true
                 if sc.constrain_onset
                     if inp.prec10_patch[p] * (T(3600) * T(10) * T(24)) < sc.rain_threshold
@@ -3142,9 +3239,21 @@ function cn_offset_litterfall!(pstate::PhenologyState,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
         pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn,
         _cpool_to_frootc_or_zero(cnveg_cf, length(mask_soilp)),
-        dt, CNratio_floating, use_fun)
+        dt, CNratio_floating, use_fun;
+        _phen_fun_litter_kwargs(use_fun, cnveg_state, cnveg_cf, cnveg_nf; offset = true)...)
 
     return nothing
+end
+
+# FUN-only inputs/outputs of the litterfall N split (leafcn_offset; CNFUN's paid and
+# free retranslocation; cpool_to_leafc for the offset clamp). Without FUN the kernels
+# never read them and keep their placeholders, so bare unit-test fixtures still work.
+function _phen_fun_litter_kwargs(use_fun, cnveg_state, cnveg_cf, cnveg_nf; offset::Bool)
+    use_fun || return NamedTuple()
+    kw = (leafcn_offset = cnveg_state.leafcn_offset_patch,
+          paid_retransn_to_npool = cnveg_nf.retransn_to_npool_patch,
+          free_retransn_to_npool = cnveg_nf.free_retransn_to_npool_patch)
+    return offset ? merge(kw, (cpool_to_leafc = cnveg_cf.cpool_to_leafc_patch,)) : kw
 end
 
 # cpool_to_frootc for the final-offset-step litter term. Unit-test fixtures that
@@ -3178,7 +3287,9 @@ function cn_background_litterfall!(pstate::PhenologyState,
         mask_soilp, patch_data.itype, cnveg_state.bglfr_patch,
         cnveg_cs.leafc_patch, cnveg_cs.frootc_patch,
         cnveg_ns.leafn_patch, cnveg_ns.frootn_patch,
-        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating, use_fun)
+        pftcon.lflitcn, pftcon.leafcn, pftcon.frootcn, CNratio_floating, use_fun;
+        dt = pstate.dt,
+        _phen_fun_litter_kwargs(use_fun, cnveg_state, cnveg_cf, cnveg_nf; offset = false)...)
 
     return nothing
 end

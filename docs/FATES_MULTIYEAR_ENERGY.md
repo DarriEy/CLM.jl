@@ -538,3 +538,49 @@ Regression guard: `test/test_fates_rooting_depth_roll.jl` (isolated subprocess).
 (A) checks the `alt_calc!` roll semantics. (B) is data-gated: a live FATES
 `clm_drv!` step at 1 January 01:00 rolls the index, and the daily bc pack hands it
 to FATES as `max_rooting_depth_index_col`.
+
+### Follow-up: the melt-season canopy closes the year-2+ excess (2026-10-29)
+
+The remaining year-2..4 excess (recruitment 1.5-2.2x, NPP 1.3-1.4x, seed bank
+1.8-2.4x, PFT-14 `nplant` collapse) was the host spring canopy. Three causes, found on
+a per-patch hourly Fortran tape of the SPITFIRE case (README "Melt season: snow
+burial, per-patch tveg24, case snow namelist"):
+
+1. the host snowpack never reached FATES (`wrap_update_hlmfates_dyn`,
+   clmfates_interfaceMod.F90:1494-1504 -> `UpdateFatesAvgSnowDepth`), so the canopy
+   was never buried, `elai = tlai` all winter and the leaf absorbed 2-15x the SW;
+2. every patch's `tveg24` was driven from patch 1's photosynthesis-iteration
+   `t_veg_pa` instead of its own `t_veg_patch` (`WrapUpdateFatesRmean`,
+   clmfates_interfaceMod.F90:3227-3245);
+3. the FATES harnesses ran the port's Anderson1976 / no-wind snow defaults, while every
+   Fortran FATES lnd_in has Vionnet2012 + `wind_dependent_snow_density`.
+
+No FATES demography code changed. The multiyear harness now also writes per-PFT NPP,
+leaf C, storage C, reproductive C and seed (`npp_*`, `leafc_*`, `storec_*`, `repro_*`,
+`seed_*`), comparable with `FATES_NPP_PF` / `FATES_LEAFC_PF` / `FATES_STOREC_PF`
+of a Fortran rerun with those fields added (`stage_multiyear.py` field list +
+`FATES_LEAFC_PF, FATES_STOREC_PF, ...`).
+
+4-year Gregorian Bow run, J / F (before = #357, `julia_fix.csv`):
+
+| model yr | recruitment before -> after | NPP before -> after | max ncoh J / F after |
+|---|---|---|---|
+| 1 | 1.16 -> **1.00** | 1.00 -> **0.99** | 178 / 177 |
+| 2 | 1.57 -> **0.90** | 1.30 -> **0.98** | 879 / 880 |
+| 3 | 1.53 -> **0.99** | 1.42 -> **0.99** | 757 / 672 |
+| 4 | 2.16 -> **1.01** | 1.40 -> **0.98** | 282 / 282 |
+
+* Seed bank J/F by year: 1.00 / 0.94 / 0.99 / 1.02 (before 0.72 in year 1, 1.8-2.4x later).
+* Grass NPP per PFT (13, 14), J/F by year: 1.006/1.006, 1.000/1.005, 0.999/0.999,
+  0.998/0.972. Grass leaf C days 240-330 (spring 2003): 0.993 (PFT 13), 0.980 (PFT 14),
+  before +14 %.
+* PFT-14 `nplant` [m-2], J / F: day 700 32.2 / 35.3, day 721 8.30 / 9.21 (before 0.74),
+  day 760 4.09 / 4.55 (before 0.12), day 1100 4.05 / 3.93. A summer drop is Fortran
+  behaviour too (in Fortran it is almost all `FATES_MORTALITY_TERMINATION_SZPF`,
+  days 700-760); the port's deeper collapse went away with the canopy fixes, with no
+  change to the mortality code.
+* Year 1 now matches: the cold-deciduous leaf-off fires on model day 39 (Fortran 40,
+  residual 1 above; before: day 11).
+
+Still open: year-2 recruitment 0.90 and PFT-12 (arctic C3 grass, a trace PFT,
+1e-12 kgC m-2 s-1 NPP) 1.2x in year 4.

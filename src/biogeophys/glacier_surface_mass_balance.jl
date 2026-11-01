@@ -143,7 +143,7 @@ end
         snow_persistence_col, glc_dyn_runoff_routing_grc,
         col_landunit, col_gridcell, lun_itype,
         mask_allc, mask_do_smb, bounds;
-        glc_snow_persistence_max_days = 7300)
+        glc_snow_persistence_max_days = 0)
 
 Compute glacier fluxes other than ice melt: ice growth (`qflx_glcice_frz`), net
 glacial ice flux (`qflx_glcice = frz - melt`), and the water-balance correction
@@ -175,7 +175,7 @@ function compute_surface_mass_balance!(
     mask_allc::AbstractVector{Bool},
     mask_do_smb::AbstractVector{Bool},
     bounds::UnitRange{Int};
-    glc_snow_persistence_max_days::Integer = 7300,
+    glc_snow_persistence_max_days::Integer = 0,
 )
     isempty(bounds) && return nothing
     FT = eltype(qflx_glcice_col)

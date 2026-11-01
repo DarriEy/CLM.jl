@@ -84,7 +84,7 @@ function main(; nsteps::Int = 6, use_cn::Bool = false)
             CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep=tm.nstep, is_first_step=(i==1),
             is_beg_curr_day=CLM.is_beg_curr_day(tm), is_end_curr_day=CLM.is_end_curr_day(tm),
-            is_beg_curr_year=CLM.is_beg_curr_year(tm), dtime=3600.0, mon=mon, day=d,
+            is_beg_curr_year=CLM.is_beg_curr_year(tm), dtime=3600.0, mon=mon, day=d, secs=tod,
             photosyns=inst.photosyns)
 
         # finiteness + sane-range checks on the core surface predictions.

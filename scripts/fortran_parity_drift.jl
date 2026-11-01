@@ -122,7 +122,7 @@ function run_drift(; n0::Int = DRIFT_N0, nsteps::Int = DRIFT_NSTEPS,
             CLM.ORB_OBLIQR_DEFAULT, false, false, "", false;
             nstep = tm.nstep, is_first_step = false,
             is_beg_curr_day = CLM.is_beg_curr_day(tm), is_end_curr_day = CLM.is_end_curr_day(tm),
-            is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = d,
+            is_beg_curr_year = CLM.is_beg_curr_year(tm), dtime = 3600.0, mon = mon, day = d, secs = tod,
             photosyns = inst.photosyns)
         n = n0 + i
         da = NCDataset(joinpath(sumdir, "pdump_after_hydrologydrainage_n$(n).nc"), "r")

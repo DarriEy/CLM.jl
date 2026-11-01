@@ -15,6 +15,10 @@ using Test
 using CLM
 
 include("testdata.jl")
+# The FATES harness build sets the Fortran case snow namelist (module-global Refs,
+# fates_case_snow_namelist!); restore the port defaults when this file is done.
+_snow_ctrl_saved = (CLM.WIND_DEPENDENT_SNOW_DENSITY[], CLM.OVERBURDEN_COMPACTION_METHOD[],
+                    CLM.NEW_SNOW_DENSITY[])
 
 @testset "FATES reduced-complexity modes" begin
 
@@ -106,3 +110,6 @@ include("testdata.jl")
         end
     end
 end
+
+CLM.WIND_DEPENDENT_SNOW_DENSITY[], CLM.OVERBURDEN_COMPACTION_METHOD[], CLM.NEW_SNOW_DENSITY[] =
+    _snow_ctrl_saved

@@ -76,8 +76,10 @@ using Test
     @testset "Module constants" begin
         @test CLM.CN_CCRIT_DEFAULT    == 1.0e-8
         @test CLM.CN_CNEGCRIT_DEFAULT == -6.0e+1
-        @test CLM.CN_NCRIT_DEFAULT    == 1.0e-8
-        @test CLM.CN_NNEGCRIT_DEFAULT == -7.0e+0
+        # clm5_0 &cnprecision_inparm namelist defaults (namelist_defaults_ctsm.xml:
+        # 646, 652), not the CNPrecisionControlMod.F90:27-28 code fallbacks (1e-8, -7).
+        @test CLM.CN_NCRIT_DEFAULT    == 1.0e-9
+        @test CLM.CN_NNEGCRIT_DEFAULT == -6.0e+0
         @test CLM.CN_N_MIN            == 1.0e-9
     end
 
@@ -221,7 +223,7 @@ using Test
             np = 2
             # Patch 1: C is large but N is tiny -- should truncate with nguardrail
             carbon   = [1.0, 0.5]
-            nitrogen = [5.0e-9, 0.3]
+            nitrogen = [5.0e-10, 0.3]   # below ncrit = 1e-9 (clm5_0 namelist)
             pc = zeros(np)
             pn = zeros(np)
             filter = [1, 2]
@@ -237,7 +239,7 @@ using Test
             @test carbon[1] == 0.0
             @test nitrogen[1] == 0.0
             @test pc[1] == 1.0
-            @test pn[1] == 5.0e-9
+            @test pn[1] == 5.0e-10
         end
     end
 
@@ -327,7 +329,7 @@ using Test
 
         @testset "small positive N values truncated" begin
             np = 3
-            nitrogen = [5.0e-9, 1.0, 3.0e-9]
+            nitrogen = [5.0e-10, 1.0, 3.0e-10]   # below ncrit = 1e-9
             pn = zeros(np)
             filter = [1, 2, 3]
 
@@ -336,13 +338,13 @@ using Test
             @test nitrogen[1] == 0.0
             @test nitrogen[2] == 1.0
             @test nitrogen[3] == 0.0
-            @test pn[1] == 5.0e-9
-            @test pn[3] == 3.0e-9
+            @test pn[1] == 5.0e-10
+            @test pn[3] == 3.0e-10
         end
 
         @testset "critically negative N is silently ignored (Fortran behaviour)" begin
             np = 2
-            nitrogen = [-10.0, 5.0e-9]
+            nitrogen = [-10.0, 5.0e-10]
             pn = zeros(np)
             filter = [1, 2]
 
@@ -355,7 +357,7 @@ using Test
 
             # Patch 2: small positive, truncated
             @test nitrogen[2] == 0.0
-            @test pn[2] == 5.0e-9
+            @test pn[2] == 5.0e-10
         end
     end
 
@@ -392,7 +394,7 @@ using Test
             np = 2
             tiny = 5.0e-9
             cs = make_cs(np; val=tiny)
-            ns = make_ns(np; val=tiny)
+            ns = make_ns(np; val=tiny / 10)   # N below ncrit = 1e-9
             filter = [1, 2]
             itype  = [1, 1]
 

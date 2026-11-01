@@ -27,6 +27,7 @@ RESTART_OPTION=${RESTART_OPTION:-nyears}
 RESTART_N=${RESTART_N:-1}
 FINIDAT=${FINIDAT:-}          # startup from a (possibly edited) restart -- the PR #312 recipe
 FLEXIBLECN=${FLEXIBLECN:-.true.}   # .false. for the CNSoyfix reference (see setup_soyfix_continue.sh)
+USE_FUN=${USE_FUN:-.false.}        # .true. for the FUN soybean-fixation reference (docs/CROP_PARITY.md "FUN crop N")
 SURF=${SURF:-$SD/runs/crop_tails_inputs/surfdata_cropCFT_USplains_1pt_wwheat.nc}
 TPL=$SD/clm_bgc_spinup/crop_ref_nofun_cold
 
@@ -41,13 +42,16 @@ for f in lnd_in datm_in drv_in drv_flds_in nuopc.runconfig datm.streams.xml; do
     sed -i '' -e "s|$OLD_SD/installs/cesm-inputdata|$ID|g" -e "s|$OLD_ID|$ID|g" -e "s|$OLD_SD|$SD|g" "$f"
 done
 sed -i '' -e "s|^ fsurdat = .*| fsurdat = '$SURF'|" \
-          -e "s|^ use_fun = .*| use_fun = .false.|" \
+          -e "s|^ use_fun = .*| use_fun = $USE_FUN|" \
           -e "s|^ use_fertilizer = .*| use_fertilizer = .true.|" \
           -e "s|^ nrevsn = .*||" \
           -e "s|^ finidat = .*| finidat = '$FINIDAT'|" \
           -e "s|^ use_flexiblecn = .*| use_flexiblecn = $FLEXIBLECN|" lnd_in
 # daily patch-level history to locate phase events (tape 2)
-perl -i -pe 's/^ hist_mfilt = .*/ hist_mfilt = 20, 1000/; s/^ hist_nhtfrq = .*/ hist_nhtfrq = -8760, -24\n hist_dov2xy = .true., .false.\n hist_fincl2 = \x27CPHASE\x27,\x27HUI\x27,\x27SOYFIXN\x27,\x27FPG\x27,\x27TLAI\x27,\x27PLANT_NDEMAND\x27,\x27GDDHARV\x27,\x27LEAFC\x27/' lnd_in
+perl -i -pe 's/^ hist_mfilt = .*/ hist_mfilt = 20, 1000/; s/^ hist_nhtfrq = .*/ hist_nhtfrq = -8760, -24\n hist_dov2xy = .true., .false.\n hist_fincl2 = \x27CPHASE\x27,\x27HUI\x27,\x27SOYFIXN\x27,\x27FPG\x27,\x27TLAI\x27,\x27PLANT_NDEMAND\x27,\x27GDDHARV\x27,\x27LEAFC\x27'"${HIST2_EXTRA:-}"'/' lnd_in
+# Under FUN, CTSM registers neither SOYFIXN (CNVegNitrogenFluxType.F90:1607) nor FPG
+# (SoilBiogeochemStateType.F90:187) as history fields; requesting them aborts.
+if [ "$USE_FUN" = ".true." ]; then sed -i '' -e "s/'SOYFIXN',//; s/'FPG',//" lnd_in; fi
 sed -i '' -e "s|^     stop_n = .*|     stop_n = $STOP_N|" -e "s|^     stop_option = .*|     stop_option = $STOP_OPTION|" \
           -e "s|^     start_ymd = .*|     start_ymd = $START_YMD|" -e "s|^     start_tod = .*|     start_tod = $START_TOD|" \
           -e "s|^     restart_n = .*|     restart_n = $RESTART_N|" -e "s|^     restart_option = .*|     restart_option = $RESTART_OPTION|" \

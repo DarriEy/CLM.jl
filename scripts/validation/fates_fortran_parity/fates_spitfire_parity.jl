@@ -32,6 +32,9 @@ const FIRE_FIELDS = ("FATES_NESTEROV_INDEX", "FATES_FUEL_AMOUNT", "FATES_FUEL_EF
     "FATES_FUELCONSUMED", "FATES_FIRE_CLOSS", "FATES_DISTURBANCE_RATE_FIRE",
     "FATES_MORTALITY_FIRE_SZ", "FATES_TVEG24", "FATES_VEGC", "FATES_NPATCHES")
 const HOST_FIELDS = ("WIND", "RH", "PRECIP", "TBOT")
+# Host fire streams (modes > 1): day means of FATESFireData forc_lnfm [counts/km2/hr]
+# and forc_hdm [counts/km2], vs the Fortran LNFM / HDM history fields.
+const STREAM_FIELDS = ("LNFM", "HDM")
 # Per fuel class (twigs, small/large branches, trunks, dead leaves, live grass):
 # FATES_FUEL_AMOUNT_FC / FATES_FUEL_MOISTURE_FC (level-2 history; the Julia side is
 # summed from the patches exactly as update_history_dyn2 does).
@@ -41,7 +44,7 @@ const FC_FIELDS = Tuple(vcat(["FUEL_FC$k" for k in 1:NFC], ["MOIST_FC$k" for k i
 # dead leaves = sum(leaf_fines), twigs/branches/trunks = ag_cwd(1:4)). Scoring these
 # beside FUEL_FC* separates a litter (vegetation) gap from a fuel-summation gap.
 const LITTER_FIELDS = ("FATES_LITTER_AG_FINE_EL", "FATES_LITTER_AG_CWD_EL")
-const ALL_FIELDS = (FIRE_FIELDS..., HOST_FIELDS..., FC_FIELDS..., LITTER_FIELDS...)
+const ALL_FIELDS = (FIRE_FIELDS..., HOST_FIELDS..., FC_FIELDS..., LITTER_FIELDS..., STREAM_FIELDS...)
 
 "Value of a Julia FATES history variable (site 1; multi-dim variables summed)."
 function _jhist(h, name)
@@ -83,21 +86,42 @@ function datm_time(cur::DateTime)
 end
 
 """
+    fates_spitfire_streams(real::Bool) -> NamedTuple
+
+`clm_initialize!` stream kwargs for SPITFIRE modes > 1. `real = false`: the synthetic
+uniform parity streams (scripts/validation/make_fire_streams.jl). `real = true`: the
+CTSM default files, as in the archived fates_parity_1pt lnd_in: the NASA LIS/OTD
+3-hourly lightning climatology (stream year 1, cycled) and HYDE 3.2 population density
+at stream year 2000 (stream_year_first/last_popdens = 2000, model_year_align = 1).
+"""
+function fates_spitfire_streams(real::Bool)
+    IN = get(ENV, "CESM_INPUTDATA", joinpath(DATA, "installs", "cesm-inputdata"))
+    fd = joinpath(IN, "lnd", "clm2", "firedata")
+    real || return (flnfm = joinpath(fd, "clmforc.UNIFORM_lnfm_0.9x1.25_CLMjl-parity.nc"),
+                    fhdm  = joinpath(fd, "clmforc.UNIFORM_hdm_0.9x1.25_CLMjl-parity.nc"))
+    return (flnfm = joinpath(IN, "atm", "datm7", "NASA_LIS",
+                             "clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc"),
+            fhdm  = joinpath(fd, "clmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc"),
+            stream_year_first_popdens = 2000, stream_year_last_popdens = 2000,
+            model_year_align_popdens = 1)
+end
+
+"""
 Run the port `ndays` days and return one record per model day: the FATES fire history
 after that day's daily step, plus the day-mean host forcing over the day's steps.
 Record d (1-based) <-> the Fortran h0 record covering model day d.
 """
 function run_julia(ndays::Int; tveg24_ref = nothing)
-    # SPITFIRE_MODE=2..5 (default 1) reads the same synthetic uniform lightning /
-    # population-density streams stage_spitfire_run.sh gives the Fortran case.
+    # SPITFIRE_MODE=2..5 (default 1) reads the same lightning / population-density
+    # streams stage_spitfire_run.sh gives the Fortran case: the synthetic uniform ones,
+    # or with REAL_STREAMS=1 the CTSM defaults (fates_spitfire_streams).
     mode = parse(Int, get(ENV, "SPITFIRE_MODE", "1"))
-    fd = joinpath(get(ENV, "CESM_INPUTDATA", joinpath(DATA, "installs", "cesm-inputdata")),
-                  "lnd", "clm2", "firedata")
-    streams = mode > 1 ?
-        (flnfm = joinpath(fd, "clmforc.UNIFORM_lnfm_0.9x1.25_CLMjl-parity.nc"),
-         fhdm  = joinpath(fd, "clmforc.UNIFORM_hdm_0.9x1.25_CLMjl-parity.nc")) : (;)
+    streams = mode > 1 ? fates_spitfire_streams(get(ENV, "REAL_STREAMS", "0") == "1") : (;)
     inst, bounds, filt, filt_ia, config, _tm = build(; fates_spitfire_mode = mode, streams...)
     CLM.hlm_spitfire_mode[] == mode || error("SPITFIRE mode not set")
+    # This harness passes the START-of-step time as (jday, secs); Fortran advances the
+    # streams at get_curr_date, the end of the step.
+    inst.fates_fire_data.tod_offset = round(Int, DTIME)
     # FIRE_THRESHOLD=x [kW/m] overrides fates_fire_threshold, to match a Fortran
     # reference run whose parameter file lowers it (stage_spitfire_run.sh CDL=...).
     if haskey(ENV, "FIRE_THRESHOLD")
@@ -126,7 +150,7 @@ function run_julia(ndays::Int; tveg24_ref = nothing)
     nstep = 0; t0 = time()
     for d in 0:ndays-1
         dstart = noleap_day(d)
-        acc = Dict(f => 0.0 for f in HOST_FIELDS); nacc = 0
+        acc = Dict(f => 0.0 for f in (HOST_FIELDS..., STREAM_FIELDS...)); nacc = 0
         for k in 0:spd-1
             for i in ((d == 0 && k == 0) ? (0:1) : (nstep+1:nstep+1))   # step-0 replay
                 cur = DateTime(dstart) + Second(round(Int, k * DTIME))
@@ -156,6 +180,10 @@ function run_julia(ndays::Int; tveg24_ref = nothing)
                     acc["RH"]   += a2l.forc_rh_grc[g]
                     acc["PRECIP"] += a2l.forc_rain_downscaled_col[c] + a2l.forc_snow_downscaled_col[c]
                     acc["TBOT"] += a2l.forc_t_downscaled_col[c]
+                    ffd = inst.fates_fire_data
+                    if CLM.fates_fire_data_active(ffd)
+                        acc["LNFM"] += ffd.forc_lnfm[g]; acc["HDM"] += ffd.forc_hdm[g]
+                    end
                     nacc += 1
                 end
             end
@@ -202,7 +230,7 @@ function run_julia(ndays::Int; tveg24_ref = nothing)
             end
             r["FATES_LITTER_AG_FINE_EL"] = lf; r["FATES_LITTER_AG_CWD_EL"] = lc
         end
-        for f in HOST_FIELDS; r[f] = acc[f] / max(nacc, 1); end
+        for f in (HOST_FIELDS..., STREAM_FIELDS...); r[f] = acc[f] / max(nacc, 1); end
         push!(recs, r)
         if (d + 1) % 30 == 0
             @printf("  day %4d %s  NI=%9.1f fuel=%.4f burnfrac=%.3e npatch=%d  %.0fs\n",
@@ -243,6 +271,9 @@ function read_fortran(path)
         end
         for f in LITTER_FIELDS                                 # (lnd, elem, time)
             haskey(ds, f) && (out[f] = Float64.(vec(Array(ds[f])[1, 1, :])))
+        end
+        for f in STREAM_FIELDS
+            haskey(ds, f) && (out[f] = Float64.(vec(ds[f][1, :])))
         end
         out["WIND"] = Float64.(vec(ds["WIND"][1, :]))
         out["RH"]   = Float64.(vec(ds["RH"][1, :]))
@@ -320,7 +351,9 @@ function spitfire_main(args)
     ndays = length(args) >= 2 ? parse(Int, args[2]) : length(first(values(ft)))
     jl = run_julia(ndays; tveg24_ref = get(ENV, "PHEN_TMEM_FROM_FORTRAN", "0") == "1" ?
                                        ft["FATES_TVEG24"] : nothing)
-    println("\n=== FATES SPITFIRE (mode 1): Julia vs Fortran (", ndays, " days) ===")
+    println("\n=== FATES SPITFIRE (mode ", get(ENV, "SPITFIRE_MODE", "1"),
+            get(ENV, "REAL_STREAMS", "0") == "1" ? ", real streams" : "",
+            "): Julia vs Fortran (", ndays, " days) ===")
     score(jl, ft)
     # The FATES vegetation trajectories separate after ~5 weeks (patch spawning and
     # litter inputs; independent of fire -- the no-fire run diverges identically), so
