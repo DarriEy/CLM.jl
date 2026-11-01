@@ -84,47 +84,27 @@ device run to the Float64 CPU reference — the same silent demotion #263 remove
 `gpu_ad_reverse_driver_validate` was the one failure left above. It reverse-
 differentiates one timestep of the compositional driver chain (canopy energy balance
 with 2 Newton iterations → soil temperature → surface hydrology → soil water → water
-table → hydrology_no_drainage; 33 phases) on CUDA, then compares `dL/d(t_grnd)` with
-the CPU reverse and with central finite differences of the CUDA forward chain,
-L = Σ (soil-layer t_soisno)². Same server, Julia 1.12.6, Enzyme 0.13.216,
-EnzymeCore 0.8.26, KernelAbstractions 0.9.45, CUDA.jl 5.11.3, GPUCompiler 1.15.2.
+table → hydrology_no_drainage; 36 device phases on this domain) on CUDA, then compares
+`dL/d(t_grnd)` with the CPU reverse and with central finite differences of the CUDA
+forward chain, L = Σ (soil-layer t_soisno)². Same server, Julia 1.12.6, Enzyme
+0.13.216, EnzymeCore 0.8.26, KernelAbstractions 0.9.45, CUDA.jl 5.11.3, GPUCompiler
+1.15.2.
 
-**Status: runs end to end on CUDA; gradient still wrong.** Full gate at 5102a2e
-(`CLM_REVERSE_CPU=1`, FD on; 6.0 h wall, nearly all of it Enzyme/GPU compilation):
+**Result: PASS** (`gate2`, commit 665a90b, `CLM_REVERSE_CPU=1 CLM_REVERSE_FD=1`,
+16466 s wall including compilation):
 
 | | dL/d(t_grnd[1]) |
 |---|---|
-| CPU reverse (host phase list, unchanged) | -3.50231505e+00 |
-| Central FD of the CUDA forward chain, h = 1e-2 / 5e-3 / 2.5e-3 | -3.50231505 / -3.50231504 / -3.50231505 (Richardson -3.50231505) |
-| CUDA reverse (device phase list) | -1.34647340e-14 — **FAIL** |
+| CUDA reverse (36-phase device list) | -3.50231505e+00 |
+| CPU reverse (15-phase host list) | -3.50231505e+00 (absdiff 2.8e-14, tol 7.0e-9) |
+| CUDA forward FD, h = 1e-2 / 5e-3 / 2.5e-3 | -3.50231505 / -3.50231504 / -3.50231505 |
+| Richardson FD | -3.50231505e+00 (rel 4.8e-10 vs CUDA reverse, bracketed) |
 
-CPU reverse and FD agree to < 1e-8 relative, so the CPU path and the device forward
-chain are right; the device reverse loses the gradient. Per-phase CUDA-vs-CPU reverse
-checks (`phase_diff`, same checkpoint, every shadow seeded with ones, CPU running the
-same device phase list) agree to ≤ 1.3e-15 relative for tk_interface, lwrad, heatdiff,
-gnet rural / rural_contrib / reduce, SNICAR, set_qflx, infiltration. The soil-temperature
-**solve** and **post** phases disagree by O(1), in the surface-water (h2osfc) row: z,
-tk_h2osfc, dz_h2osfc, c_h2osfc, frac_h2osfc, fact, dhsdT shadows. The batched band
-solve was one cause (item 7 below); after its rule the same h2osfc-row mismatch remains,
-so a second cause is still open. Not yet checked per phase: the canopy phases, cv,
-tk_layers, setup, and the hydrology `*_dev` phases.
+The CPU reverse runs the host phase list (canopy block, `soil_temperature!`, 10
+surface-hydrology phases, soil water, water table, hydrology_no_drainage = 15 phases);
+the CUDA reverse runs the device decomposition of the same chain (36 phases).
 
-The soil-temperature block alone carries this gradient, and its device decomposition is
-right on CPU: reversing only soil temperature with the same seed gives
-dL/d(t_grnd[1]) = -3.5023150483 for the production `soil_temperature!` and
--3.5023150483 for the 13-phase decomposition on the CPU (shadow maxima of t_soisno,
-t_h2osfc, frac_h2osfc, h2osfc identical to 7 digits). The open defect is CUDA-specific.
-The same soil-temperature-only reverse on CUDA (with the band-solve rule, 8e4ddcd+)
-reproduces max|dL/dt_soisno| = 5.540013e+02 and max|dL/dt_h2osfc| = 7.618765 exactly but
-returns dL/d(t_grnd[1]) = -1.3e-14 and different frac_h2osfc/h2osfc shadows
-(2.95e3 / 1.63e4 vs 1.15e3 / 25.6). t_grnd reaches the soil solve only through the
-emitted longwave → ground heat flux → `set_rhs_vec!`/`set_matrix!`; the lwrad and
-ground-heat-flux phases match per phase, so the remaining defect is in the reverse of
-the solve phase's RHS/matrix assembly kernels on CUDA (the h2osfc row and the hs_*
-inputs). Next step: split `soiltemp_solve_rev_phase!` into rhs / matrix / init / band
-solve / extract sub-phases and run the per-phase diff on each.
-
-### Blockers found, in the order they surfaced
+### Blockers, in the order they surfaced
 
 1. **`canopy_rev_aux` scalar-indexed device masks** (the failure in the table above).
    The August server WIP (`backup/server-wip-2026-08-06`, 775df61) already built that
@@ -143,15 +123,6 @@ solve / extract sub-phases and run the per-phase diff on each.
    constant-folds gets through. The same code differentiates exactly on the CPU
    backend. Reduced to `scripts/gpu_ad_active_scalar_repro.jl` (8-element axpy kernel).
    Every CLM kernel taking `dtime` or a physical constant hit it.
-   **Workaround:** GPU launches go through `_kcall!` → `_gpu_launch!`, whose Enzyme rule
-   calls KernelAbstractions' own kernel rule (`augmented_primal`/`reverse` on the
-   `Kernel` object) with those scalars re-annotated `Const`. The kernel adjoint, tape
-   and caching stay KernelAbstractions'. (Re-annotating through a nested `autodiff`
-   call does not work: the nested call marks the same scalars Active again.)
-   **Cost:** scalar kernel arguments get a zero derivative on GPU, so a quantity to be
-   differentiated on device has to reach kernels as an array. Every scalar kernel
-   argument on the driver reverse path is `dtime`, a physical constant or a
-   configuration value. CPU launches never reach the rule.
 4. **GPUArrays' scalar fill/broadcast kernels** (`bmatrix .= 0`, `fill!(bmatrix, 0)` in
    `set_matrix!`) hit the same error. Those two device scratch fills now use a CLM fill
    kernel (`_fill_dev!`; `fill!` unchanged on host arrays).
@@ -162,29 +133,53 @@ solve / extract sub-phases and run the per-phase diff on each.
    `scatter_add_1d!`, whose launch-level rule is a race-free gather. The scatter rules
    now also match a `Duplicated` index array.
 6. **Reverse-rule return type.** Enzyme checks the inferred return type of a reverse
-   rule; the `_gpu_launch!` rule now builds it by dispatch so it is concrete.
-7. **Wrong adjoint from the batched band solve (no error raised).** With 1–6 fixed the
-   whole chain ran on CUDA but returned dL/d(t_grnd) = -1.3e-14 against -3.5023 on CPU
-   and by FD. A per-phase CUDA-vs-CPU reverse comparison (same checkpoint, all shadows
-   seeded with ones) matched every soil-temperature phase checked to ≤1.3e-15 relative
-   except the solve phase, which was off by O(1). Enzyme's reverse of
-   `_batched_band_solve_kernel!` (per-thread pivoted Gaussian elimination with a
-   data-dependent system size, overwriting its scratch in place) is wrong on CUDA. A
-   reverse rule for `batched_band_solve!` on GPU arrays now supplies the exact
-   linear-solve adjoint (λ = A⁻ᵀ x̄ from the same batched solver on the transposed
-   band; r̄ += λ; Ā -= λ xᵀ), FD-checked in `test/test_band_solve_adjoint.jl`. Not yet
-   reduced to a standalone upstream reproduction.
+   rule; the launch rule builds it by dispatch so it is concrete.
+7. **Stale primal inputs in the GPU kernel reverse (silent wrong gradient).** With 1–6
+   fixed the whole chain ran on CUDA but returned dL/d(t_grnd) = -1.3e-14 against
+   -3.5023 on CPU and by FD. Localised by
+   `scripts/cuda_reverse_phase_diff.jl` (same checkpoint, every shadow seeded with ones,
+   CUDA vs the same device phase on CPU): every phase matched to ≤1.3e-15 except the
+   soil-temperature solve and post phases; splitting the solve into RHS / matrix / init
+   / band solve / extract made every piece match. KernelAbstractions' GPU reverse
+   kernel re-reads its primal inputs from the arrays it is handed at reverse time; when
+   a later launch in the same differentiated call has overwritten one of them (the
+   extraction overwrites the `t_soisno` the RHS kernels read; the phase-change kernels
+   overwrite inputs of `_fn1_kernel!`), the coefficients' adjoints come out wrong while
+   the linear-path adjoints stay right. The CPU path is not affected (Enzyme's own
+   overwritten analysis caches what it needs).
+
+   **Workaround (3 + 7):** GPU launches go through `_kcall!` → `_gpu_launch!`, whose
+   Enzyme rule (a) snapshots the launch's arguments (one `deepcopy`, aliasing kept) and
+   (b) calls KernelAbstractions' own kernel rule (`augmented_primal`/`reverse` on the
+   `Kernel` object) with scalar arguments re-annotated `Const`, reversing against the
+   snapshot. The kernel adjoint and tape stay KernelAbstractions'. Re-annotating through
+   a nested `autodiff` call does not work: the nested call marks the scalars Active
+   again.
+   **Cost:** one device copy of each launch's arguments, held until the reverse sweep
+   reaches it (per phase — each compositional phase is a separate Enzyme call); and
+   scalar kernel arguments get a zero derivative on GPU, so a quantity to be
+   differentiated on device has to reach kernels as an array. Every scalar kernel
+   argument on the driver reverse path is `dtime`, a physical constant or a
+   configuration value. CPU launches never reach the rule.
+
+An intermediate suspicion that Enzyme's reverse of the batched band-solve kernel was
+itself wrong on CUDA did not hold: `scripts/cuda_band_solve_reverse_check.jl` (raw
+kernel launch vs the exact linear-solve adjoint, which is FD-checked in
+`test/test_band_solve_adjoint.jl`) gives relative errors 2.1e-16 / 3.2e-16 on CUDA,
+the same as CPU. No rule is used for it.
 
 The CPU reverse is unchanged: `driver_rev_phases` gives host filters the same phase
 list as before (production `soil_temperature!`, `water_table!`, the canopy block, …)
 and only device filters get the decomposition (`device` keyword; `*_dev_rev_phase!`).
 `test/test_driver_reverse.jl` runs the device list on the host and checks its forward
-state against the host list (t_soisno, t_grnd, t_veg, h2osoi_liq/vol, h2osfc, zwt).
+state against the host list, and a soil-temperature-only reverse gives
+dL/d(t_grnd[1]) = -3.5023150483 for production `soil_temperature!`, for the device
+decomposition on CPU, and for the device decomposition on CUDA.
 
-Compile time is the practical cost: a fresh process spends hours compiling the 33
-reverse thunks for CUDA (per-phase sweep: soil water 19 min, canopy energy 37 min,
-urban ground-heat-flux kernel 100 min). The urban ground-heat-flux phase is skipped
-when the domain has no urban column (an exact no-op there).
+Compile time is the practical cost: a fresh process spends hours compiling the reverse
+thunks for CUDA (canopy energy 37 min, soil water 19 min, ground-heat-flux reduction
+20 min). The urban ground-heat-flux phase (a 93 min compile) is left out of the phase
+list when the domain has no urban column, where it is an exact no-op.
 
 ## Still open
 
@@ -203,5 +198,6 @@ julia -e 'using CUDA, Test, CLM; include("test/test_backend.jl")'   # in an env 
 # whole-driver CUDA reverse (follow-up section): gate, upstream repro, per-phase diagnostic
 CLM_REVERSE_CPU=1 julia --project=scripts scripts/gpu_ad_reverse_driver_validate.jl
 julia --project=scripts scripts/gpu_ad_active_scalar_repro.jl
-PHASES=solve,post julia --project=scripts scripts/cuda_reverse_phase_diff.jl
+PHASES=soiltemp_rhs,post julia --project=scripts scripts/cuda_reverse_phase_diff.jl
+julia --project=scripts scripts/cuda_band_solve_reverse_check.jl
 ```
