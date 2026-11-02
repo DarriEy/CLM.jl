@@ -10,6 +10,8 @@
 #                    phases into profile_phase<k>.txt (flat) and _tree.txt
 #   ENZYME_MAXTYPEDEPTH / ENZYME_MAXTYPEOFFSET  Enzyme type-lattice size for the CUDA
 #                    calls (experiment only: 3/64 gives WRONG canopy gradients)
+#   DETAIL=1         also: CUDA rerun determinism, and for the worst leaves a central
+#                    FD (CPU forward) of the seeded loss at the 3 worst entries
 #   SEED=rand|ones   rand (default): independent uniform(0.5,1.5) seed per entry, the
 #                    same on both backends, so cancelling adjoints cannot hide behind
 #                    a uniform seed; ones: the original all-ones seed
@@ -59,6 +61,33 @@ function run_phase(entry, b, revmode, k)
     db
 end
 e3(entry) = length(entry) == 3 ? entry[3] : identity
+
+# The scalar the seeded reverse differentiates: L = Σ_leaves Σ_i seed_i · leaf_i over
+# the phase OUTPUT (deduplicated by array object, like the seed). Central FD of it
+# w.r.t. one input entry, on the CPU device-list phase from checkpoint bc, summed as
+# Σ seed·(out₊ − out₋) over entries finite in both runs (no large-sum cancellation).
+function phase_fd(entry, bc, k, path, idx)
+    function run(δ)
+        bk = deepcopy(bc); v = e3(entry)(bk)
+        a = Dict(leaves(v))[path]; a[idx] += δ
+        entry[1](v, entry[2]...)
+        v
+    end
+    x0 = Dict(leaves(e3(entry)(bc)))[path][idx]
+    h = 1e-6 * max(abs(x0), 1.0)
+    lp = leaves(run(h)); lm = Dict(leaves(run(-h)))
+    seen = Set{UInt}(); s = 0.0
+    for (q, a) in lp
+        objectid(a) in seen && continue
+        push!(seen, objectid(a))
+        rng = Random.MersenneTwister(hash((k, q)))
+        w = get(ENV, "SEED", "rand") == "ones" ? ones(eltype(a), size(a)) :
+            0.5 .+ rand(rng, eltype(a), size(a))
+        d = Array(a) .- Array(lm[q]); m = isfinite.(d)
+        s += sum(w[m] .* d[m])
+    end
+    s / (2h), x0, h
+end
 
 function main_diff()
     sel = split(get(ENV, "PHASES", "tk_interface,lwrad,heatdiff,infil_rev,setqflx"), ",")
@@ -120,7 +149,7 @@ function main_diff()
             CUDA.synchronize(); t2 = time()
             jc = (Base.cumulative_compile_time_ns()[1] - jc0) / 1e9  # Julia inference+codegen
             # second CUDA call: compiled, so t2 - t1 minus this is the compile time
-            run_phase(pg[k], bg, revmode, k); CUDA.synchronize(); t3 = time()
+            dg2 = run_phase(pg[k], bg, revmode, k); CUDA.synchronize(); t3 = time()
             lc = leaves(e3(pc[k])(dc)); lg = leaves(e3(pg[k])(dg))
             rows = Tuple{Float64,String,Float64,Float64,Float64}[]; nnz_c = 0; nnz_g = 0
             amax = 0.0; rmax = 0.0
@@ -142,6 +171,30 @@ function main_diff()
                     k, name, nnz_c, nnz_g, amax, rmax, rows[1][1], t1 - t0, t2 - t1, jc, t3 - t2)
             for r in first(rows, 8)
                 r[1] > 1e-12 && @printf("    scaled=%.3e  %-60s abs=%.3e max|cpu|=%.3e max|gpu|=%.3e\n", r...)
+            end
+            if get(ENV, "DETAIL", "0") == "1"
+                # determinism of the CUDA reverse (same input, same seed, twice)
+                nd = 0.0
+                for ((_, a), (_, b2)) in zip(lg, leaves(e3(pg[k])(dg2)))
+                    ah = Array(a); bh = Array(b2); m = isfinite.(ah) .& isfinite.(bh)
+                    nd = max(nd, maximum(abs.(ah[m] .- bh[m]); init = 0.0))
+                end
+                @printf("    CUDA rerun max|Δ| = %.3e\n", nd)
+                # arbitrate the worst leaves with a central FD of the seeded loss
+                dcl = Dict(lc); dgl = Dict(lg)
+                for r in first(rows, 4)
+                    r[1] > 1e-8 || continue
+                    p = r[2]; ah = Array(dcl[p]); gh = Array(dgl[p])
+                    m = isfinite.(ah) .& isfinite.(gh)
+                    dd = ifelse.(m, abs.(ah .- gh), 0.0)
+                    for idx in first(sortperm(vec(dd); rev = true), 3)
+                        ci = CartesianIndices(dd)[idx]
+                        fd, x0, h = phase_fd(pc[k], bc, k, p, ci)
+                        @printf("      %s%s x=%.6g: cpu=% .10e cuda=% .10e FD(h=%.1e)=% .10e  -> %s\n",
+                                p, string(Tuple(ci)), x0, ah[ci], gh[ci], h, fd,
+                                abs(fd - ah[ci]) < abs(fd - gh[ci]) ? "CPU closer" : "CUDA closer")
+                    end
+                end
             end
             for (kn, ta, tr, na, nr, ns) in first(CLM.gpu_launch_profile(), 6)
                 @printf("      kernel %-48s aug1=%7.1f s rev1=%7.1f s launches=%d/%d sigs=%d\n",
