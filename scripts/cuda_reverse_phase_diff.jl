@@ -68,9 +68,12 @@ function main_diff()
     pg = CLM.driver_rev_phases(bounds, filt_gpu, config; canopy_aux = CLM.canopy_rev_aux(inst_gpu, bounds, filt_gpu),
                                inst = inst_gpu, kw...)
     Enzyme.API.strictAliasing!(false)
-    # compile-time experiments: Enzyme type-analysis lattice size (defaults 6 / 512)
-    haskey(ENV, "ENZYME_MAXTYPEDEPTH") && Enzyme.API.maxtypedepth!(parse(Int, ENV["ENZYME_MAXTYPEDEPTH"]))
-    haskey(ENV, "ENZYME_MAXTYPEOFFSET") && Enzyme.API.maxtypeoffset!(parse(Int, ENV["ENZYME_MAXTYPEOFFSET"]))
+    # compile-time experiments: Enzyme type-analysis lattice size (defaults 6 / 512),
+    # applied to the CUDA calls only; the CPU reference always compiles with defaults.
+    tdepth = parse(Int, get(ENV, "ENZYME_MAXTYPEDEPTH", "6"))
+    toffset = parse(Int, get(ENV, "ENZYME_MAXTYPEOFFSET", "512"))
+    knobs!(on) = (Enzyme.API.maxtypedepth!(on ? tdepth : 6);
+                  Enzyme.API.maxtypeoffset!(on ? toffset : 512))
     CLM._GPU_LAUNCH_PROFILE[] = true
     Base.cumulative_compile_timing(true)
     revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
@@ -78,9 +81,12 @@ function main_diff()
         name = string(pc[k][1])
         if sel == ["all"] || any(s -> occursin(s, name), sel)
             t0 = time()
+            knobs!(false)
             dc = run_phase(pc[k], bc, revmode, k); t1 = time()
             jc0 = Base.cumulative_compile_time_ns()[1]
-            dg = if get(ENV, "PROFILE", "0") == "1"
+            knobs!(true)
+            dg = try
+            if get(ENV, "PROFILE", "0") == "1"
                 # sampling profile of the first (compiling) CUDA call, C frames included
                 Profile.init(; n = 10^7, delay = 0.05)
                 r = Profile.@profile run_phase(pg[k], bg, revmode, k)
@@ -95,6 +101,16 @@ function main_diff()
                 Profile.clear(); r
             else
                 run_phase(pg[k], bg, revmode, k)
+            end
+            catch err
+                @printf("PHASE %2d %-44s CUDA REVERSE ERROR after %.0f s: %s\n", k, name,
+                        time() - t1, first(sprint(showerror, err), 600))
+                flush(stdout)
+                nothing
+            end
+            if dg === nothing
+                pc[k][1](e3(pc[k])(bc), pc[k][2]...); pg[k][1](e3(pg[k])(bg), pg[k][2]...)
+                continue
             end
             CUDA.synchronize(); t2 = time()
             jc = (Base.cumulative_compile_time_ns()[1] - jc0) / 1e9  # Julia inference+codegen
