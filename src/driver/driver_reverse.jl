@@ -503,6 +503,18 @@ function soiltemp_gnet_patch_reduce_array_phase!(x, aux)
     nothing
 end
 
+# Narrow view for the reduce phase: only the arrays its four scatter_add_1d! calls touch.
+# Same arrays (aliases) as soiltemp_gnet_patch_view, so the forward and the gradient are
+# unchanged; the full view hands Enzyme every Gnet*In/Out struct, and its host-side type
+# analysis over those CuArray-laden structs made this scatter-only phase a ~20 min CUDA
+# reverse compile.
+soiltemp_gnet_patch_reduce_view(b) = let i=b.inst, s=b.soiltemp
+    (; hs=s.hs, dhsdT=s.dhsdT, hs_soil=s.hs_soil, hs_h2osfc=s.hs_h2osfc,
+       out=(; hs_patch=s.hs_patch, dhsdT_patch=s.dhsdT_patch,
+              hs_soil_patch=s.hs_soil_patch, hs_h2osfc_patch=s.hs_h2osfc_patch),
+       column=i.patch.column)
+end
+
 function soiltemp_gnet_patch_array_phase!(x, aux)
     soiltemp_gnet_patch_rural_array_phase!(x, aux)
     soiltemp_gnet_patch_rural_contrib_array_phase!(x, aux)
@@ -795,7 +807,7 @@ function soiltemp_driver_rev_phases(bounds, filt; dtime = 1800.0)
         (soiltemp_lwrad_array_phase!, (a,), soiltemp_lwrad_view),
         (soiltemp_gnet_patch_rural_array_phase!, (a,), soiltemp_gnet_patch_rural_view),
         (soiltemp_gnet_patch_rural_contrib_array_phase!, (a,), soiltemp_gnet_patch_rural_contrib_view),
-        (soiltemp_gnet_patch_reduce_array_phase!, (a,), soiltemp_gnet_patch_view),
+        (soiltemp_gnet_patch_reduce_array_phase!, (a,), soiltemp_gnet_patch_reduce_view),
         (soiltemp_gnet_snicar_rev_phase!, (a,), soiltemp_gnet_snicar_view),
         (soiltemp_heatdiff_rev_phase!, (a,), soiltemp_heatdiff_view),
         (soiltemp_rhs_rev_phase!, (a,), soiltemp_solve_view),

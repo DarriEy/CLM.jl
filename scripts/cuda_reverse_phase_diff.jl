@@ -6,6 +6,10 @@
 # gradient), one Enzyme reverse call on CPU (device list forced on host) and on CUDA,
 # then compare every Float shadow leaf.
 #   PHASES=comma,separated,substrings  (default: a cheap diagnostic subset; "all" = every phase)
+#   PROFILE=1 / PROFILE_PHASES=a,b  sample the first CUDA call of every / the named
+#                    phases into profile_phase<k>.txt (flat) and _tree.txt
+#   ENZYME_MAXTYPEDEPTH / ENZYME_MAXTYPEOFFSET  Enzyme type-lattice size for the CUDA
+#                    calls (experiment only: 3/64 gives WRONG canopy gradients)
 #   SEED=rand|ones   rand (default): independent uniform(0.5,1.5) seed per entry, the
 #                    same on both backends, so cancelling adjoints cannot hide behind
 #                    a uniform seed; ones: the original all-ones seed
@@ -86,7 +90,8 @@ function main_diff()
             jc0 = Base.cumulative_compile_time_ns()[1]
             knobs!(true)
             dg = try
-            if get(ENV, "PROFILE", "0") == "1"
+            if get(ENV, "PROFILE", "0") == "1" ||
+               any(s -> occursin(s, name), split(get(ENV, "PROFILE_PHASES", ""), ","; keepempty = false))
                 # sampling profile of the first (compiling) CUDA call, C frames included
                 Profile.init(; n = 10^7, delay = 0.05)
                 r = Profile.@profile run_phase(pg[k], bg, revmode, k)
