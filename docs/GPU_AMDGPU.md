@@ -170,6 +170,17 @@ KernelAbstractions #826, and this branch with `KernelAbstractions = "0.9.45, 0.1
   Metal.jl 1.12.0 on KA 0.10.4 then passes `test_metal_backend.jl` 10/10,
   `test_ka010_readiness.jl` 36/36, `scripts/gpu_validate.jl` 3/3 and
   `scripts/gpu_validate_soiltemp_e2e.jl` 9/9 (forward only; Enzyme has no Metal support).
+- **CUDA (Windows 11, RTX 5070 Ti, CUDA.jl 6.5.0): forward loads, reverse crashes,
+  upstream.** On Windows, Enzyme #3741 does not load at all
+  (`MethodError: no method matching find_symbol(::LLVM.LLVMSymbol)` in
+  `Enzyme.Compiler.JIT.__init__`, the `___chkstk_ms` branch). Patched locally, CUDA.jl 6.5,
+  KA 0.10.4 and `CLMCUDAExt` load, and plain CPU reverse mode works. But reverse mode over
+  even a trivial KA kernel on `CUDABackend` kills the process with
+  `EXCEPTION_ACCESS_VIOLATION … llvm::Type::getVoidTy(LLVMContext&)`. This happens with
+  CLM out of the picture, and both through `_kcall!` and with a direct KA launch.
+  `scripts/gpu_ad_active_scalar_repro.jl` crashes the same way (also in Enzyme's
+  `restore_alloca_type!`). The soil-temperature reverse check was therefore not run under
+  0.10.
 - **#826 also drops the CPU support for `Active` scalar kernel arguments that 0.9 had**
   ("Active kernel arguments not supported" now on `CPU()` as well). Once the rest works,
   CPU reverse through `_launch!` needs the same launch-level rule as the GPU path
@@ -178,8 +189,9 @@ KernelAbstractions #826, and this branch with `KernelAbstractions = "0.9.45, 0.1
 
 Repro scripts and draft upstream comments are kept outside the repo (not posted).
 
-Before the real upgrade: Enzyme.jl releases LLVM.jl 10 support, with the pass-registry
-and `StackedMethodTable` problems fixed, and KA merges #826 rebased on 0.10.x, handling
+Before the real upgrade: Enzyme.jl releases LLVM.jl 10 support, with the pass-registry,
+`StackedMethodTable`, Windows `find_symbol` and GPUArrays 12 problems fixed, and the CUDA
+kernel-reverse crash gone, and KA merges #826 rebased on 0.10.x, handling
 `ConstArgs` and SPIR-V builtins (and ideally `Active` scalars on PoCL). Then bump
 `KernelAbstractions = "0.10"`, `CUDA = "5, 6"` (6.5+), Metal 1.12+ and AMDGPU 2.9+.
 Decide `_uses_launch_rule(::KA.CPU)`. Re-run the CPU AD tests, the Metal backend test,

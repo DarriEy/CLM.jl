@@ -140,8 +140,9 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   The CLM side is ready where KA 0.9 allows it. `_kcall!` no longer tests `KA.GPU`.
   BitVector masks reach a PoCL CPU kernel as `DeviceBitArray`. The `@Const` audit covers
   `f!(constarg)` writes. A local trial against Enzyme#3741 + KA#826 (rebased on 0.10.4)
-  passes the CPU forward suite. CPU reverse AD is blocked upstream (four separate
-  failures, listed in the doc).
+  passes the CPU forward suite and the Metal 1.12 forward checks. CPU reverse AD is blocked
+  upstream (four separate failures), and so is CUDA 6.5 kernel reverse (process crash).
+  Details in the doc.
 - **Metal multi-GPU bind** — fixed 2026-11-01. `CLMMetalExt` had indexed `Metal.devices()` with
   CLM's 0-based index. Device 0 therefore raised a BoundsError that was only logged, and rank 0 on a
   Mac never selected its GPU. It now uses `CLM._device_list_slot` (`idx + 1`; out of range raises
