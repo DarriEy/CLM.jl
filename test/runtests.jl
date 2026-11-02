@@ -259,6 +259,9 @@ const INPROCESS_TEST_FILES = [
     "test_driver_reverse.jl",
     # FD check of the exact batched_band_solve! adjoint (reference for the CUDA check).
     "test_band_solve_adjoint.jl",
+    # Water-table reverse phase: host list == device list == production clm_drv!
+    # (forward state + Enzyme gradients through zwt / qflx_drain, FD-checked).
+    "test_watertable_reverse.jl",
     "test_multisite_calibration.jl",
     "test_cn_integration.jl",
 
