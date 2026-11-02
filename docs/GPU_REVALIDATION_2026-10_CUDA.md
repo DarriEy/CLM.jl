@@ -161,6 +161,10 @@ the CUDA reverse runs the device decomposition of the same chain (36 phases).
    differentiated on device has to reach kernels as an array. Every scalar kernel
    argument on the driver reverse path is `dtime`, a physical constant or a
    configuration value. CPU launches never reach the rule.
+   *Correction (follow-up 2 below):* as merged, the snapshot broke runtime activity's
+   `shadow === primal` marker for Const members of kernel-argument structs. Canopy
+   gradients on CUDA came out wrong and Const inputs were corrupted; the shadows are now
+   remapped onto the snapshot.
 
 An intermediate suspicion that Enzyme's reverse of the batched band-solve kernel was
 itself wrong on CUDA did not hold: `scripts/cuda_band_solve_reverse_check.jl` (raw
@@ -181,6 +185,199 @@ thunks for CUDA (canopy energy 37 min, soil water 19 min, ground-heat-flux reduc
 20 min). The urban ground-heat-flux phase (a 93 min compile) is left out of the phase
 list when the domain has no urban column, where it is an exact no-op.
 
+## Follow-up 2: per-phase checks and compile time (`ad/cuda-reverse-phase-checks`)
+
+Same server and stack. All runs from one checkpoint on this domain (3 patches, 2 of
+them in the exposed-vegetation filter).
+
+### Per-phase checks found a CUDA-only bug in the #373 launch rule
+
+`scripts/cuda_reverse_phase_diff.jl PHASES=all` reverses every one of the 36 device
+phases from the same checkpoint on CUDA and on CPU (same device phase list forced onto
+the host). Each Float array leaf of the phase's view gets an independent uniform(0.5, 1.5)
+seed per entry, so every output carries a cotangent and every input gets a gradient. The
+loss is not one scalar along one path. The diff then compares every gradient leaf.
+`DETAIL=1` also reruns the CUDA reverse on the same input and arbitrates the worst
+entries with a central FD of the seeded loss on the CPU forward.
+
+Before the fix, the canopy resist and energy phases were wrong on CUDA, with scaled
+differences of 5.5 and 7.6e3 on the first iteration and up to 3e16 on the second. They
+were also not reproducible: reruns on identical input differed by up to 1.6e11. FD sided
+with the CPU to 8–10 digits, for example `esai_patch[2]`: CPU −16.808422889, CUDA
+0.853358, FD −16.808422855. Patch 1, which is outside the filter, was always right. The
+soil-temperature and hydrology phases matched when run on their own (≤4e-15,
+deterministic). In the full sequence they showed 1e-6 to 1e-2 differences, inherited
+from inputs that the canopy reverse had corrupted. The forward states of the two
+backends agree to ≤4e-14 after every phase (`scripts/cuda_reverse_forward_diff.jl`),
+and no array aliasing differs between the host and the adapted device bundle.
+
+**Cause.** Under runtime activity, a kernel-argument struct built inside the
+differentiated code (`CfResIn`, `CfEnC`, the gnet `pin`/`cin` NamedTuples, …) can have
+members that come from a Const argument: the canopy aux's forcing arrays, `dleaf_pft`,
+`forc_pbot`. For those members Enzyme's shadow *is* the primal array, and
+`shadow === primal` is how runtime activity marks them inactive. The #373 launch rule
+reverses KernelAbstractions' kernel against `Duplicated(snapshot, live_shadow)`. The
+primal is now the snapshot copy while the shadow is still the original array, so the
+kernel reverse treats those members as active and accumulates their adjoints into the
+original primal. That corrupts the Const aux and the live forcing arrays: the canopy
+gradients come out wrong, and inputs read by later phases are corrupted. The CPU path
+never reaches the rule.
+
+**Fix** (`src/infrastructure/enzyme_rules.jl`). The augmented primal keeps the
+deepcopy's `IdDict`. The reverse maps every shadow leaf that is one of the snapshotted
+primal objects to its copy (`_remap_shadow`), which restores `shadow === primal`. A host
+unit test covers the helper (`test/test_driver_reverse.jl`).
+
+After the fix (`pdfix1`), all 36 phases agree and every CUDA rerun is bit-identical:
+
+| # | phase | max abs Δ | max rel Δ (per leaf) | before fix: max scaled Δ | CUDA 1st call, lattice 6/512 (s) | CUDA 1st call, lattice 3/64 (s) |
+|---|---|---|---|---|---|---|
+| 1 | `cf_rev_init!` | 5.684e-14 | 2.179e-16 | 2.179e-16 | 1438 | 417 |
+| 2 | `cf_rev_friction!` | 8.882e-16 | 1.431e-16 | 1.431e-16 | 437 | 108 |
+| 3 | `cf_rev_resist!` | 1.455e-11 | 4.614e-16 | 5.497e+00 | 1103 | 83 |
+| 4 | `cf_rev_energy!` | 5.722e-06 | 2.623e-14 | 7.633e+03 | 2318 | 110 |
+| 5 | `cf_rev_friction!` | 1.776e-15 | 6.640e-16 | 6.403e-01 | 0 | 0 |
+| 6 | `cf_rev_resist!` | 5.821e-11 | 3.908e-16 | 9.734e+06 | 0 | 0 |
+| 7 | `cf_rev_energy!` | 5.722e-06 | 6.964e-14 | 3.271e+16 | 0 | 0 |
+| 8 | `soiltemp_setup_rev_phase!` | 0 | 0 | 0 | 139 | 89 |
+| 9 | `soiltemp_tk_layers_array_phase!` | 7.105e-15 | 5.137e-16 | 5.137e-16 | 313 | 98 |
+| 10 | `soiltemp_tk_interface_array_phase!` | 1.776e-14 | 4.561e-16 | 4.561e-16 | 99 | 92 |
+| 11 | `soiltemp_cv_array_phase!` | 4.657e-10 | 1.593e-16 | 1.593e-16 | 299 | 134 |
+| 12 | `soiltemp_lwrad_array_phase!` | 0 | 0 | 0 | 122 | 68 |
+| 13 | `soiltemp_gnet_patch_rural_array_phase!` | 0 | 0 | 1.158e-02 | 296 | 70 |
+| 14 | `soiltemp_gnet_patch_rural_contrib_array_phase!` | 2.910e-11 | 2.041e-16 | 1.122e-02 | 395 | 67 |
+| 15 | `soiltemp_gnet_patch_reduce_array_phase!` | 0 | 0 | 0 | 73 | 58 |
+| 16 | `soiltemp_gnet_snicar_rev_phase!` | 4.657e-10 | 2.088e-16 | 1.140e-02 | 383 | 101 |
+| 17 | `soiltemp_heatdiff_rev_phase!` | 1.137e-13 | 3.623e-16 | 3.623e-16 | 171 | 94 |
+| 18 | `soiltemp_rhs_rev_phase!` | 7.812e-03 | 1.975e-16 | 4.264e-05 | 241 | 193 |
+| 19 | `soiltemp_matrix_rev_phase!` | 1.600e+01 | 2.969e-15 | 2.969e-15 | 221 | 192 |
+| 20 | `soiltemp_tvinit_rev_phase!` | 0 | 0 | 0 | 81 | 58 |
+| 21 | `soiltemp_bandsolve_rev_phase!` | 2.274e-13 | 5.347e-16 | 2.290e-05 | 92 | 68 |
+| 22 | `soiltemp_tvextract_rev_phase!` | 0 | 0 | 0 | 86 | 66 |
+| 23 | `soiltemp_post_rev_phase!` | 7.913e-11 | 1.811e-14 | 6.536e-04 | 994 | 394 |
+| 24 | `setsoilfrac_rev_phase!` | 8.438e-15 | 2.339e-15 | 5.198e-05 | 67 | 59 |
+| 25 | `setfloodc_rev_phase!` | 0 | 0 | 0 | 66 | 68 |
+| 26 | `satexcess_dev_rev_phase!` | 0 | 0 | 0 | 110 | 74 |
+| 27 | `setqflx_rev_phase!` | 0 | 0 | 0 | 68 | 63 |
+| 28 | `inflexcess_dev_rev_phase!` | 2.220e-16 | 1.492e-16 | 1.069e-06 | 89 | 82 |
+| 29 | `routeinfl_rev_phase!` | 0 | 0 | 0 | 68 | 58 |
+| 30 | `updateh2osfc_dev_rev_phase!` | 1.998e-13 | 7.125e-14 | 7.125e-14 | 213 | 203 |
+| 31 | `infil_rev_phase!` | 0 | 0 | 0 | 62 | 57 |
+| 32 | `totalrunoff_dev_rev_phase!` | 0 | 0 | 0 | 129 | 124 |
+| 33 | `rootsink_dev_rev_phase!` | 0 | 0 | 0 | 163 | 138 |
+| 34 | `soilwater_dev_rev_phase!` | 2.048e+03 | 3.849e-15 | 2.100e-03 | 1120 | 102 |
+| 35 | `watertable_dev_rev_phase!` | 6.661e-16 | 3.975e-16 | 5.850e-06 | 250 | 192 |
+| 36 | `hydnodrain_rev_phase!` | 7.451e-09 | 3.037e-16 | 2.420e-05 | 439 | 398 |
+| | **total** | | | | **12145** | **4178** |
+
+"max rel Δ (per leaf)" is max|Δ| / max|g_cpu| for the worst leaf. The large absolute
+values (2e3 in soil water, 16 in the matrix phase) are on leaves whose gradients are
+themselves very large (up to ~1e18 in soil water). "before fix" is the same diff at the pre-fix commit (scaled by
+max(max|g_cpu|, 1)). Phases 5–7 reuse the thunks compiled for 2–4.
+
+### Gradients with respect to other inputs (whole chain)
+
+`CLM_REVERSE_EXTRA=1` in the gate adds three checks.
+
+- **(a)** For the default loss, every one of the 3484 `db.inst` input-gradient leaves is
+  compared, CUDA (device list) vs CPU (host list).
+- **(b)** A second loss puts random weights on soil/snow temperature, t_grnd, t_veg, soil
+  liquid and ice, h2osfc, sensible, latent and ground heat flux, surface runoff and
+  infiltration. For that loss every leaf is compared again.
+- **(c)** Central FD of that loss on the CUDA forward with respect to t_grnd, a soil-layer
+  t_soisno, t_veg, h2osoi_liq, `watsat` and `bsw` (soil parameters) and
+  `forc_lwrad_downscaled`. The canopy aux is held fixed: the reverse treats it as Const,
+  so a forcing read through the aux gets no adjoint, and the FD has to differentiate that
+  same function.
+
+**Gate result (`gate4`, 9bbf2b2, `CLM_REVERSE_CPU=1 CLM_REVERSE_FD=1 CLM_REVERSE_EXTRA=1`,
+7190 s wall): PASS.** The reference value moved from −3.5023 to −3.4433 because current
+main reads `e_ice` from the params file (#376) and the litter-mixing params (#378); it is
+the value the soil-temperature-only check gives on cpu-host, cpu-device and cuda-device.
+
+| check | result |
+|---|---|
+| dL/d(t_grnd[1]), CUDA vs CPU | −3.44327925 both, absdiff 2.1e-14 |
+| dL/d(t_grnd[1]), Richardson FD of the CUDA forward | rel 1.4e-9, bracketed |
+| (a) default loss, all 3484 db.inst leaves, CUDA vs CPU | worst leaf rel 2.9e-14 (219 nonzero entries) |
+| (b) wide loss, all 3484 db.inst leaves, CUDA vs CPU | worst leaf rel 1.1e-14 (478 nonzero entries) |
+| (c) FD wide loss / t_grnd | rel 4.5e-10 |
+| (c) FD / t_soisno[c0, 13] (276.3 K) | rel 3.5e-10 |
+| (c) FD / t_veg[2] | rel 4.1e-10 |
+| (c) FD / h2osoi_liq[c0, 14] | rel 7.9e-9 |
+| (c) FD / watsat[c0, 2] | rel 9.9e-11 |
+| (c) FD / bsw[c0, 3] | rel 1.7e-8 |
+| (c) FD / forc_lwrad_downscaled[c0] | rel 3.8e-10 |
+
+In gate3, the first run of these checks, the t_soisno probe sat at exactly 273.15 K. The
+central difference there straddles the phase-change switch (FD ∝ 1/h), so the probe now
+picks a layer away from TFRZ. The all-leaf comparison treats a leaf whose largest
+difference is ≤1e-15 as agreeing; gate3 had 1e-20 gradients there that were exactly 0
+on the other backend.
+
+**Finding (CPU host list, not changed here):** the host reverse phase
+`watertable_rev_phase!` calls the aquifer `water_table!` unconditionally. Production
+`clm_drv!` uses `perched_water_table!` + `theta_based_water_table!` when
+`use_aquifer_layer = false`, which is the default and is what this domain uses, and the
+device list follows production. So gradients through `zwt` / `qflx_drain` differ between
+the CPU host list and production. In gate3 the wide loss with `zwt_col` and
+`qflx_drain_col` seeded showed this as rel 1 in `qflx_drain_col`, `zwt_col` and
+`column.zi`. Those two outputs are left out of the wide loss. The default loss does not
+touch them. Changing the host list changes CPU reverse results, so it is left for a
+separate change.
+
+### Compile time
+
+**Where it goes.** The launch rule now has an opt-in profile (`CLM._GPU_LAUNCH_PROFILE`,
+reported per kernel by the phase diff) and the diff reports Julia's compile-time
+counter. Device-kernel compilation is small: KernelAbstractions' Enzyme tape-type, aug
+and rev kernels take 5–30 s per kernel (≈60 s of `cf_rev_init!`'s 1438 s; 16+9 s of
+`cf_rev_friction!`'s 437 s). 95–99% of each phase's first call is compilation on the
+host. A sampling profile of `cf_rev_friction!` (`PROFILE_PHASES=…`) puts 81% of the
+first call in Enzyme's thunk generator (`get_staged`). About half of that is Enzyme
+TypeAnalysis (`TypeTree::insert` / std::map iteration) over the argument structs. A
+CuArray's nested `DataRef`/`Managed` fields give a much deeper type tree than an
+Array's, which is why the same phase compiles 3–15× faster on CPU. Identical kernels
+and repeated phases are already cached in-process (phases 5–7 cost 0 s; every kernel
+compiles one signature).
+
+**Changes** (numerics unchanged, see the table):
+
+1. *Device-scoped Enzyme type lattice.* `_phase_autodiff!` sets
+   `Enzyme.API.maxtypedepth!/maxtypeoffset!` to `CLM.GPU_REVERSE_TYPE_LATTICE` = (3, 64)
+   (Enzyme defaults 6 / 512) around each per-phase Enzyme call whose bundle lives on a
+   device, then restores the defaults. Host reverse calls are untouched. Set it to
+   `nothing`, or set `CLM_GPU_REVERSE_TYPE_LATTICE=default`, to opt out. The full 36-phase
+   diff at (3, 64) and at (6, 512) gave the same per-phase differences to every printed
+   digit, both before the fix (pd364 vs pdall4) and after it (pdfix1 ran at 3/64). On
+   `cf_rev_friction!` alone: 602 s (6/512), 343 s (4/512), 354 s (6/128), 292 s (3/64),
+   with identical gradients (`scripts/cuda_reverse_typeknob_sweep.ps1`).
+2. *Narrow view for the scatter-only gnet reduce phase* (`soiltemp_gnet_patch_reduce_view`).
+   It contains only the arrays its four `scatter_add_1d!` calls touch, instead of every
+   Gnet*In/Out struct: 1210 s → 73 s in the gate.
+
+Not done, and why:
+- **Caching across runs.** GPUCompiler 1.15's disk cache (`disk_cache` preference)
+  only stores kernels whose CodeInstance comes from a package image; KA's Enzyme
+  aug/rev kernels and Enzyme's host thunks are runtime compilations, so they never hit
+  it. Enzyme has no persistent thunk cache. A precompile workload in a package
+  extension would need a GPU at precompile time and would redo the hours-long compile
+  on every source change.
+- **Splitting the canopy energy kernel.** Its device compile is 18+10 s; the cost was
+  host-side.
+
+**Before/after (whole gate, fresh process, same server).**
+
+| | gate2 (#373, 665a90b) | gate3 (this branch, 5ea6749) | gate4 (9bbf2b2) |
+|---|---|---|---|
+| CUDA reverse sweep (36 phases) | 13425 s | 4564 s | 4254 s |
+| CPU reverse sweep (15 phases, unchanged) | 2014 s | 1956 s | 1963 s |
+| whole run (incl. precompile, CPU leg, FD) | 16466 s | 7466 s, including the EXTRA legs | 7190 s, including the EXTRA legs |
+
+Per CUDA phase in the gate, before → after: canopy energy 2324 → 118 s, canopy init
+1193 → 206 s, canopy resist 1064 → 82 s, soil water 1096 → 108 s, gnet reduce
+1210 → 74 s, soil-temperature post 1006 → 400 s, hydrology_no_drainage 836 → 797 s.
+
 ## Still open
 
 - The CUDA.jl artifact runtime is 13.2 against a 13.3 driver; CUDA.jl logs
@@ -200,4 +397,10 @@ CLM_REVERSE_CPU=1 julia --project=scripts scripts/gpu_ad_reverse_driver_validate
 julia --project=scripts scripts/gpu_ad_active_scalar_repro.jl
 PHASES=soiltemp_rhs,post julia --project=scripts scripts/cuda_reverse_phase_diff.jl
 julia --project=scripts scripts/cuda_band_solve_reverse_check.jl
+# follow-up 2: all-phase diff with determinism + FD arbitration, forward/alias diff,
+# wider gate checks, compile profile of one phase
+PHASES=all DETAIL=1 julia --project=scripts scripts/cuda_reverse_phase_diff.jl
+julia --project=scripts scripts/cuda_reverse_forward_diff.jl
+CLM_REVERSE_CPU=1 CLM_REVERSE_EXTRA=1 julia --project=scripts scripts/gpu_ad_reverse_driver_validate.jl
+PHASES=cf_rev_friction PROFILE=1 julia --project=scripts scripts/cuda_reverse_phase_diff.jl
 ```

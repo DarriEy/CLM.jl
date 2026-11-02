@@ -285,3 +285,28 @@ include(joinpath(@__DIR__, "testdata.jl"))
     @test isfinite(bA.inst.temperature.t_soisno_col[c0, jdiff])
     @test bA.inst.temperature.t_soisno_col[c0, jdiff] != bB.inst.temperature.t_soisno_col[c0, jdiff]
 end
+
+# GPU launch-rule shadow remap (src/infrastructure/enzyme_rules.jl). Host-only check of
+# the pure helper: a shadow leaf that IS a primal object (runtime activity's inactive
+# marker) must point at that object's snapshot copy, active shadows stay, and struct
+# types are preserved. Without it the CUDA reverse accumulated adjoints into primals.
+@testset "GPU launch-rule shadow remap" begin
+    p1 = rand(3); c = rand(3); s1 = zeros(3); px = rand(3)
+    args = (CLM.CfResIn(; t_veg_patch = p1, del_arr = c, ustar_patch = px, um_patch = px,
+                temp1 = px, temp2 = px, elai_patch = px, esai_patch = px, htop_patch = px,
+                z0mg_col = px, taf_patch = px, qaf_patch = px, t_grnd_col = px,
+                dleaf_pft = c, forc_pbot_col = c, el = px), (; x = c, y = p1))
+    shadow = (CLM.CfResIn(; t_veg_patch = s1, del_arr = c, ustar_patch = s1, um_patch = s1,
+                temp1 = s1, temp2 = s1, elai_patch = s1, esai_patch = s1, htop_patch = s1,
+                z0mg_col = s1, taf_patch = s1, qaf_patch = s1, t_grnd_col = s1,
+                dleaf_pft = c, forc_pbot_col = c, el = s1), (; x = c, y = s1))
+    dict = IdDict{Any, Any}()
+    snap = Base.deepcopy_internal(args, dict)
+    r1 = CLM._remap_shadow(shadow[1], dict); r2 = CLM._remap_shadow(shadow[2], dict)
+    @test typeof(r1) == typeof(snap[1]) && typeof(r2) == typeof(snap[2])
+    @test r1.t_veg_patch === s1 && r2.y === s1           # active shadows unchanged
+    @test r1.dleaf_pft === snap[1].dleaf_pft             # inactive: shadow === snapshot primal
+    @test r1.forc_pbot_col === snap[1].dleaf_pft         # aliasing kept (same primal object)
+    @test r2.x === snap[2].x && r2.x !== c
+    @test CLM._remap_shadow(s1, dict) === s1
+end

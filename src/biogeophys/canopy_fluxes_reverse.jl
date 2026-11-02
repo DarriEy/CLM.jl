@@ -404,6 +404,64 @@ state (e.g. `dL = 2·output`). The reverse sweep then runs ONE separate
 closure's captured environment for activity and trips on nested structs/BitVectors).
 Returns the gradient bundle `db`.
 """
+# --------------------------------------------------------------------------
+# Enzyme type-analysis lattice for DEVICE bundles (compile time only).
+#
+# Profiling the CUDA reverse (scripts/cuda_reverse_phase_diff.jl PROFILE=1) puts ~80%
+# of each phase's first call in Enzyme's host-side thunk generation, about half of it
+# in Enzyme TypeAnalysis (TypeTree::insert) over the CuArray-laden argument structs; a
+# CuArray's nested DataRef/Managed fields make its type tree far deeper than an Array's,
+# which is why the same phase compiles ~5-10x faster on CPU. A smaller lattice
+# (Enzyme.API.maxtypedepth!/maxtypeoffset!, Enzyme defaults 6 / 512) cuts that compile
+# 2-5x per phase. With (3, 64) every one of the 36 device phases returned gradients
+# identical to the digit to the (6, 512) build on CUDA (random seeds on every leaf;
+# docs/GPU_REVALIDATION_2026-10_CUDA.md). Applied only around Enzyme calls whose bundle
+# lives on a device and restored afterwards; host (CPU) reverse calls keep Enzyme's
+# defaults. Set to `nothing` (or CLM_GPU_REVERSE_TYPE_LATTICE=default in the
+# environment) to leave Enzyme's settings untouched.
+# --------------------------------------------------------------------------
+const GPU_REVERSE_TYPE_LATTICE = Ref{Union{Nothing, Tuple{Int, Int}}}((3, 64))
+const _ENZYME_DEFAULT_TYPE_LATTICE = (6, 512)
+
+# First Float array leaf of a bundle/view (depth-limited), or nothing.
+function _first_float_array(x, depth::Int = 0)
+    x isa AbstractArray{<:AbstractFloat} && return x
+    (x isa AbstractArray || x isa Number || x isa Symbol || x isa String ||
+     x isa Function || x === nothing || depth > 8) && return nothing
+    for f in fieldnames(typeof(x))
+        isdefined(x, f) || continue
+        a = _first_float_array(getfield(x, f), depth + 1)
+        a === nothing || return a
+    end
+    return nothing
+end
+_rev_bundle_on_device(x) = (a = _first_float_array(x); a !== nothing && !(a isa Array))
+
+function _set_type_lattice!(lat)
+    Enzyme.API.maxtypedepth!(lat[1]); Enzyme.API.maxtypeoffset!(lat[2])
+    return nothing
+end
+
+"""
+    _phase_autodiff!(revmode, f, x, dx, cargs)
+
+One per-phase reverse call `autodiff(revmode, f, Const, Duplicated(x, dx), Const.(cargs)...)`,
+compiled with `GPU_REVERSE_TYPE_LATTICE` when `x` lives on a device.
+"""
+function _phase_autodiff!(revmode, f, x, dx, cargs)
+    lat = get(ENV, "CLM_GPU_REVERSE_TYPE_LATTICE", "") == "default" ? nothing :
+          GPU_REVERSE_TYPE_LATTICE[]
+    scoped = lat !== nothing && _rev_bundle_on_device(x)
+    scoped && _set_type_lattice!(lat)
+    try
+        Enzyme.autodiff(revmode, f, Enzyme.Const, Enzyme.Duplicated(x, dx),
+                        map(Enzyme.Const, cargs)...)
+    finally
+        scoped && _set_type_lattice!(_ENZYME_DEFAULT_TYPE_LATTICE)
+    end
+    return nothing
+end
+
 function compositional_reverse!(phases, b, seed_bang!)
     Enzyme.API.strictAliasing!(false)
     revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
@@ -429,9 +487,7 @@ function compositional_reverse!(phases, b, seed_bang!)
             viewfn = length(entry) == 3 ? entry[3] : identity
             bk = deepcopy(checkpoints[k])
             t0 = time()
-            Enzyme.autodiff(revmode, f, Enzyme.Const,
-                            Enzyme.Duplicated(viewfn(bk), viewfn(db)),
-                            map(Enzyme.Const, cargs)...)
+            _phase_autodiff!(revmode, f, viewfn(bk), viewfn(db), cargs)
             verbose && (println("  reverse phase ", k, "/", length(phases), " ", f,
                                 " ", round(time() - t0; digits = 1), " s"); flush(stdout))
         end
@@ -457,9 +513,7 @@ function _reverse_step_into!(phases, b_start, db, revmode)
         entry = phases[k]; f, cargs = entry[1], entry[2]
         viewfn = length(entry) == 3 ? entry[3] : identity
         bk = deepcopy(fine[k])
-        Enzyme.autodiff(revmode, f, Enzyme.Const,
-                        Enzyme.Duplicated(viewfn(bk), viewfn(db)),
-                        map(Enzyme.Const, cargs)...)
+        _phase_autodiff!(revmode, f, viewfn(bk), viewfn(db), cargs)
     end
     return nothing
 end

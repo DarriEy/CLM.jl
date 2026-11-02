@@ -95,9 +95,44 @@ function _ka_launch_annotations(args)
     end
 end
 
+# Opt-in wall-time profile of the GPU launch rule (diagnostic; off by default, never
+# touches numerics). With `_GPU_LAUNCH_PROFILE[] = true` every augmented-primal and
+# reverse call is timed per (kernel, argument-annotation types) signature; the first
+# call of a signature includes KernelAbstractions' Enzyme compile of that kernel, so
+# `gpu_launch_profile()` separates device-kernel compile time from the rest of a phase.
+const _GPU_LAUNCH_PROFILE = Ref(false)
+const _GPU_LAUNCH_TIMES = Dict{Any, Vector{Float64}}()  # key => [aug_first, rev_first, n_aug, n_rev, aug_total, rev_total]
+
+function _gpu_launch_record!(key, which::Int, dt)
+    v = get!(() -> zeros(6), _GPU_LAUNCH_TIMES, key)
+    which == 1 ? (v[3] == 0 && (v[1] = dt); v[3] += 1; v[5] += dt) :
+                 (v[4] == 0 && (v[2] = dt); v[4] += 1; v[6] += dt)
+    return nothing
+end
+
+"""
+    gpu_launch_profile(; reset = true) -> Vector{(name, aug_first_s, rev_first_s, n_aug, n_rev, nsigs)}
+
+Per-kernel summary of the `_gpu_launch!` rule timings collected while
+`CLM._GPU_LAUNCH_PROFILE[]` was true, sorted by first-call (compile-dominated) time.
+"""
+function gpu_launch_profile(; reset::Bool = true)
+    agg = Dict{Symbol, Vector{Float64}}()
+    for ((name, _), v) in _GPU_LAUNCH_TIMES
+        a = get!(() -> zeros(5), agg, name)
+        a[1] += v[1]; a[2] += v[2]; a[3] += v[3]; a[4] += v[4]; a[5] += 1
+    end
+    out = [(k, v[1], v[2], Int(v[3]), Int(v[4]), Int(v[5])) for (k, v) in agg]
+    sort!(out; by = r -> -(r[2] + r[3]))
+    reset && empty!(_GPU_LAUNCH_TIMES)
+    return out
+end
+
 function augmented_primal(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT},
         kernel::Const, backend::Const, ndrange::Const,
         args::Vararg{Enzyme.Annotation, N}) where {RT, N}
+    prof = _GPU_LAUNCH_PROFILE[]
+    t0 = prof ? time() : 0.0
     kobj = kernel.val(backend.val)
     # Snapshot the pre-launch primal arguments (one deepcopy keeps aliasing between
     # them). KernelAbstractions' GPU reverse kernel re-reads its primal inputs from the
@@ -106,27 +141,61 @@ function augmented_primal(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT},
     # the RHS kernels read), the live arrays no longer hold the values the forward
     # launch saw and the adjoints of the coefficients come out wrong. Reversing against
     # the snapshot restores the launch-time state.
-    snap = deepcopy(map(a -> a.val, args))
+    #
+    # The IdDict of that deepcopy (original object => copy) is kept so the reverse can
+    # remap the shadows: see `_remap_shadow`.
+    dict = IdDict{Any, Any}()
+    snap = Base.deepcopy_internal(map(a -> a.val, args), dict)
     ann = _ka_launch_annotations(args)
     ar = EnzymeRules.augmented_primal(_ka_rev_config(config, Val(N)), Const(kobj),
                                       Const{Nothing}, ann...; ndrange = ndrange.val)
     KA.synchronize(backend.val)
-    return AugmentedReturn(nothing, nothing, (ar.tape, snap))
+    prof && _gpu_launch_record!((nameof(kernel.val), typeof(args)), 1, time() - t0)
+    return AugmentedReturn(nothing, nothing, (ar.tape, snap, dict))
 end
 
 function reverse(config, func::Const{typeof(_gpu_launch!)}, ::Type{RT}, tape,
         kernel::Const, backend::Const, ndrange::Const,
         args::Vararg{Enzyme.Annotation, N}) where {RT, N}
+    prof = _GPU_LAUNCH_PROFILE[]
+    t0 = prof ? time() : 0.0
     kobj = kernel.val(backend.val)
-    katape, snap = tape
+    katape, snap, dict = tape
     ann = ntuple(Val(N)) do i
         a = args[i]
-        _launch_isdup(a) ? Duplicated(snap[i], a.dval) : Const(snap[i])
+        _launch_isdup(a) ? Duplicated(snap[i], _remap_shadow(a.dval, dict)) : Const(snap[i])
     end
     EnzymeRules.reverse(_ka_rev_config(config, Val(N)), Const(kobj), Const{Nothing},
                         katape, ann...; ndrange = ndrange.val)
     KA.synchronize(backend.val)
+    prof && _gpu_launch_record!((nameof(kernel.val), typeof(args)), 2, time() - t0)
     return (nothing, nothing, nothing, map(_launch_scalar_grad, args)...)
+end
+
+# Shadow of a kernel argument, re-pointed at the snapshot wherever it IS a primal.
+#
+# Under runtime activity a kernel argument struct built inside the differentiated code
+# (e.g. `CfResIn`, whose `dleaf_pft`/`forc_pbot_col` come from the Const canopy aux)
+# gets a shadow whose fields for the inactive members are the PRIMAL arrays themselves;
+# `shadow === primal` is how runtime activity marks them inactive. Reversing against
+# `Duplicated(snapshot, live_shadow)` breaks that identity — the primal is now the copy
+# but the shadow is still the original — so the kernel reverse treats those members as
+# active and accumulates adjoints INTO THE ORIGINAL PRIMAL (corrupting Const aux and
+# live forcing arrays: wrong, run-to-run varying canopy gradients on CUDA, and wrong
+# later phases that read the corrupted arrays). Mapping every shadow leaf that is one
+# of the snapshotted primal objects to its copy restores `shadow === primal`.
+function _remap_shadow(x, dict::IdDict{Any, Any})
+    isbits(x) && return x
+    haskey(dict, x) && return dict[x]
+    x isa AbstractArray && return x
+    T = typeof(x)
+    n = fieldcount(T)
+    n == 0 && return x
+    fs = ntuple(i -> isdefined(x, i) ? _remap_shadow(getfield(x, i), dict) : nothing, n)
+    all(i -> !isdefined(x, i) || fs[i] === getfield(x, i), 1:n) && return x
+    any(i -> !isdefined(x, i), 1:n) &&
+        error("_remap_shadow: partially initialised $(T) in a GPU kernel argument shadow")
+    return ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), T, Any[fs...], n)::T
 end
 
 # Per-argument reverse return, by dispatch so the tuple type is concrete (Enzyme checks
