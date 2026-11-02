@@ -27,6 +27,50 @@ _kernel_backend(out) = KA.get_backend(out)
 _kernel_backend(::BitArray) = KA.CPU()
 
 # --------------------------------------------------------------------------
+# BitArray masks as kernel arguments on a compiling CPU backend
+# --------------------------------------------------------------------------
+# KernelAbstractions 0.9's CPU backend runs kernels as Julia code, so the host filter
+# masks (BitVector) are passed to kernels as they are. KA 0.10's CPU backend is
+# OpenCL/PoCL: every argument goes through Adapt (`POCL.KernelAdaptor`) and must be a
+# bitstype on the device, and a BitVector is not ("passing non-bitstype argument").
+# `DeviceBitArray` is the device form: the BitArray's own `chunks` (adapted to a device
+# array) plus its dims, with BitArray's bit layout, so a kernel reading or writing it sees
+# exactly the host BitArray. Writes are atomic per 64-bit chunk (work-items sharing a
+# chunk may run in parallel). The Adapt rule below is only defined when the loaded KA has
+# a PoCL backend (0.10); on KA 0.9 nothing is converted and CPU launches are unchanged.
+struct DeviceBitArray{N, A <: AbstractVector{UInt64}} <: AbstractArray{Bool, N}
+    chunks::A
+    dims::NTuple{N, Int}
+end
+DeviceBitArray(x::BitArray{N}) where {N} = DeviceBitArray{N, Vector{UInt64}}(x.chunks, size(x))
+Base.size(m::DeviceBitArray) = m.dims
+Base.IndexStyle(::Type{<:DeviceBitArray}) = IndexLinear()
+@inline function Base.getindex(m::DeviceBitArray, i::Int)
+    @boundscheck checkbounds(m, i)
+    @inbounds c = m.chunks[((i - 1) >> 6) + 1]
+    return (c >> ((i - 1) & 63)) & 0x1 == 0x1
+end
+@inline function Base.setindex!(m::DeviceBitArray, v, i::Int)
+    @boundscheck checkbounds(m, i)
+    k = ((i - 1) >> 6) + 1
+    bit = UInt64(1) << ((i - 1) & 63)
+    if convert(Bool, v)
+        Atomix.@atomic m.chunks[k] |= bit
+    else
+        Atomix.@atomic m.chunks[k] &= ~bit
+    end
+    return m
+end
+KA.get_backend(m::DeviceBitArray) = KA.get_backend(m.chunks)
+Adapt.adapt_structure(to, m::DeviceBitArray{N}) where {N} =
+    (c = Adapt.adapt(to, m.chunks); DeviceBitArray{N, typeof(c)}(c, m.dims))
+
+if isdefined(KA, :POCL) && isdefined(KA.POCL, :KernelAdaptor)   # KA >= 0.10 CPU backend
+    Adapt.adapt_structure(to::KA.POCL.KernelAdaptor, x::BitArray) =
+        Adapt.adapt(to, DeviceBitArray(x))
+end
+
+# --------------------------------------------------------------------------
 # Atomic integer width for scatter counters
 # --------------------------------------------------------------------------
 # Some GPU backends — notably Apple Metal — have NO 64-bit atomics, so an atomic
@@ -98,6 +142,14 @@ const _DEFER_GPU_SYNC = Ref(false)
     return out
 end
 
+# Whether launches on `backend` go through `_gpu_launch!` (and so its launch-level Enzyme
+# rule) rather than the plain KernelAbstractions call. A CLM trait instead of
+# `backend isa KA.GPU`: KernelAbstractions 0.10 deprecates `GPU` and makes it an alias of
+# `Backend`, which would silently send the CPU backend down the GPU path too. On KA 0.9
+# this is exactly the old test (`KA.CPU` is the only `Backend` that is not a `GPU`).
+_uses_launch_rule(::KA.CPU) = false
+_uses_launch_rule(::KA.Backend) = true
+
 # Launch `kernel(backend)(args...; ndrange)`. On a GPU backend the launch goes through
 # `_gpu_launch!`, which carries a launch-level Enzyme reverse rule
 # (src/infrastructure/enzyme_rules.jl): KernelAbstractions' own Enzyme extension
@@ -106,7 +158,7 @@ end
 # even a literal or a value read from a Const argument. Primal behaviour is identical
 # on every backend; the CPU path is the plain launch.
 @inline function _kcall!(kernel, backend, args...; ndrange)
-    if backend isa KA.GPU
+    if _uses_launch_rule(backend)
         _gpu_launch!(kernel, backend, ndrange, args...)
     else
         kernel(backend)(args...; ndrange = ndrange)

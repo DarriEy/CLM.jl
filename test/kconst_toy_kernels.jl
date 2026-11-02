@@ -20,3 +20,11 @@ end
     @inbounds v[i] = 0
     @inbounds out[i] = A[i, 2]
 end
+
+@inline _kct_bump!(x, i) = (@inbounds x[i] += 1; nothing)
+
+@kernel function _kct_write_helper!(out, @Const(a))    # writes it through a `f!` helper
+    i = @index(Global)
+    _kct_bump!(a, i)
+    @inbounds out[i] = a[i]
+end

@@ -179,6 +179,17 @@ const _KC_UPDATE_OPS = (:(=), :(+=), :(-=), :(*=), :(/=), :(.=), :(.+=), :(.-=),
 const _KC_MUTATORS = (:_scatter_add!, :fill!, :copyto!, :setindex!, :push!, :empty!,
                       :resize!, :sort!, :reverse!, :map!, :broadcast!)
 
+# A call that mutates its first positional argument: the explicit mutators above, and,
+# by Julia convention, any `f!` (incl. a module-qualified `M.f!`) -- a @Const argument
+# handed to a CLM helper `foo!(constarg, ...)` is written as surely as `A[i] = ...`.
+# KernelAbstractions 0.10 constifies @Const arguments on the host at launch, so such a
+# write fails to compile (or is UB) on every backend, not only the CPU aliasscope path.
+_kc_is_mutator(f::Symbol) = f in _KC_MUTATORS ||
+    (endswith(String(f), "!") && !(f in (:!, :.!)))     # `!x` is negation, not a mutator
+_kc_is_mutator(f::Expr) = f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode &&
+                          f.args[2].value isa Symbol && _kc_is_mutator(f.args[2].value)
+_kc_is_mutator(f) = false
+
 _kc_base(x::Symbol) = x
 _kc_base(x::Expr) = x.head in (:ref, :., :macrocall) && !isempty(x.args) ?
     (x.head === :macrocall ? _kc_base(x.args[end]) : _kc_base(x.args[1])) : nothing
@@ -194,7 +205,7 @@ _kc_viewsrc(rhs) = rhs isa Symbol ? rhs :
 
 For every `@kernel` under `path`, report each statement that writes to a `@Const`
 argument -- directly (`A[i] = …`, `A[i] += …`, `_scatter_add!(A, …)`, `fill!(A, …)`,
-`@atomic A[i] += …`) or through a local alias bound to it (`v = @view A[:, 1]`).
+`@atomic A[i] += …`, or any `f!(A, …)` call) or through a local alias bound to it (`v = @view A[:, 1]`).
 """
 function kconst_static_writes(path::AbstractString = joinpath(@__DIR__, ".."))
     out = NamedTuple{(:kernel, :const_arg, :via, :file, :line),Tuple{Symbol,Symbol,Symbol,String,Int}}[]
@@ -225,8 +236,10 @@ function kconst_static_writes(path::AbstractString = joinpath(@__DIR__, ".."))
                 tgt = nothing
                 if e.head in _KC_UPDATE_OPS && !(e.head === :(=) && e.args[1] isa Symbol)
                     tgt = _kc_base(e.args[1])
-                elseif e.head === :call && e.args[1] in _KC_MUTATORS && length(e.args) >= 2
-                    tgt = _kc_base(e.args[2])
+                elseif e.head === :call && _kc_is_mutator(e.args[1]) && length(e.args) >= 2
+                    a2 = e.args[2]
+                    a2 isa Expr && a2.head === :parameters && length(e.args) >= 3 && (a2 = e.args[3])
+                    tgt = _kc_base(a2)
                 end
                 if tgt !== nothing && haskey(alias, tgt)
                     push!(out, (kernel = kname, const_arg = alias[tgt], via = tgt, file = file, line = line))

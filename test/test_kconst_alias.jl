@@ -34,6 +34,7 @@ include(_KCT_FILE)
         ks = Set((x.kernel, x.const_arg, x.via) for x in w)
         @test (:_kct_write_const!, :a, :a) in ks
         @test (:_kct_write_view!, :A, :v) in ks
+        @test (:_kct_write_helper!, :a, :a) in ks          # via a `f!(constarg, …)` helper
         @test !any(x -> x.kernel === :_kct_copy!, w)
     end
 
