@@ -93,6 +93,19 @@ Adapt.adapt_storage(::Type{<:FakeGPU}, x::Array) = FakeGPU(x)
     prior_cuda === nothing || @test !(CLM.clm_ka_backend(backend = :cuda) isa FakeBackend)
 end
 
+@testset "0-based device index -> 1-based device-list slot" begin
+    # bind_device(idx) receives CLM's 0-based index (rank % ndev); Metal/AMDGPU
+    # index a 1-based Julia device vector. Device 0 must map to slot 1 (the old
+    # Metal hook used devices()[idx] -> BoundsError for rank 0).
+    @test CLM._device_list_slot(0, 1) == 1
+    @test CLM._device_list_slot(0, 4) == 1
+    @test CLM._device_list_slot(3, 4) == 4
+    @test_throws ArgumentError CLM._device_list_slot(1, 1)
+    @test_throws ArgumentError CLM._device_list_slot(4, 4)
+    @test_throws ArgumentError CLM._device_list_slot(-1, 4)
+    @test_throws ArgumentError CLM._device_list_slot(0, 0)
+end
+
 @testset "Kernel parity through the backend API (CPU proxy)" begin
     # The CPU backend is the correctness proxy: the SAME kernels the GPU backends
     # dispatch through, taken from the output array. Run a real CLM kernel through

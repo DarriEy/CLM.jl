@@ -171,6 +171,7 @@ const INPROCESS_TEST_FILES = [
     "test_flexiblecn_matrixcn_agsys.jl",
     "test_vegetation_facade.jl",
     "test_kernels_scatter.jl",
+    "test_ka010_readiness.jl",    # KA 0.10 prep: launch-rule trait, DeviceBitArray masks
     "test_kconst_alias.jl",       # @Const contract: static audit + opt-in _launch! alias checker
     "test_atm2lnd.jl",
     "test_multigridcell_forcing.jl",
@@ -234,6 +235,7 @@ const INPROCESS_TEST_FILES = [
     "test_device_adapt.jl",
     "test_backend.jl",  # centralized backend-selection API + multi-GPU-over-MPI plumbing (CPU proxy)
     "test_amdgpu_backend.jl",  # :amdgpu weakdep extension (skips unless AMDGPU.jl / a ROCm device is present)
+    "test_metal_backend.jl",   # :metal weakdep extension device bind (skips unless Metal.jl / an Apple GPU is present)
     "test_validation_harness.jl",  # validation-matrix schema (runner exercised locally vs domain data)
     "test_clm_run.jl",
     # Full clm_run! multi-column hillslope timestep (see the note at its unit-block

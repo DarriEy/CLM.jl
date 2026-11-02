@@ -86,6 +86,15 @@ function compute_max_daylength!(lat::AbstractVector{<:Real},
     return nothing
 end
 
+@kernel function _init_dayl_kernel!(dayl, prev_dayl, @Const(lat), declin, declinm1, lo::Int)
+    i = @index(Global)
+    @inbounds begin
+        g = lo + i - 1
+        prev_dayl[g] = daylength(lat[g], declinm1)
+        dayl[g]      = daylength(lat[g], declin)
+    end
+end
+
 """
     init_daylength!(grc::GridcellData, declin, declinm1, obliquity, bounds)
 
@@ -101,9 +110,16 @@ function init_daylength!(grc::GridcellData,
                          declinm1::Real,
                          obliquity::Real,
                          bounds::UnitRange{Int})
-    for g in bounds
-        grc.prev_dayl[g] = daylength(grc.lat[g], declinm1)
-        grc.dayl[g]      = daylength(grc.lat[g], declin)
+    # Through a kernel, like update_daylength!, so dayl / prev_dayl come from the same
+    # compiled `daylength` as every later step. On KA 0.9 that is the same Julia code as
+    # a host loop (bit-identical); on KA 0.10 the CPU backend compiles kernels with
+    # PoCL's libm, whose sin/cos/acos can differ from Julia's in the last bit, so a
+    # host-loop init would not match a kernel update of the same declination.
+    if !isempty(bounds)
+        FT = eltype(grc.dayl)
+        _launch!(_init_dayl_kernel!, grc.dayl, grc.prev_dayl, grc.lat,
+                 convert(FT, declin), convert(FT, declinm1), first(bounds);
+                 ndrange = length(bounds))
     end
 
     compute_max_daylength!(grc.lat, obliquity, grc.max_dayl, bounds)

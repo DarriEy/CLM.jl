@@ -39,7 +39,7 @@ end)
     @inbounds out[i] = inp[i]^2
 end
 function run_sq!(out, inp, backend)
-    sq_kernel!(backend, 64)(out, inp, ndrange=length(inp))
+    sq_kernel!(backend)(out, inp, ndrange=length(inp))   # no fixed workgroup size (KA 0.10 CPU)
     KA.synchronize(backend)
     return nothing
 end

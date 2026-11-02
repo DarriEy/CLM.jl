@@ -16,7 +16,7 @@ skipped and reported as pending.
 import os, sys
 import numpy as np
 from netCDF4 import Dataset
-from parity_config import (DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series, gate_cell,
+from parity_config import (DOMAINS, VARS, SCALE, DATA_DIR, date_ord, series, gate_cell, apply_presence_mask,
                            STRICT_PCT, STRICT_TEMP_K, STRICT_NRMSE, STRICT_TEMP_RMSE_K,
                            TEMP_VARS, DOCUMENTED_EXCEPTIONS)
 
@@ -44,6 +44,7 @@ for key, fh0, jnc, lab, biome in DOMAINS:
     for jn, fn, vl, grp, floor in VARS:
         sc = SCALE.get(jn, 1)
         j = series(dj, jn, ji); f = series(df, fn, fi)
+        j, f = apply_presence_mask(jn, dj, df, ji, fi, j, f)
         if j is None or f is None:
             continue
         res = gate_cell(j * sc, f * sc, floor, jn in TEMP_VARS)

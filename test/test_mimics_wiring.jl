@@ -91,6 +91,11 @@
         isnan(b[i]) && continue; @test isfinite(b[i])
         m=max(m, abs(a[i]-b[i])/(1.0+max(abs(a[i]),abs(b[i])))) end; m end
 
+    # Bit-exact while CPU kernels are Julia code (KernelAbstractions 0.9). KA 0.10's CPU
+    # backend compiles kernels with PoCL's libm (exp/log can differ from Julia's in the
+    # last bit), so there the kernel-vs-host-oracle comparison allows a few ulps.
+    _KTOL = isdefined(CLM.KA, :POCL) ? 1.0e-14 : 0.0
+
     @testset "(a) decomp_rates_mimics! bit-exact vs scalar oracle" begin
         nc=3; nlev=4
         p = CLM.DecompMIMICSParams(); CLM.mimics_default_read_params!(p)
@@ -121,13 +126,13 @@
         ref = _oracle(p; t_soisno, soilpsi, cpools, dz, cellclay, lignin, annpp,
             minpsi=cnp.minpsi, maxpsi=cnp.maxpsi, tau_cwd=cnp.tau_cwd, dpy=365.0,
             icop=st.i_cop_mic, ioli=st.i_oli_mic)
-        @test _mrd(Array(cf.decomp_k_col), ref.dk) == 0.0
-        @test _mrd(Array(cf.pathfrac_decomp_cascade_col), ref.pf) == 0.0
-        @test _mrd(Array(cf.rf_decomp_cascade_col), ref.rf) == 0.0
-        @test _mrd(Array(cf.w_scalar_col), ref.ws) == 0.0
-        @test _mrd(Array(cf.o_scalar_col), ref.os) == 0.0
-        @test _mrd(Array(cf.cn_col)[:, st.i_cop_mic], ref.cnc) == 0.0
-        @test _mrd(Array(cf.cn_col)[:, st.i_oli_mic], ref.cno) == 0.0
+        @test _mrd(Array(cf.decomp_k_col), ref.dk) <= _KTOL
+        @test _mrd(Array(cf.pathfrac_decomp_cascade_col), ref.pf) <= _KTOL
+        @test _mrd(Array(cf.rf_decomp_cascade_col), ref.rf) <= _KTOL
+        @test _mrd(Array(cf.w_scalar_col), ref.ws) <= _KTOL
+        @test _mrd(Array(cf.o_scalar_col), ref.os) <= _KTOL
+        @test _mrd(Array(cf.cn_col)[:, st.i_cop_mic], ref.cnc) <= _KTOL
+        @test _mrd(Array(cf.cn_col)[:, st.i_oli_mic], ref.cno) <= _KTOL
         # non-vacuous: decomp_k actually populated and positive
         dkv = Array(cf.decomp_k_col)
         @test all(isfinite, dkv)

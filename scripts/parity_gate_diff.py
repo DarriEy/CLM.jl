@@ -13,7 +13,7 @@ import os, sys
 import numpy as np
 sys.path.insert(0, sys.argv[1])
 from netCDF4 import Dataset
-from parity_config import DOMAINS, VARS, SCALE, date_ord, series, gate_cell, TEMP_VARS
+from parity_config import DOMAINS, VARS, SCALE, date_ord, series, gate_cell, apply_presence_mask, TEMP_VARS
 
 bdir, adir = sys.argv[2], sys.argv[3]
 want = set(sys.argv[4:])
@@ -29,6 +29,7 @@ def score(path, fh0, alias):
     for jn, fn, vl, grp, floor in VARS:
         sc = SCALE.get(jn, 1)
         j = series(dj, alias.get(jn, jn), ji); f = series(df, fn, fi)
+        j, f = apply_presence_mask(jn, dj, df, ji, fi, j, f)
         if j is None or f is None:
             continue
         res = gate_cell(j * sc, f * sc, floor, jn in TEMP_VARS)

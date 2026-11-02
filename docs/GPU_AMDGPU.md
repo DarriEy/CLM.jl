@@ -26,11 +26,16 @@ CLM.clm_set_backend(:cpu)
   same as CPU and CUDA. No Float32 down-adaptor is needed (that is Metal-only).
 - BitVector masks must become `Vector{Bool}` before moving to the device, as on
   CUDA (see the `_HostPrep` adaptor in `scripts/gpu_adapt.jl`).
-- Multi-GPU: `clm_bind_local_gpu!` calls `AMDGPU.device!(AMDGPU.devices()[idx + 1])`
-  with CLM's 0-based rank index.
-- **Compat:** `AMDGPU = "1"`. AMDGPU.jl 2.x requires KernelAbstractions 0.10,
-  and CLM is on KernelAbstractions 0.9, so the resolver installs AMDGPU.jl 1.x
-  next to CLM. Moving to AMDGPU 2.x means moving CLM to KA 0.10 first.
+- Multi-GPU: `clm_bind_local_gpu!` passes CLM's 0-based rank index to the bind
+  hook, which calls `AMDGPU.device!(AMDGPU.devices()[CLM._device_list_slot(idx, n)])`
+  (slot = `idx + 1`; an out-of-range index raises `ArgumentError`, like
+  `CUDA.device!`). The Metal extension uses the same helper.
+- **Compat:** `AMDGPU = "1, 2"`. Only AMDGPU.jl **2.9 and later** need
+  KernelAbstractions 0.10. AMDGPU.jl 2.0–2.8 still use KA `0.9.2 - 0.9`, so they
+  install next to CLM's KA 0.9.45. With CUDA.jl 5 and Metal.jl in the same
+  environment, the resolver picks **AMDGPU.jl 2.7.0** (2.8 needs GPUCompiler 2,
+  which CUDA.jl 5 does not allow). AMDGPU.jl 2.9+ waits on the KA 0.10 move;
+  see "KernelAbstractions 0.10" below.
 
 ## What the extension does
 
@@ -78,6 +83,119 @@ branch. The resolver installed **AMDGPU.jl 1.3.6** with KernelAbstractions 0.9.4
 
 Without AMDGPU.jl installed (the default), the test file shows two `@test_skip`
 and nothing else changes.
+
+Re-checked on 2026-11-01 on an Apple Silicon Mac (no ROCm, Julia 1.12.6) with
+`AMDGPU = "1, 2"`. The scratch environment held CLM (dev), AMDGPU, CUDA and Metal.
+The resolver installed AMDGPU.jl 2.7.0, CUDA.jl 5.11.3, Metal.jl 1.9.3,
+KernelAbstractions 0.9.45, Enzyme 0.13.216, GPUCompiler 1.15.2 and LLVM.jl 9.13.2.
+`CLM → CLMAMDGPUExt` precompiles and the registration tier passes 9/9. The device
+tier is skipped. `AMDGPU.devices`, `AMDGPU.device!(::HIPDevice)`, `ROCBackend`
+and `AMDGPU.Device.@device_override` all still exist in 2.7.
+
+## KernelAbstractions 0.10 — not installable with Enzyme yet (checked 2026-11-01)
+
+Widening the compat to `KernelAbstractions = "0.9.45, 0.10"` and asking Pkg for
+0.10 fails to resolve:
+
+```
+ERROR: Unsatisfiable requirements detected for package LLVM [929cbde3]:
+ ├─restricted by compatibility requirements with KernelAbstractions [63c18a36] to versions: 10.0.0 - 10.4.2
+ │   └─restricted to versions 0.10 by an explicit requirement, leaving only versions: 0.10.0 - 0.10.4
+ └─restricted by compatibility requirements with Enzyme [7da242da] to versions: 9.8.1 - 9.13.2 — no versions left
+   └─restricted to versions 0.13.152 - 0.13 by CLM [4245f2e0], leaving only versions: 0.13.152 - 0.13.216
+```
+
+- Every KA 0.10.x requires LLVM.jl 10. Every released Enzyme.jl, up to 0.13.216
+  (and Enzyme.jl `main`, `LLVM = "9.10"`), requires LLVM.jl 9. Enzyme is a hard
+  dependency of CLM, so no environment can hold both. The Enzyme upgrade is open as
+  [EnzymeAD/Enzyme.jl#3741](https://github.com/EnzymeAD/Enzyme.jl/pull/3741)
+  ("Upgrade to LLVM.jl 10").
+- KA 0.10 also **removed its Enzyme extension**
+  ([JuliaGPU/KernelAbstractions.jl#824](https://github.com/JuliaGPU/KernelAbstractions.jl/pull/824),
+  "Temporarily remove Enzyme support"). Restoring it is
+  [#826](https://github.com/JuliaGPU/KernelAbstractions.jl/issues/826), which is still
+  open (milestone 0.10.1, but 0.10.4 shipped without it). CLM's reverse AD depends on
+  that extension. The `_gpu_launch!` rule in `src/infrastructure/enzyme_rules.jl`
+  forwards to KA's own kernel reverse rule, and Enzyme on CPU differentiates KA
+  kernel launches through the same extension. Even once LLVM.jl resolves, CLM
+  cannot move until #826 lands.
+- KA 0.10 also means moving every GPU package at once, because each pins one KA
+  minor. KA 0.10 needs CUDA.jl 6.5+ (CUDACore 6.5, so compat `CUDA = "5, 6"`),
+  Metal.jl 1.12+, and AMDGPU.jl 2.9+.
+
+### Readiness work already done on KA 0.9.45 (branch `gpu/ka010-readiness`)
+
+The 0.10 breaking list (v0.10.0 release notes, and the #824 diff), item by item:
+
+| 0.10 change | CLM before | Now |
+|---|---|---|
+| `GPU` deprecated, aliased to `Backend` | `_kcall!` tested `backend isa KA.GPU`, which on 0.10 is true for the CPU too | `_uses_launch_rule(backend)`: `false` for `KA.CPU`, `true` for any other `Backend`. Same result on 0.9 |
+| `CPU` is PoCL: kernel arguments must be bitstypes | host filter masks are `BitVector` and are passed to CPU kernels as is ("passing non-bitstype argument") | `DeviceBitArray` (the BitArray's own `chunks` plus its dims, with atomic per-chunk writes). An `Adapt` rule for `KA.POCL.KernelAdaptor` is defined only when KA has a PoCL backend, so 0.9 launches are unchanged |
+| PoCL compiles kernels with its own libm | `init_daylength!` used a host loop while `update_daylength!` used a kernel; on 0.10 the two differ in the last bit, which breaks the `prev_dayl == dayl` re-seed guard | `init_daylength!` goes through a kernel too (bit-identical on 0.9) |
+| same | `test_mimics_wiring` (a) compares a kernel against a host oracle with `== 0.0` | still `== 0` on 0.9; a 1e-14 relative tolerance when KA has a PoCL backend |
+| `@Const` arguments constified on the host at launch | static audit only looked at `A[i] = …`, `fill!`, `_scatter_add!` … | the audit also treats any `f!(A, …)` call as a write. `src/` is clean |
+| fixed workgroup sizes discouraged on CPU | only `scripts/enzyme_metal_reverse_probe.jl` passed `64` | dropped |
+| `isgpu`, `CPU(; static=true)`, `@ka_code_*`, `@private` → `PrivateArray` | not used anywhere in `src/`, `ext/`, `test/` or `scripts/` | nothing to do |
+
+`test/test_ka010_readiness.jl` covers the trait and `DeviceBitArray` on 0.9. On a PoCL
+CPU backend it also checks the `Adapt` rule and plain-BitVector reads and writes.
+
+### Local trial against the upstream branches (2026-11-01, macOS arm64, Julia 1.12.6)
+
+Environment: Enzyme.jl #3741 head (`a5989aa1`, LLVM.jl 10.4.2, GPUCompiler 2.19.0),
+KernelAbstractions #826, and this branch with `KernelAbstractions = "0.9.45, 0.10"`.
+
+- **#826 at its head (`93a65b75`) cannot launch any CPU kernel.** It fails with
+  `could not load symbol "POclSetCPUMaxComputeUnitsPOCL"`. The branch predates #841, and
+  pocl_standalone_jll 7.2.3 no longer has that symbol. #826's commits cherry-picked onto
+  v0.10.4 work (`ext/` is then identical to the PR head). The rest of the trial uses that
+  rebased branch.
+- **CPU forward path: ✅.** With the readiness changes above, the full default suite
+  (subprocess block off) has no KA-0.10-specific failure outside reverse AD. Before them,
+  every kernel taking a BitVector mask failed, and the daylength and MIMICS checks failed
+  by 1 ulp. Data-gated files are skipped on the laptop, as they are on 0.9.
+- **CPU reverse AD: ❌, upstream.** Every reverse call first fails in Enzyme #3741 with
+  `KeyError: key :PreserveNVVMPass not found`. Enzyme's `LLVM.@module_pass` registrations
+  are made at precompile time and are lost. With that patched locally, reverse mode over a
+  KA kernel fails with `no method matching lookup_world(…, ::CompilerCaching.StackedMethodTable)`
+  (GPUCompiler ≥ 2.18). Next, the #826 wrappers don't answer 0.10's `ConstArgs` query
+  (`no method matching __dynamic_checkbounds(::ConstArgs)`). Last, Enzyme cannot
+  differentiate SPIRVIntrinsics' work-item builtins (`EnzymeNoDerivativeError` in
+  `get_group_id`), so no KA kernel can be reversed on the PoCL CPU yet. With all the local
+  patches, `test_enzyme_smoke.jl` (non-KA reverse) passes, and `test_photosynthesis_reverse.jl`
+  crashes in the GC inside Enzyme's `julia_allocator`.
+- **GPU packages: Enzyme #3741 pins `GPUArrays = "10, 11"`.** Metal.jl 1.12 and CUDA.jl
+  6.5 need GPUArrays 12, so neither resolves next to it. With that compat widened locally,
+  Enzyme's `EnzymeGPUArraysExt` fails to load (`mapreducedim!` is gone in GPUArrays 12).
+  Metal.jl 1.12.0 on KA 0.10.4 then passes `test_metal_backend.jl` 10/10,
+  `test_ka010_readiness.jl` 36/36, `scripts/gpu_validate.jl` 3/3 and
+  `scripts/gpu_validate_soiltemp_e2e.jl` 9/9 (forward only; Enzyme has no Metal support).
+- **CUDA (Windows 11, RTX 5070 Ti, CUDA.jl 6.5.0): forward loads, reverse crashes,
+  upstream.** On Windows, Enzyme #3741 does not load at all
+  (`MethodError: no method matching find_symbol(::LLVM.LLVMSymbol)` in
+  `Enzyme.Compiler.JIT.__init__`, the `___chkstk_ms` branch). Patched locally, CUDA.jl 6.5,
+  KA 0.10.4 and `CLMCUDAExt` load, and plain CPU reverse mode works. But reverse mode over
+  even a trivial KA kernel on `CUDABackend` kills the process with
+  `EXCEPTION_ACCESS_VIOLATION … llvm::Type::getVoidTy(LLVMContext&)`. This happens with
+  CLM out of the picture, and both through `_kcall!` and with a direct KA launch.
+  `scripts/gpu_ad_active_scalar_repro.jl` crashes the same way (also in Enzyme's
+  `restore_alloca_type!`). The soil-temperature reverse check was therefore not run under
+  0.10.
+- **#826 also drops the CPU support for `Active` scalar kernel arguments that 0.9 had**
+  ("Active kernel arguments not supported" now on `CPU()` as well). Once the rest works,
+  CPU reverse through `_launch!` needs the same launch-level rule as the GPU path
+  (`_uses_launch_rule(::KA.CPU)` → `true`). Under that rule, scalar kernel arguments get a
+  zero derivative on CPU too.
+
+Repro scripts and draft upstream comments are kept outside the repo (not posted).
+
+Before the real upgrade: Enzyme.jl releases LLVM.jl 10 support, with the pass-registry,
+`StackedMethodTable`, Windows `find_symbol` and GPUArrays 12 problems fixed, and the CUDA
+kernel-reverse crash gone, and KA merges #826 rebased on 0.10.x, handling
+`ConstArgs` and SPIR-V builtins (and ideally `Active` scalars on PoCL). Then bump
+`KernelAbstractions = "0.10"`, `CUDA = "5, 6"` (6.5+), Metal 1.12+ and AMDGPU 2.9+.
+Decide `_uses_launch_rule(::KA.CPU)`. Re-run the CPU AD tests, the Metal backend test,
+`scripts/gpu_validate_cuda.jl` and the soil-temperature reverse check.
 
 ## Untested (needs a ROCm device)
 
