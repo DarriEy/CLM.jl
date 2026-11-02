@@ -114,12 +114,16 @@ _getpath(x, p::AbstractString) = foldl((o, f) -> o === nothing || !hasproperty(o
                                         nothing : getproperty(o, Symbol(f)), split(p, "."); init = x)
 
 # Output fields of the wide loss (paths under inst). Missing paths are skipped.
+# zwt_col / qflx_drain_col are left out: the CPU HOST phase list's watertable_rev_phase!
+# calls the aquifer water_table! unconditionally, while production clm_drv! (and the
+# device list) use perched + theta-based water tables when use_aquifer_layer = false,
+# so the two lists legitimately differ there (see docs/GPU_REVALIDATION_2026-10_CUDA.md).
 const WIDE_FIELDS = ["temperature.t_soisno_col", "temperature.t_grnd_col",
     "temperature.t_veg_patch", "water.waterstatebulk_inst.ws.h2osoi_liq_col",
     "water.waterstatebulk_inst.ws.h2osoi_ice_col", "water.waterstatebulk_inst.ws.h2osfc_col",
-    "soilhydrology.zwt_col", "energyflux.eflx_sh_tot_patch", "energyflux.eflx_lh_tot_patch",
+    "energyflux.eflx_sh_tot_patch", "energyflux.eflx_lh_tot_patch",
     "energyflux.eflx_soil_grnd_patch", "water.waterfluxbulk_inst.wf.qflx_surf_col",
-    "water.waterfluxbulk_inst.wf.qflx_drain_col", "water.waterfluxbulk_inst.wf.qflx_infl_col"]
+    "water.waterfluxbulk_inst.wf.qflx_infl_col"]
 
 # Random weights per field, zero on non-finite/spval entries of the final state, scaled
 # by 1/max|field| so every field contributes at a comparable size.
@@ -169,8 +173,10 @@ end
 
 # Compare every Float leaf of two gradient trees (CPU vs CUDA), matched by path. Per
 # leaf: max|Δ| / max(max|cpu|, max|gpu|) over entries finite on both. Returns the worst
-# value (Inf if the finite patterns differ).
-function compare_grad_trees(label, dcpu, dgpu; show = 10)
+# value (Inf if the finite patterns differ). A leaf whose largest difference is at or
+# below `atol` (roundoff-level gradients, e.g. 1e-20 where one backend gives exactly 0)
+# counts as agreeing.
+function compare_grad_trees(label, dcpu, dgpu; show = 10, atol = 1e-15)
     lc = _gleaves!(Dict{String,Any}(), dcpu, "inst", Set{UInt}())
     lg = _gleaves!(Dict{String,Any}(), dgpu, "inst", Set{UInt}())
     rows = Tuple{Float64,Float64,Float64,Int,String}[]; nfin = 0; nnz = 0; nleaf = 0
@@ -184,7 +190,7 @@ function compare_grad_trees(label, dcpu, dgpu; show = 10)
         nz = count(!iszero, ah[m]); nnz += nz
         sc == 0 && continue
         ad = maximum(abs.(ah[m] .- gh[m]); init = 0.0)
-        push!(rows, (ad / sc, ad, sc, nz, p))
+        push!(rows, (ad <= atol ? 0.0 : ad / sc, ad, sc, nz, p))
     end
     sort!(rows; rev = true)
     worst = isempty(rows) ? 0.0 : rows[1][1]
@@ -378,7 +384,11 @@ function main()
         fdkw = (; include_canopy, include_surface, ncanopy)
         checks = [
             ("temperature.t_grnd_col", (c0,), 1e-2),
-            ("temperature.t_soisno_col", (c0, j0 + 2), 1e-2),
+            # a soil layer away from TFRZ: at exactly 273.15 the central difference
+            # straddles the phase-change switch
+            ("temperature.t_soisno_col", (c0, something(findfirst(j -> abs(
+                Array(inst_gpu_entry.temperature.t_soisno_col)[c0, j] - CLM.TFRZ) > 0.5,
+                j0:size(inst_gpu_entry.temperature.t_soisno_col, 2)), 3) + j0 - 1), 1e-2),
             ("temperature.t_veg_patch", (p0,), 1e-2),
             ("water.waterstatebulk_inst.ws.h2osoi_liq_col", (c0, j0 + 1), 0.0),
             ("soilstate.watsat_col", (c0, 2), 0.0),
