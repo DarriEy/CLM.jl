@@ -8,8 +8,9 @@
 #   PHASES=comma,separated,substrings  (default: a cheap diagnostic subset; "all" = every phase)
 #   PROFILE=1 / PROFILE_PHASES=a,b  sample the first CUDA call of every / the named
 #                    phases into profile_phase<k>.txt (flat) and _tree.txt
-#   ENZYME_MAXTYPEDEPTH / ENZYME_MAXTYPEOFFSET  Enzyme type-lattice size for the CUDA
-#                    calls (experiment only: 3/64 gives WRONG canopy gradients)
+#   ENZYME_MAXTYPEDEPTH / ENZYME_MAXTYPEOFFSET  override CLM.GPU_REVERSE_TYPE_LATTICE
+#                    (the CUDA calls' Enzyme type lattice); CLM_GPU_REVERSE_TYPE_LATTICE=default
+#                    uses Enzyme's defaults
 #   DETAIL=1         also: CUDA rerun determinism, and for the worst leaves a central
 #                    FD (CPU forward) of the seeded loss at the 3 worst entries
 #   SEED=rand|ones   rand (default): independent uniform(0.5,1.5) seed per entry, the
@@ -56,8 +57,8 @@ end
 
 function run_phase(entry, b, revmode, k)
     bk = deepcopy(b); db = Enzyme.make_zero(bk); seed_leaves!(e3(entry)(db), k)
-    Enzyme.autodiff(revmode, entry[1], Enzyme.Const,
-        Enzyme.Duplicated(e3(entry)(bk), e3(entry)(db)), map(Enzyme.Const, entry[2])...)
+    # the library's per-phase call (device type lattice on CUDA, Enzyme defaults on CPU)
+    CLM._phase_autodiff!(revmode, entry[1], e3(entry)(bk), e3(entry)(db), entry[2])
     db
 end
 e3(entry) = length(entry) == 3 ? entry[3] : identity
@@ -101,12 +102,14 @@ function main_diff()
     pg = CLM.driver_rev_phases(bounds, filt_gpu, config; canopy_aux = CLM.canopy_rev_aux(inst_gpu, bounds, filt_gpu),
                                inst = inst_gpu, kw...)
     Enzyme.API.strictAliasing!(false)
-    # compile-time experiments: Enzyme type-analysis lattice size (defaults 6 / 512),
-    # applied to the CUDA calls only; the CPU reference always compiles with defaults.
-    tdepth = parse(Int, get(ENV, "ENZYME_MAXTYPEDEPTH", "6"))
-    toffset = parse(Int, get(ENV, "ENZYME_MAXTYPEOFFSET", "512"))
-    knobs!(on) = (Enzyme.API.maxtypedepth!(on ? tdepth : 6);
-                  Enzyme.API.maxtypeoffset!(on ? toffset : 512))
+    # Enzyme type-analysis lattice for the CUDA calls (CLM.GPU_REVERSE_TYPE_LATTICE,
+    # default (3, 64); the CPU reference always compiles with Enzyme's 6 / 512).
+    if haskey(ENV, "ENZYME_MAXTYPEDEPTH") || haskey(ENV, "ENZYME_MAXTYPEOFFSET")
+        CLM.GPU_REVERSE_TYPE_LATTICE[] = (parse(Int, get(ENV, "ENZYME_MAXTYPEDEPTH", "6")),
+                                          parse(Int, get(ENV, "ENZYME_MAXTYPEOFFSET", "512")))
+    end
+    println("CUDA type lattice: ", get(ENV, "CLM_GPU_REVERSE_TYPE_LATTICE", "") == "default" ?
+            "Enzyme defaults" : CLM.GPU_REVERSE_TYPE_LATTICE[])
     CLM._GPU_LAUNCH_PROFILE[] = true
     Base.cumulative_compile_timing(true)
     revmode = Enzyme.set_runtime_activity(Enzyme.Reverse)
@@ -114,10 +117,8 @@ function main_diff()
         name = string(pc[k][1])
         if sel == ["all"] || any(s -> occursin(s, name), sel)
             t0 = time()
-            knobs!(false)
             dc = run_phase(pc[k], bc, revmode, k); t1 = time()
             jc0 = Base.cumulative_compile_time_ns()[1]
-            knobs!(true)
             dg = try
             if get(ENV, "PROFILE", "0") == "1" ||
                any(s -> occursin(s, name), split(get(ENV, "PROFILE_PHASES", ""), ","; keepempty = false))
