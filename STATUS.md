@@ -154,9 +154,29 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   of the batched band solve was wrong on CUDA did not hold (raw-kernel vs exact adjoint
   2e-16, `scripts/cuda_band_solve_reverse_check.jl`); no custom rule is used for it. Also
   fixed: host-built canopy aux, the missing `jtop/jbot` setup (illegal address), the
-  in-kernel atomic SNICAR scatter. Details: `docs/GPU_REVALIDATION_2026-10_CUDA.md`. A
-  fresh process takes ~4.5 h for the gate, mostly compiling the CUDA reverse. CPU reverse
-  is unchanged. Enzyme has no Metal device
+  in-kernel atomic SNICAR scatter. Details: `docs/GPU_REVALIDATION_2026-10_CUDA.md`.
+  **Per-phase checks (branch `ad/cuda-reverse-phase-checks`):** every one of the 36 device
+  phases was reversed on its own, CUDA vs CPU, with random seeds on every input and output
+  leaf (`scripts/cuda_reverse_phase_diff.jl`). This found a CUDA-only bug in the launch
+  rule. Reversing against the snapshot broke runtime activity's `shadow === primal` marker
+  for Const members of kernel-argument structs, so adjoints were accumulated into Const
+  aux and live forcing arrays. Canopy resist/energy gradients were wrong and varied run to
+  run (FD sided with CPU), and later phases read the corrupted inputs. Fixed by remapping
+  the shadows onto the snapshot. All 36 phases now agree to ≤7e-14 (per-leaf relative) and
+  are deterministic. The gate on current main
+  (`CLM_REVERSE_CPU=1 CLM_REVERSE_FD=1 CLM_REVERSE_EXTRA=1`) passes:
+  dL/d(t_grnd[1]) = −3.44327925 on CUDA and CPU (absdiff 2.1e-14), FD rel 1.4e-9. Every
+  input-gradient leaf agrees CUDA vs CPU (≤2.9e-14) for that loss and for a second
+  random-weight loss over temperatures, soil water, fluxes and runoff (≤1.1e-14), and that
+  loss matches FD with respect to t_grnd, t_soisno, t_veg, h2osoi_liq, watsat, bsw and
+  forc_lwrad (≤1.7e-8). Compile time: the gate now takes 2.0 h, down from 4.6 h; the CUDA
+  reverse sweep went from 13425 s to 4254 s. That comes from a device-only Enzyme
+  type-analysis lattice (3, 64), which gives identical gradients in all 36 phases, and a
+  narrow view for the scatter-only gnet reduce phase.
+  Open: the CPU *host* reverse list's `watertable_rev_phase!` calls the aquifer
+  `water_table!` even when `use_aquifer_layer = false`, unlike production `clm_drv!`, so
+  host-list gradients through `zwt` / `qflx_drain` differ from production. CPU reverse
+  behaviour is otherwise unchanged. Enzyme has no Metal device
   support; Metal's primal Atomix path is unchanged.
 
 ## 5. Fortran parity breadth
