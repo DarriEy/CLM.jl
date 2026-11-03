@@ -84,6 +84,10 @@ function section_A()
         canopystate.frac_veg_nosno_patch[1] = 1; canopystate.dleaf_patch[1] = 0.04
         canopystate.stem_biomass_patch[1] = 0.0; canopystate.leaf_biomass_patch[1] = 0.0
         canopystate.tlai_patch[1] = 2.0
+        # canopy_fluxes! now seeds frictionvel.z0mv_patch from canopystate.z0m_patch before
+        # the roughness blend (0e23b3e); keep it equal to the z0mv set below, or the real
+        # canopy_fluxes! reference starts from NaN roughness.
+        canopystate.z0m_patch[1] = 0.5
         canopystate.laisun_z_patch = copy(PSN.laisun_z); canopystate.laisha_z_patch = copy(PSN.laisha_z)
 
         energyflux = C.EnergyFluxData{FT}(); C.energyflux_init!(energyflux, NP, NC, NL, NG)

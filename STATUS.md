@@ -193,7 +193,13 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   aquifer `water_table!` only when true, and the bedrock clip either way. It used to call
   the aquifer routine unconditionally, so host-list gradients through `zwt` /
   `qflx_drain` differed from production. `test/test_watertable_reverse.jl` checks that
-  host, device and production agree. Enzyme has no Metal device
+  host, device and production agree. Re-running the CPU reverse-chain scripts against
+  #382 left the whole-step, multistep, `clm_drv_reverse!` and steady-rain calibration
+  results bit-identical: their warmed water table sits at bedrock, where both routines are
+  no-ops. The real-forcing, seasonal and snow calibrations had hand-set zwt above bedrock,
+  which only the old aquifer path kept. Under production that baseflow gradient was 0, so
+  those scripts now wet the moisture profile instead. All 15 scripts pass on current main
+  (details: `docs/GPU_REVALIDATION_2026-10_CUDA.md`, follow-up 3). Enzyme has no Metal device
   support; Metal's primal Atomix path is unchanged.
 
 ## 5. Fortran parity breadth

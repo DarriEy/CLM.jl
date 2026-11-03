@@ -150,9 +150,18 @@ function baseflow_cal!(b, aux)
             q = θ2 * tan(FT(pi)/180.0 * slope) * (zi_bed - zw)^aux.n_baseflow   # mm/s (ice_imped≈1)
         end
         wf.qflx_drain_col[c] = q
-        # mass-conserving depletion of the water-table layer (jwt+1), smooth, no branch on θ2
+        # mass-conserving depletion of the water-table layer (jwt+1), smooth, no branch on θ2.
+        # jwt = layer right above the water table (CLM's search in soil_hydrology.jl).
+        # Draining the first saturated layer lowers the θ-diagnosed zwt, as CLM's drainage does.
         drain_mm = q * aux.dt
-        jl = min(nb, aux.nlevsoi)
+        jwt = aux.nlevsoi
+        for j in 1:aux.nlevsoi
+            if zw <= col.zi[c, j + joff_zi]
+                jwt = j - 1
+                break
+            end
+        end
+        jl = min(jwt + 1, nb, aux.nlevsoi)
         newliq = ws.h2osoi_liq_col[c, jl + joff] - drain_mm
         ws.h2osoi_liq_col[c, jl + joff] = newliq > 0.0 ? newliq : ws.h2osoi_liq_col[c, jl + joff]
     end
@@ -163,6 +172,34 @@ function accum_runoff!(b, aux)
     wf = b.inst.water.waterfluxbulk_inst.wf; s = 0.0
     @inbounds for c in aux.cols; s += wf.qflx_surf_col[c] + wf.qflx_drain_col[c]; end
     b.series[aux.k] += s
+    return nothing
+end
+
+# Wet initial state with the water table `head` m above bedrock. With the CLM5 default
+# use_aquifer_layer = false, zwt is not prognostic: every step, production clm_drv! (and
+# watertable_rev_phase!) re-diagnoses it from the soil moisture profile
+# (theta_based_water_table!: the depth below which the layers are > 90 % saturated) and
+# clips it at bedrock. A zwt written directly is overwritten on the first step, which
+# leaves zero baseflow head and a zero baseflow_scalar gradient. So the wet state is set
+# on the profile: soil layers whose node lies below zi_bedrock − head are saturated, and
+# zwt is re-diagnosed from that profile.
+function wet_profile!(inst, bounds, filt, head)
+    joff = C.varpar.nlevsno; nlevsoi = C.varpar.nlevsoi
+    ws = inst.water.waterstatebulk_inst.ws; col = inst.column
+    for c in (bounds.begc:bounds.endc)
+        filt.hydrologyc[c] || continue
+        nb = col.nbedrock[c]
+        ztop = max(0.3, col.zi[c, nb + joff + 1] - head)
+        for j in 1:min(nb, nlevsoi)
+            col.z[c, j + joff] > ztop || continue
+            vsat = inst.soilstate.watsat_col[c, j] * col.dz[c, j + joff]          # m3/m2
+            ice  = ws.h2osoi_ice_col[c, j + joff] / C.DENICE                      # m3/m2
+            ws.h2osoi_liq_col[c, j + joff] = max(0.0, vsat - ice) * C.DENH2O
+        end
+    end
+    C.theta_based_water_table!(inst.soilhydrology, inst.soilstate, ws, col.dz, col.z, col.zi,
+        col.nbedrock, filt.hydrologyc, bounds.begc:bounds.endc, nlevsoi)
+    C.clamp_zwt_to_bedrock!(inst.soilhydrology.zwt_col, filt.hydrologyc, col.nbedrock, col.zi, joff)
     return nothing
 end
 
@@ -187,15 +224,7 @@ function build()
     # a physically-valid wet spin-up state — so both fff and baseflow_scalar are active and
     # their gradients non-vacuous. Default on; CLM_HEAD=0 restores the equilibrium state.
     head = parse(Float64, get(ENV, "CLM_HEAD", "1.0"))
-    if head > 0
-        jz = C.varpar.nlevsno + 1
-        for c in (bounds.begc:bounds.endc)
-            filt.hydrologyc[c] || continue
-            nb = inst.column.nbedrock[c]
-            zi_bed = inst.column.zi[c, nb + jz]
-            inst.soilhydrology.zwt_col[c] = max(0.3, zi_bed - head)
-        end
-    end
+    head > 0 && wet_profile!(inst, bounds, filt, head)
     return inst, bounds, filt, config
 end
 

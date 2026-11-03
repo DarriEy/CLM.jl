@@ -396,6 +396,83 @@ Per CUDA phase in the gate, before → after: canopy energy 2324 → 118 s, cano
 1193 → 206 s, canopy resist 1064 → 82 s, soil water 1096 → 108 s, gnet reduce
 1210 → 74 s, soil-temperature post 1006 → 400 s, hydrology_no_drainage 836 → 797 s.
 
+## Follow-up 3: CPU reverse-chain scripts after #382
+
+All fifteen `scripts/calibrate_streamflow_ad*.jl`, `enzyme_driver_reverse*.jl`,
+`enzyme_multistep_*.jl` and `enzyme_clm_drv_reverse.jl` were re-run on a laptop
+(Apple Silicon, Julia 1.12.6, CPU only) at 8bcccbf. Every script whose chain contains
+`watertable_rev_phase!` was also run at 822fda2, the commit before #382. All of them use
+`CLMDriverConfig()`, so `use_aquifer_layer = false`.
+
+**Unchanged by #382 (bit-identical printed gradients and FD):** `enzyme_driver_reverse_whole`
+(dL/d(t_grnd) = −2.86850579e−8), `_fullstep` and `enzyme_clm_drv_reverse` (same value),
+`enzyme_multistep_reverse` (2.36114321e+2), `_forced` (2.77574493e+2), `_gpp` Part A
+(1.65082275e+2), `calibrate_streamflow_ad` (gates 1 and 2) and `_multi` (5/5 basins).
+These scripts start from a warmed state in which the water table sits at bedrock. That
+holds because production `clm_drv!` re-diagnoses zwt from an unsaturated profile and
+clips it at bedrock, and leaves `qcharge = 0`. At that state the old aquifer
+`water_table!` changes nothing. The new perched/θ-based diagnosis gives bedrock again,
+and the clip has no effect. None of these losses reads `qflx_drain`. The perched water
+table and the frost table only enter `satexcess_cal!` through a branch that is off in
+these windows.
+
+**Changed by #382: scripts that set zwt by hand.** `calibrate_streamflow_ad_real`,
+`_seasonal` and `_snow` write `zwt = zi_bedrock − 1 m` to switch on the power-law
+baseflow. The old host phase kept that zwt: with `qcharge = 0` the aquifer routine left
+it alone. The production diagnosis overwrites it on the first step, so zwt returns to
+bedrock, the head is 0, and dL/d(baseflow_scalar) is exactly 0 for both AD and FD. All
+three gates then failed as VACUOUS. The old nonzero baseflow gradients were therefore
+gradients of a water table frozen at the hand-set depth, not of the production model.
+The scripts now set the wet state on the moisture profile (`wet_profile!`: saturate the
+layers below zi_bedrock − head, then re-diagnose zwt). The baseflow sink drains the
+first saturated layer (jwt+1, as the script comments always said) instead of the bedrock
+layer, so the diagnosed water table falls as the aquifer drains. In the 7-day window
+zwt goes from 1.325 to 1.554 m, and baseflow stays on in 336/336 steps.
+
+| script | before #382 | after #382, unfixed | after fix |
+|---|---|---|---|
+| `_real` gate, ∂L/∂fff | −4.344527 (FD rel 3.9e−8) | 22.18363 (FD rel 2.2e−6) | −4.884137 (FD rel 6.5e−8) |
+| `_real` gate, ∂L/∂baseflow_scalar | 9.598658e4 (FD rel 1.2e−13) | 0, VACUOUS → gate FAIL | 1.029781e5 (FD rel 9.5e−8) |
+| `_real` 7-day calibration, KGE: start → AD / DDS | −1.668 → 0.723 / 0.490 | not run | −9.911 → −0.320 / 0.622 |
+| `_snow` gate, ∂L/∂(θ_snow, fff, bf) | 4.678e−7, −2.909e−7, 2.646e−4 | 2.174e−7, −1.981e−7, 0 → FAIL | 4.356e−7, −2.800e−7, 2.141e−4 (FD rel ≤ 9.4e−9) |
+| `_seasonal` Stage A, 30 d | −1.669739e2, 8.460133e5 | — | 1.183595e2, 1.439947e6 (FD rel 2.1e−10) |
+| `_seasonal` Stage A, 90 d | 2.410578e2, 6.781069e6 | — | −2.523242e3, 2.365639e7 (FD rel ≤ 2.9e−10) |
+
+The seasonal gate needed a smaller FD step. Over 30–90 days the production objective is
+piecewise smooth in baseflow_scalar. The θ-diagnosed zwt is a piecewise-linear
+interpolation between layer nodes, and the sink moves between layers. Within ±1 % of θ
+the slope varies from 1.4e6 to 4.7e6. With the old 1e−3 relative step, FD differed from
+AD by 0.41 (30 d) and 1.4e−2 (90 d). Steps of 1e−4 to 1e−6 agree with AD to 9 digits.
+`CLM_FD_REL` now defaults to 1e−5. The AD calibration in `_real` now stalls at
+KGE −0.32, behind DDS: it fits SSE, and the kinked objective favours derivative-free
+search. That is a finding about this objective, not about the gradient.
+
+**Other fixes (independent of #382).**
+- `enzyme_driver_reverse.jl` [A]: `canopy_fluxes!` has seeded `z0mv_patch` from
+  `canopystate.z0m_patch` since 0e23b3e. The fixture left `z0m_patch` NaN, so the
+  real-canopy reference returned t_veg = NaN. With `z0m_patch = 0.5` (equal to its z0mv),
+  [A] rel 9.8e−10, [B] 3.3e−9 and [C] 3.8e−7 all pass. `enzyme_canopy_mirror.jl`,
+  `enzyme_canopy_psn.jl`, `enzyme_compositional_canopy.jl` and `enzyme_phs_canopy.jl`
+  have the same fixture and were not re-run.
+- `enzyme_driver_reverse_hydro.jl` [G]: the warmed state has `qcharge = 0` with zwt at
+  bedrock. That is the kink between the aquifer routine's rising and deepening branches,
+  so the reverse returned the one-sided value 0 while central FD gave −55.67. At
+  `qcharge = 1e−4` (`CLM_QCHARGE0`) the check gives −55.6449479 for both (rel 1.1e−11).
+- The default data paths in seven of the scripts now honour `SYMFLUENCE_DATA`.
+
+**Still looks wrong (not fixed here).** The decomposed canopy reverse
+(`cf_rev_init!` / `cf_rev_energy!`) differs from production `canopy_fluxes!` in two
+ways.
+- It never copies `z0m_patch` into `z0mv_patch` before the roughness blend.
+- It never updates `efeb`, which production updates in its convergence kernel.
+
+As a result `canopy_rev_converged_n` never sees `dele` shrink. On the Bow state in
+`enzyme_clm_drv_reverse.jl` it returns itmax = 40, where production converges in
+11 / 8 iterations. The sign-change limiter (`efe·efeb < 0`) also never fires in the
+decomposed forward. The script FD checks still pass because they difference the same
+decomposed forward. Fixing this changes the CUDA-validated canopy phases, so it needs
+its own change and a GPU re-run.
+
 ## Still open
 
 - The CUDA.jl artifact runtime is 13.2 against a 13.3 driver; CUDA.jl logs

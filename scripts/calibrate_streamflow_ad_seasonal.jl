@@ -115,7 +115,16 @@ function baseflow_cal!(b, aux)
         nb = col.nbedrock[c]; zi_bed = col.zi[c, nb + jz]; zw = sh.zwt_col[c]
         q = zw <= zi_bed ? θ2 * tan(FT(pi)/180.0 * col.topo_slope[c]) * (zi_bed - zw)^aux.n_baseflow : zero(zw)
         wf.qflx_drain_col[c] = q
-        jl = min(nb, aux.nlevsoi); nl = ws.h2osoi_liq_col[c, jl + aux.nlevsno] - q*aux.dt
+        # drain the first saturated layer (jwt+1, CLM's jwt search) so the θ-diagnosed zwt
+        # falls as the aquifer drains
+        jwt = aux.nlevsoi
+        for j in 1:aux.nlevsoi
+            if zw <= col.zi[c, j + jz]
+                jwt = j - 1
+                break
+            end
+        end
+        jl = min(jwt + 1, nb, aux.nlevsoi); nl = ws.h2osoi_liq_col[c, jl + aux.nlevsno] - q*aux.dt
         ws.h2osoi_liq_col[c, jl + aux.nlevsno] = nl > 0 ? nl : ws.h2osoi_liq_col[c, jl + aux.nlevsno]
     end
     return nothing
@@ -124,6 +133,31 @@ function accum_runoff!(b, aux)
     wf = b.inst.water.waterfluxbulk_inst.wf; s = zero(eltype(b.series))
     @inbounds for c in aux.cols; s += wf.qflx_surf_col[c] + wf.qflx_drain_col[c]; end
     b.series[aux.k] += s
+    return nothing
+end
+
+# Wet initial state with the water table `head` m above bedrock (same as
+# calibrate_streamflow_ad_real.jl). With use_aquifer_layer = false (CLM5 default) zwt is
+# re-diagnosed from the moisture profile every step and clipped at bedrock, so a zwt
+# written directly is lost on the first step. Saturate the layers below
+# zi_bedrock − head instead and re-diagnose zwt from that profile.
+function wet_profile!(inst, bounds, filt, head)
+    joff = C.varpar.nlevsno; nlevsoi = C.varpar.nlevsoi
+    ws = inst.water.waterstatebulk_inst.ws; col = inst.column
+    for c in (bounds.begc:bounds.endc)
+        filt.hydrologyc[c] || continue
+        nb = col.nbedrock[c]
+        ztop = max(0.3, col.zi[c, nb + joff + 1] - head)
+        for j in 1:min(nb, nlevsoi)
+            col.z[c, j + joff] > ztop || continue
+            vsat = inst.soilstate.watsat_col[c, j] * col.dz[c, j + joff]
+            ice  = ws.h2osoi_ice_col[c, j + joff] / C.DENICE
+            ws.h2osoi_liq_col[c, j + joff] = max(0.0, vsat - ice) * C.DENH2O
+        end
+    end
+    C.theta_based_water_table!(inst.soilhydrology, inst.soilstate, ws, col.dz, col.z, col.zi,
+        col.nbedrock, filt.hydrologyc, bounds.begc:bounds.endc, nlevsoi)
+    C.clamp_zwt_to_bedrock!(inst.soilhydrology.zwt_col, filt.hydrologyc, col.nbedrock, col.zi, joff)
     return nothing
 end
 
@@ -148,14 +182,7 @@ function make_season(start::Date; ndays::Int, gain_fixed::Union{Float64,Nothing}
     # makes runoff baseflow-dominated (smooth); a SMALL head lets rain-driven surface runoff
     # dominate the timing (better correlation with flashy obs). Tunable via CLM_HEAD.
     head = parse(Float64, get(ENV, "CLM_HEAD", "1.0"))
-    if head > 0
-        jz = C.varpar.nlevsno + 1
-        for c in bounds.begc:bounds.endc
-            filt.hydrologyc[c] || continue
-            nb = inst.column.nbedrock[c]
-            inst.soilhydrology.zwt_col[c] = max(0.3, inst.column.zi[c, nb+jz] - head)
-        end
-    end
+    head > 0 && wet_profile!(inst, bounds, filt, head)
     hcols = Int[c for c in bounds.begc:bounds.endc if filt.hydrologyc[c]]
     obs_daily = read_obs_daily(start, ndays)
 
@@ -249,6 +276,15 @@ const EVAL_START = Date(get(ENV, "CLM_EVAL_START", "2005-06-01"))
 @printf("SEASONAL split-sample: domain=%s  NDAYS=%d (N=%d steps)  fff0=%.4f bf0=%.3e\n",
     DOMAIN, NDAYS, NSTEPS, FFF0, BFS0)
 
+# Relative central-FD step for the Stage A gate. With the CLM5 default water table
+# (use_aquifer_layer = false) zwt is diagnosed from the moisture profile by piecewise
+# linear interpolation between layer nodes, and the baseflow sink moves between layers as
+# zwt crosses them. Over a 30-90 day window the loss is therefore piecewise smooth in
+# baseflow_scalar, with slope changes within +-1 % of θ. A 1e-3 step straddles them (FD
+# rel error 0.4 at 30 d), while steps of 1e-4..1e-6 agree with the reverse gradient to
+# 9 digits. The pre-#382 host reverse list used the prognostic aquifer zwt, which hid this.
+const FD_REL = parse(Float64, get(ENV, "CLM_FD_REL", "1e-5"))
+
 # =============================================================================
 # STAGE A — checkpointed-gradient gate
 # =============================================================================
@@ -264,7 +300,7 @@ function stage_a()
     @printf("     flat     dL/dθ = [% .6e, % .6e]\n", gflat[1], gflat[2])
     @printf("     binomial dL/dθ = [% .6e, % .6e]\n", gbin[1], gbin[2])
     ok_a1 = true
-    for (j,name,h) in ((1,"fff",1e-3*FFF0),(2,"baseflow_scalar",1e-3*BFS0))
+    for (j,name,h) in ((1,"fff",FD_REL*FFF0),(2,"baseflow_scalar",FD_REL*BFS0))
         θa=copy(θp); θa[j]+=h; θb=copy(θp); θb[j]-=h
         fd=(c30.Loss(θa)-c30.Loss(θb))/(2h)
         rel_bf=abs(gbin[j]-fd)/max(abs(fd),1e-30); rel_fb=abs(gbin[j]-gflat[j])/max(abs(gflat[j]),1e-30)
@@ -280,7 +316,7 @@ function stage_a()
     @printf("     binomial dL/dθ = [% .6e, % .6e]   wall=%.1f s/gradient   peak coarse-checkpoints=%d (of %d steps)\n",
         gbinN[1], gbinN[2], t_grad, peak[], NSTEPS)
     ok_a2 = true
-    for (j,name,h) in ((1,"fff",1e-3*FFF0),(2,"baseflow_scalar",1e-3*BFS0))
+    for (j,name,h) in ((1,"fff",FD_REL*FFF0),(2,"baseflow_scalar",FD_REL*BFS0))
         θa=copy(θp); θa[j]+=h; θb=copy(θp); θb[j]-=h
         fd=(cN.Loss(θa)-cN.Loss(θb))/(2h); rel=abs(gbinN[j]-fd)/max(abs(fd),1e-30)
         vac = abs(gbinN[j])<1e-30 && abs(fd)<1e-30; ok = rel<1e-5 && !vac; ok_a2 &= ok

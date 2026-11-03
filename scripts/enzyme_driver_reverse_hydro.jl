@@ -199,6 +199,13 @@ function section_G(inst, bounds, filt, config)
     # zwt is the live state water_table! evolves here: zwt -= qcharge·dtime/… (the
     # aquifer-recharge integration). wa stays at baseline in this regime (a flat branch),
     # so seed zwt and perturb qcharge — d(zwt)/d(qcharge) is smooth and nonzero.
+    # The warmed inst has qcharge = 0 and zwt at bedrock (the default non-aquifer
+    # water table is diagnosed and clipped at bedrock), which is exactly the kink between
+    # the rising and deepening branches: there the reverse returns the one-sided
+    # (deepening) derivative 0 and the central FD averages the two sides. Evaluate at a
+    # small positive recharge instead (CLM_QCHARGE0, mm/s), with FD steps relative to it.
+    q0 = parse(Float64, get(ENV, "CLM_QCHARGE0", "1e-4"))
+    inst = deepcopy(inst); inst.soilhydrology.qcharge_col[c0] = q0
     L(s) = sum(abs2, s.soilhydrology.zwt_col)
     let s = deepcopy(inst); wt_phase!(s, wtaux)
         @printf("standalone primal: zwt[%d]=%.6f qcharge[%d]=%.3e (finite: %s)\n", c0,
@@ -210,7 +217,7 @@ function section_G(inst, bounds, filt, config)
         wt_phase!(s, wtaux); return L(s)
     end
     cfd(h) = (L_pert(h) - L_pert(-h)) / (2h)
-    g_fd = (4*cfd(5e-3) - cfd(1e-2)) / 3
+    g_fd = (4*cfd(5e-3*q0) - cfd(1e-2*q0)) / 3
     seed!(db, b) = (db.soilhydrology.zwt_col .= 2 .* b.soilhydrology.zwt_col)
     db = C.compositional_reverse!(Any[(wt_phase!, (wtaux,))], deepcopy(inst), seed!)
     g_rev = db.soilhydrology.qcharge_col[c0]

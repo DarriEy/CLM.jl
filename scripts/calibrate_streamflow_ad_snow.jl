@@ -69,6 +69,31 @@ function build_snowpack(; nacc=48, nonset=2)
     return inst, bounds, filt, config
 end
 
+# Wet initial state with the water table `head` m above bedrock (same as
+# calibrate_streamflow_ad_real.jl). With use_aquifer_layer = false (CLM5 default) zwt is
+# re-diagnosed from the moisture profile every step and clipped at bedrock, so a zwt
+# written directly is lost on the first step. Saturate the layers below
+# zi_bedrock - head instead and re-diagnose zwt from that profile.
+function wet_profile!(inst, bounds, filt, head)
+    joff = C.varpar.nlevsno; nlevsoi = C.varpar.nlevsoi
+    ws = inst.water.waterstatebulk_inst.ws; col = inst.column
+    for c in (bounds.begc:bounds.endc)
+        filt.hydrologyc[c] || continue
+        nb = col.nbedrock[c]
+        ztop = max(0.3, col.zi[c, nb + joff + 1] - head)
+        for j in 1:min(nb, nlevsoi)
+            col.z[c, j + joff] > ztop || continue
+            vsat = inst.soilstate.watsat_col[c, j] * col.dz[c, j + joff]
+            ice  = ws.h2osoi_ice_col[c, j + joff] / C.DENICE
+            ws.h2osoi_liq_col[c, j + joff] = max(0.0, vsat - ice) * C.DENH2O
+        end
+    end
+    C.theta_based_water_table!(inst.soilhydrology, inst.soilstate, ws, col.dz, col.z, col.zi,
+        col.nbedrock, filt.hydrologyc, bounds.begc:bounds.endc, nlevsoi)
+    C.clamp_zwt_to_bedrock!(inst.soilhydrology.zwt_col, filt.hydrologyc, col.nbedrock, col.zi, joff)
+    return nothing
+end
+
 inst, bounds, filt, config = build_snowpack()
 hc = filt.hydrologyc
 const HCOLS = Int[c for c in bounds.begc:bounds.endc if hc[c]]
@@ -76,9 +101,7 @@ c0 = HCOLS[1]
 nsno = C.varpar.nlevsno
 # shallow water table (1 m head above bedrock) so the baseflow lever is non-vacuous (flagged;
 # same device as the seasonal script).
-let jz=nsno+1
-    for c in HCOLS; nb=inst.column.nbedrock[c]; inst.soilhydrology.zwt_col[c]=max(0.3, inst.column.zi[c,nb+jz]-1.0); end
-end
+wet_profile!(inst, bounds, filt, 1.0)
 snl = inst.column.snl[c0]
 @printf("snowpack built: col %d  snl=%d (%d snow layers)  h2osno=%.3f mm\n",
     c0, snl, -snl, sum(inst.water.waterstatebulk_inst.ws.h2osoi_ice_col[c0, max(1,nsno+snl+1):nsno]))
@@ -167,7 +190,12 @@ function baseflow_cal!(b, aux)
         nb=col.nbedrock[c]; zi_bed=col.zi[c,nb+jz]; zw=sh.zwt_col[c]
         q = zw<=zi_bed ? θ2*tan(FT(pi)/180.0*col.topo_slope[c])*(zi_bed-zw)^aux.n_baseflow : zero(zw)
         wf.qflx_drain_col[c]=q
-        jl=min(nb,aux.nlevsoi); nl=ws.h2osoi_liq_col[c,jl+aux.nlevsno]-q*aux.dt
+        # drain the first saturated layer (jwt+1, CLM's jwt search) so the θ-diagnosed zwt falls
+        jwt=aux.nlevsoi
+        for j in 1:aux.nlevsoi
+            if zw<=col.zi[c,j+jz]; jwt=j-1; break; end
+        end
+        jl=min(jwt+1,nb,aux.nlevsoi); nl=ws.h2osoi_liq_col[c,jl+aux.nlevsno]-q*aux.dt
         ws.h2osoi_liq_col[c,jl+aux.nlevsno] = nl>0 ? nl : ws.h2osoi_liq_col[c,jl+aux.nlevsno]
     end
     return nothing
@@ -289,9 +317,7 @@ function make_snow_season(start::Date; ndays::Int, gain_fixed=nothing)
         (inst,bounds,filt,config)
     end
     hcols=Int[c for c in B.begc:B.endc if F.hydrologyc[c]]
-    let jz=C.varpar.nlevsno+1
-        for c in hcols; nb=I.column.nbedrock[c]; I.soilhydrology.zwt_col[c]=max(0.3,I.column.zi[c,nb+jz]-1.0); end
-    end
+    wet_profile!(I, B, F, 1.0)
     smask=let sl=I.solarabs.sabg_lyr_patch
         [isfinite(sl[p,j]) && sl[p,j]!=C.SPVAL for p in axes(sl,1), j in axes(sl,2)]
     end
