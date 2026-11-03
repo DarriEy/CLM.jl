@@ -188,10 +188,12 @@ calibration pipeline and was deliberately **not** run; these are the baseline-sk
   reverse sweep went from 13425 s to 4254 s. That comes from a device-only Enzyme
   type-analysis lattice (3, 64), which gives identical gradients in all 36 phases, and a
   narrow view for the scatter-only gnet reduce phase.
-  Open: the CPU *host* reverse list's `watertable_rev_phase!` calls the aquifer
-  `water_table!` even when `use_aquifer_layer = false`, unlike production `clm_drv!`, so
-  host-list gradients through `zwt` / `qflx_drain` differ from production. CPU reverse
-  behaviour is otherwise unchanged. Enzyme has no Metal device
+  The CPU *host* reverse list's `watertable_rev_phase!` now follows production
+  `clm_drv!`: perched + theta-based water table when `use_aquifer_layer = false`, the
+  aquifer `water_table!` only when true, and the bedrock clip either way. It used to call
+  the aquifer routine unconditionally, so host-list gradients through `zwt` /
+  `qflx_drain` differed from production. `test/test_watertable_reverse.jl` checks that
+  host, device and production agree. Enzyme has no Metal device
   support; Metal's primal Atomix path is unchanged.
 
 ## 5. Fortran parity breadth
