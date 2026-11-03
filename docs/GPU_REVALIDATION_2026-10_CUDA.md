@@ -315,16 +315,34 @@ picks a layer away from TFRZ. The all-leaf comparison treats a leaf whose larges
 difference is ≤1e-15 as agreeing; gate3 had 1e-20 gradients there that were exactly 0
 on the other backend.
 
-**Finding (CPU host list, not changed here):** the host reverse phase
-`watertable_rev_phase!` calls the aquifer `water_table!` unconditionally. Production
-`clm_drv!` uses `perched_water_table!` + `theta_based_water_table!` when
-`use_aquifer_layer = false`, which is the default and is what this domain uses, and the
-device list follows production. So gradients through `zwt` / `qflx_drain` differ between
-the CPU host list and production. In gate3 the wide loss with `zwt_col` and
+**Finding (CPU host list), fixed in `ad/host-watertable-production`:** the host reverse
+phase `watertable_rev_phase!` called the aquifer `water_table!` unconditionally and
+skipped the bedrock clip. Production `clm_drv!` uses `perched_water_table!` +
+`theta_based_water_table!` when `use_aquifer_layer = false` (the default, and what this
+domain uses), and clips zwt at bedrock either way. So host-list gradients through `zwt` /
+`qflx_drain` differed from production. In gate3 the wide loss with `zwt_col` and
 `qflx_drain_col` seeded showed this as rel 1 in `qflx_drain_col`, `zwt_col` and
-`column.zi`. Those two outputs are left out of the wide loss. The default loss does not
-touch them. Changing the host list changes CPU reverse results, so it is left for a
-separate change.
+`column.zi`.
+
+Both phases now follow production. The device aquifer branch also gains the bedrock
+clip, which it lacked. `test/test_watertable_reverse.jl` checks, for both
+`use_aquifer_layer` settings, that the host phase, the device phase (on the host) and
+the production block give bit-identical forward state, that the host and device Enzyme
+gradients through zwt / zwt_perched / qflx_drain agree to 1e-12, and that the host
+gradient matches FD. `zwt_col` and `qflx_drain_col` are back in the gate's wide loss.
+The default loss (soil temperature) does not depend on the water table, so
+dL/d(t_grnd) is unchanged.
+
+Gate on this branch (`gatewt1`, 37f1c6a, `CLM_REVERSE_CPU=1 CLM_REVERSE_FD=1
+CLM_REVERSE_EXTRA=1`, 6759 s wall): **PASS**.
+- dL/d(t_grnd[1]) is −3.44327925 on CUDA and CPU (absdiff 2.1e-14), unchanged; FD rel
+  1.4e-9.
+- Default-loss all-leaf CUDA vs CPU: 2.9e-14.
+- Wide loss, now with `zwt_col` and `qflx_drain_col` seeded: all 3484 leaves CUDA vs
+  CPU (host list) worst 1.1e-14, 481 nonzero entries. The seven FD probes are unchanged
+  from gate4 (≤1.7e-8). With `use_aquifer_layer = false` the perched/theta-based water
+  table does not write `qflx_drain`, so its seed passes straight through on both lists.
+- CUDA phase diff of `watertable_dev_rev_phase!`: rel 4.0e-16, deterministic.
 
 ### Compile time
 

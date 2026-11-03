@@ -870,8 +870,13 @@ function soilwater_dev_rev_phase!(b, aux)
 end
 
 # --------------------------------------------------------------------------
-# water_table! (aquifer / ThetaBasedWaterTable). The single Bool kwarg is resolved
-# inside the wrapper (primal-time), so Enzyme differentiates the body without a
+# Water table, as production clm_drv! does it (clm_driver.jl, HydrologyNoDrainage):
+# with use_aquifer_layer the aquifer water_table! (frost table recomputed); without it
+# (the CLM5 default) PerchedWaterTable + ThetaBasedWaterTable diagnose zwt from the
+# moisture profile; then zwt is clipped at bedrock either way. Both the host and the
+# device phase follow that branch structure (the host phase used to call the aquifer
+# water_table! unconditionally and skip the clip). The Bool flags are resolved inside
+# the wrappers (primal-time), so Enzyme differentiates the bodies without a
 # kwarg-NamedTuple thunk.
 # --------------------------------------------------------------------------
 watertable_rev_aux(bounds, filt, config; dtime = 1800.0) = (;
@@ -886,11 +891,23 @@ watertable_rev_aux(bounds, filt, config; dtime = 1800.0) = (;
 
 function watertable_rev_phase!(b, aux)
     i = b.inst
-    water_table!(i.soilhydrology, i.soilstate,
-        i.temperature.t_soisno_col, i.water.waterstatebulk_inst.ws, i.water.waterfluxbulk_inst,
-        i.column.dz, i.column.z, i.column.zi,
-        aux.hydrologyc, aux.bc_col, aux.nlevsoi, aux.dtime;
-        recompute_frost_table = aux.recompute_frost_table)
+    ws = i.water.waterstatebulk_inst.ws
+    if aux.use_aquifer_layer
+        water_table!(i.soilhydrology, i.soilstate,
+            i.temperature.t_soisno_col, ws, i.water.waterfluxbulk_inst,
+            i.column.dz, i.column.z, i.column.zi,
+            aux.hydrologyc, aux.bc_col, aux.nlevsoi, aux.dtime;
+            recompute_frost_table = aux.recompute_frost_table)
+    else
+        perched_water_table!(i.soilhydrology, i.soilstate,
+            i.temperature.t_soisno_col, ws, i.column.dz, i.column.z,
+            i.column.zi, aux.hydrologyc, aux.bc_col, aux.nlevsoi)
+        theta_based_water_table!(i.soilhydrology, i.soilstate, ws,
+            i.column.dz, i.column.z, i.column.zi, i.column.nbedrock,
+            aux.hydrologyc, aux.bc_col, aux.nlevsoi)
+    end
+    clamp_zwt_to_bedrock!(i.soilhydrology.zwt_col, aux.hydrologyc,
+        i.column.nbedrock, i.column.zi, aux.joff)
     return nothing
 end
 function watertable_dev_rev_phase!(b, aux)
@@ -924,6 +941,8 @@ function watertable_dev_rev_phase!(b, aux)
         aux.nlevsoi, aux.joff, aux.joff_zi, aux.realpar,
         aux.recompute_frost_table;
         ndrange=length(aux.hydrologyc))
+    clamp_zwt_to_bedrock!(i.soilhydrology.zwt_col, aux.hydrologyc,
+        i.column.nbedrock, i.column.zi, aux.joff)
     return nothing
 end
 

@@ -114,16 +114,14 @@ _getpath(x, p::AbstractString) = foldl((o, f) -> o === nothing || !hasproperty(o
                                         nothing : getproperty(o, Symbol(f)), split(p, "."); init = x)
 
 # Output fields of the wide loss (paths under inst). Missing paths are skipped.
-# zwt_col / qflx_drain_col are left out: the CPU HOST phase list's watertable_rev_phase!
-# calls the aquifer water_table! unconditionally, while production clm_drv! (and the
-# device list) use perched + theta-based water tables when use_aquifer_layer = false,
-# so the two lists legitimately differ there (see docs/GPU_REVALIDATION_2026-10_CUDA.md).
+# (zwt_col / qflx_drain_col are back in: the host and device water-table phases now
+# both follow production clm_drv!; test/test_watertable_reverse.jl.)
 const WIDE_FIELDS = ["temperature.t_soisno_col", "temperature.t_grnd_col",
     "temperature.t_veg_patch", "water.waterstatebulk_inst.ws.h2osoi_liq_col",
     "water.waterstatebulk_inst.ws.h2osoi_ice_col", "water.waterstatebulk_inst.ws.h2osfc_col",
-    "energyflux.eflx_sh_tot_patch", "energyflux.eflx_lh_tot_patch",
+    "soilhydrology.zwt_col", "energyflux.eflx_sh_tot_patch", "energyflux.eflx_lh_tot_patch",
     "energyflux.eflx_soil_grnd_patch", "water.waterfluxbulk_inst.wf.qflx_surf_col",
-    "water.waterfluxbulk_inst.wf.qflx_infl_col"]
+    "water.waterfluxbulk_inst.wf.qflx_drain_col", "water.waterfluxbulk_inst.wf.qflx_infl_col"]
 
 # Random weights per field, zero on non-finite/spval entries of the final state, scaled
 # by 1/max|field| so every field contributes at a comparable size.
